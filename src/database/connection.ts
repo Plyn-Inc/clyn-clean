@@ -13,9 +13,7 @@ export function getDatabaseBackend(): DatabaseBackend {
 
 function resolveDbPath(): string {
   if (process.env.DATABASE_PATH) return process.env.DATABASE_PATH;
-  const devDir = path.join(process.cwd(), ".local-data");
-  if (!fs.existsSync(devDir)) fs.mkdirSync(devDir, { recursive: true });
-  return path.join(devDir, "cleaning-reservation.db");
+  return path.join(process.cwd(), ".local-data", "cleaning-reservation.db");
 }
 
 export const DB_PATH = resolveDbPath();
