@@ -1,0 +1,40 @@
+@import "tailwindcss";
+
+:root {
+  --background: #FAFAF8;
+  --foreground: #1A2230;
+
+  --ink: #1A2230;
+  --ink-soft: #4A5568;
+  --navy: #16213A;
+  --navy-deep: #0E1626;
+  --mint: #1FA37A;
+  --mint-soft: #E3F5EE;
+  --mint-bright: #2DD4A8;
+  --sand: #FAFAF8;
+  --sand-deep: #F0EEE6;
+  --line: #E4E1D6;
+  --amber: #D98E2F;
+  --rose: #C2543C;
+
+  --radius-card: 18px;
+  --radius-pill: 999px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-pretendard);
+  --font-display: var(--font-display);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-pretendard), -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+}
+
+::selection {
+  background: var(--mint-bright);
+  color: var(--navy-deep);
+}
