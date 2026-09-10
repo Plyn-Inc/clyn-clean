@@ -1,234 +1,209 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { CalendarStatus } from "@/lib/types";
 import { toKSTDateString, getMonthRangeKST } from "@/lib/utils";
+import type { PublicSlotStatus } from "@/lib/types";
 
-// 서버 API 응답 타입
-interface SlotView {
-  date: string;
-  timeSlot: string;
-  status: CalendarStatus;
-  effectiveStatus: CalendarStatus;
-  remaining: number;
-  memo: string | null;
+/**
+ * 공개 예약 캘린더.
+ *
+ * 고객에게 예약 수량을 노출하지 않는다 (요구사항 21·33).
+ * 서버 공개 API(/api/calendar)는 capacity/remaining/bookedCount를 반환하지 않으며,
+ * 이 컴포넌트는 publicStatus / selectable만 사용한다.
+ */
+interface PublicSlot {
+  publicStatus: PublicSlotStatus;
+  selectable: boolean;
+  consultRequired: boolean;
 }
-interface DaySlot {
+interface PublicDay {
   date: string;
-  allDay: SlotView | null;
-  morning: SlotView;
-  afternoon: SlotView;
+  morning: PublicSlot;
+  afternoon: PublicSlot;
 }
 
 export type SelectedSlot = { date: string; timeSlot: "morning" | "afternoon" };
 
-const STATUS_DAY_STYLE: Record<CalendarStatus, string> = {
-  available: "text-[var(--ink)]",
-  closed: "text-[#A3A096]",
-  consult_required: "text-[var(--amber)]",
-  off: "text-[#CFCDC2]",
+/** 공개상태별 슬롯 스타일 — 수량 대신 상태 문구만 표시한다 */
+const SLOT_STYLE: Record<PublicSlotStatus, string> = {
+  "예약가능": "bg-[var(--mint-soft)] text-[var(--mint)] hover:bg-[var(--mint-bright)] hover:text-white cursor-pointer",
+  "예약진행 중": "bg-[#FBE9D3] text-[var(--amber)] cursor-not-allowed",
+  "예약완료": "bg-[var(--sand-deep)] text-[#A3A096] cursor-not-allowed",
 };
 
-const SLOT_AVAIL = "bg-[var(--mint-soft)] text-[var(--mint)] hover:bg-[var(--mint-bright)] hover:text-white cursor-pointer";
-const SLOT_CLOSED = "bg-[var(--sand-deep)] text-[#A3A096] cursor-not-allowed";
-const SLOT_CONSULT = "bg-[#FBE9D3] text-[var(--amber)] cursor-pointer";
-const SLOT_OFF = "bg-transparent text-[#CFCDC2] cursor-not-allowed line-through";
-const SLOT_SELECTED = "ring-2 ring-[var(--navy)] ring-offset-1";
+/** 캘린더 칸에 들어갈 짧은 라벨 (수량 없음) */
+const SHORT_LABEL: Record<PublicSlotStatus, string> = {
+  "예약가능": "가능",
+  "예약진행 중": "진행중",
+  "예약완료": "완료",
+};
 
-function slotStyle(status: CalendarStatus, isSelected: boolean): string {
-  const base =
-    status === "available" ? SLOT_AVAIL
-    : status === "consult_required" ? SLOT_CONSULT
-    : status === "off" ? SLOT_OFF
-    : SLOT_CLOSED;
-  return `${base} ${isSelected ? SLOT_SELECTED : ""}`;
-}
+const SLOT_SELECTED = "ring-2 ring-[var(--navy)] ring-offset-1";
 
 export default function ReservationCalendar({
   onSelectSlot,
   onSelectConsultDate,
+  selectedSlot,
 }: {
   onSelectSlot: (slot: SelectedSlot) => void;
   onSelectConsultDate: (date: string) => void;
+  selectedSlot?: SelectedSlot | null;
 }) {
   const todayKST = useMemo(() => toKSTDateString(new Date()), []);
   const [cursor, setCursor] = useState(() => {
     const now = new Date();
     return { year: now.getFullYear(), month: now.getMonth() };
   });
-  const [days, setDays] = useState<Record<string, DaySlot>>({});
+  const [days, setDays] = useState<Record<string, PublicDay>>({});
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState<SelectedSlot | null>(null);
-
-  const { year, month } = cursor;
 
   useEffect(() => {
     let cancelled = false;
-    const { start, end } = getMonthRangeKST(year, month);
-
+    const { start, end } = getMonthRangeKST(cursor.year, cursor.month + 1);
     fetch(`/api/calendar?start=${start}&end=${end}`)
       .then((r) => r.json())
-      .then((data: { days: DaySlot[] }) => {
+      .then((data: { days?: PublicDay[] }) => {
         if (cancelled) return;
-        const map: Record<string, DaySlot> = {};
+        const map: Record<string, PublicDay> = {};
         for (const d of data.days ?? []) map[d.date] = d;
         setDays(map);
         setLoading(false);
       })
-      .catch(() => { if (!cancelled) setLoading(false); });
+      .catch(() => {
+        if (!cancelled) setLoading(false);
+      });
     return () => { cancelled = true; };
-  }, [year, month]);
+  }, [cursor]);
 
-  // 캘린더 셀 계산
-  const firstWeekday = new Date(year, month, 1).getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const cells: (string | null)[] = [];
-  for (let i = 0; i < firstWeekday; i++) cells.push(null);
-  for (let d = 1; d <= daysInMonth; d++) {
-    cells.push(
-      `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`
-    );
+  const monthLabel = `${cursor.year}년 ${cursor.month + 1}월`;
+  const firstDay = new Date(cursor.year, cursor.month, 1);
+  const lastDate = new Date(cursor.year, cursor.month + 1, 0).getDate();
+  const leadingBlanks = firstDay.getDay();
+
+  function moveMonth(delta: number) {
+    setLoading(true);
+    setCursor((c) => {
+      const d = new Date(c.year, c.month + delta, 1);
+      return { year: d.getFullYear(), month: d.getMonth() };
+    });
   }
 
-  function getPastSlot(): SlotView {
-    return { date: "", timeSlot: "morning", status: "off", effectiveStatus: "off", remaining: 0, memo: null };
-  }
-
-  function getSlot(dateStr: string, slot: "morning" | "afternoon"): SlotView {
-    if (dateStr < todayKST) return getPastSlot();
+  function getSlot(dateStr: string, slot: "morning" | "afternoon"): PublicSlot {
     const day = days[dateStr];
-    if (!day) {
-      // 서버 설정 없는 날짜 → 기본 available
-      return { date: dateStr, timeSlot: slot, status: "available", effectiveStatus: "available", remaining: 1, memo: null };
-    }
+    if (!day) return { publicStatus: "예약완료", selectable: false, consultRequired: false };
     return slot === "morning" ? day.morning : day.afternoon;
   }
 
-  function handleSlotClick(dateStr: string, slot: "morning" | "afternoon") {
-    const view = getSlot(dateStr, slot);
-    if (view.effectiveStatus === "available") {
-      const newSelected = { date: dateStr, timeSlot: slot };
-      setSelected(newSelected);
-      onSelectSlot(newSelected);
-    } else if (view.effectiveStatus === "consult_required") {
-      onSelectConsultDate(dateStr);
-    }
-  }
-
-  function prevMonth() {
-    setCursor((c) => c.month === 0 ? { year: c.year - 1, month: 11 } : { year: c.year, month: c.month - 1 });
-  }
-  function nextMonth() {
-    setCursor((c) => c.month === 11 ? { year: c.year + 1, month: 0 } : { year: c.year, month: c.month + 1 });
-  }
-
-  // 날짜 전체가 off/closed/consult인지 (헤더 색상 결정용)
-  function getDayStatus(dateStr: string): CalendarStatus {
-    if (dateStr < todayKST) return "off";
-    const day = days[dateStr];
-    if (!day) return "available";
-    // all_day 설정이 있으면 그게 대표 상태
-    if (day.allDay) return day.allDay.effectiveStatus;
-    // 둘 다 off면 off, 하나라도 available이면 available
-    const m = day.morning.effectiveStatus;
-    const a = day.afternoon.effectiveStatus;
-    if (m === "off" && a === "off") return "off";
-    if (m === "available" || a === "available") return "available";
-    if (m === "consult_required" || a === "consult_required") return "consult_required";
-    return "closed";
+  function handleSlotClick(dateStr: string, slot: "morning" | "afternoon", view: PublicSlot) {
+    if (view.consultRequired) { onSelectConsultDate(dateStr); return; }
+    if (!view.selectable) return;
+    onSelectSlot({ date: dateStr, timeSlot: slot });
   }
 
   return (
-    <div className="rounded-[var(--radius-card)] border border-[var(--line)] bg-white p-5 shadow-sm md:p-6">
-      {/* 헤더 */}
-      <div className="mb-5 flex items-center justify-between">
-        <button aria-label="이전 달" onClick={prevMonth}
-          className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--line)] text-[var(--ink-soft)] hover:bg-[var(--sand-deep)]">
+    <div className="rounded-[var(--radius-card)] border border-[var(--line)] bg-white p-4 shadow-sm md:p-5">
+      {/* 월 이동 */}
+      <div className="mb-4 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => moveMonth(-1)}
+          aria-label="이전 달"
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--line)] text-sm hover:bg-[var(--sand-deep)]"
+        >
           ‹
         </button>
-        <p className="font-display text-lg font-bold">{year}년 {month + 1}월</p>
-        <button aria-label="다음 달" onClick={nextMonth}
-          className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--line)] text-[var(--ink-soft)] hover:bg-[var(--sand-deep)]">
+        <p className="font-display text-base font-bold">{monthLabel}</p>
+        <button
+          type="button"
+          onClick={() => moveMonth(1)}
+          aria-label="다음 달"
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--line)] text-sm hover:bg-[var(--sand-deep)]"
+        >
           ›
         </button>
       </div>
 
-      {/* 요일 헤더 */}
-      <div className="mb-2 grid grid-cols-7 text-center text-xs font-medium text-[var(--ink-soft)]">
-        {["일","월","화","수","목","금","토"].map((w) => (
-          <div key={w} className="py-1">{w}</div>
+      {/* 요일 */}
+      <div className="mb-1 grid grid-cols-7 gap-1 text-center text-xs font-medium text-[var(--ink-soft)]">
+        {["일", "월", "화", "수", "목", "금", "토"].map((d) => (
+          <div key={d} className="py-1">{d}</div>
         ))}
       </div>
 
-      {/* 날짜 셀 */}
-      <div className={`grid grid-cols-7 gap-1 ${loading ? "opacity-50" : ""}`}>
-        {cells.map((dateStr, idx) => {
-          if (!dateStr) return <div key={idx} />;
+      {loading ? (
+        <div className="py-16 text-center text-sm text-[var(--ink-soft)]">불러오는 중...</div>
+      ) : (
+        <div className="grid grid-cols-7 gap-1">
+          {Array.from({ length: leadingBlanks }).map((_, i) => (
+            <div key={`blank-${i}`} />
+          ))}
+          {Array.from({ length: lastDate }).map((_, i) => {
+            const dateNum = i + 1;
+            const dateStr = `${cursor.year}-${String(cursor.month + 1).padStart(2, "0")}-${String(dateNum).padStart(2, "0")}`;
+            const isPast = dateStr < todayKST;
+            const morning = getSlot(dateStr, "morning");
+            const afternoon = getSlot(dateStr, "afternoon");
+            const isSelMorning = selectedSlot?.date === dateStr && selectedSlot.timeSlot === "morning";
+            const isSelAfternoon = selectedSlot?.date === dateStr && selectedSlot.timeSlot === "afternoon";
 
-          const dayStatus = getDayStatus(dateStr);
-          const morningView = getSlot(dateStr, "morning");
-          const afternoonView = getSlot(dateStr, "afternoon");
-          const isSelectedMorning = selected?.date === dateStr && selected?.timeSlot === "morning";
-          const isSelectedAfternoon = selected?.date === dateStr && selected?.timeSlot === "afternoon";
-          const dayNum = parseInt(dateStr.slice(8), 10);
+            if (isPast) {
+              return (
+                <div key={dateStr} className="rounded-lg p-1 text-center opacity-35">
+                  <p className="mb-1 text-xs text-[#CFCDC2]">{dateNum}</p>
+                </div>
+              );
+            }
 
-          // all_day 설정(날짜 전체 차단)이면 단순 표시
-          const isBlocked = dayStatus === "off";
+            return (
+              <div key={dateStr} className="rounded-lg p-1 text-center">
+                <p className="mb-1 text-xs font-medium text-[var(--ink)]">{dateNum}</p>
 
-          return (
-            <div key={dateStr} className={`rounded-xl p-1 text-center ${isBlocked ? "opacity-40" : ""}`}>
-              {/* 날짜 숫자 */}
-              <p className={`mb-0.5 text-xs font-semibold ${STATUS_DAY_STYLE[dayStatus]}`}>{dayNum}</p>
+                <button
+                  type="button"
+                  disabled={!morning.selectable && !morning.consultRequired}
+                  onClick={() => handleSlotClick(dateStr, "morning", morning)}
+                  aria-label={`${dateStr} 오전 ${morning.publicStatus}`}
+                  className={`mb-0.5 min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${SLOT_STYLE[morning.publicStatus]} ${isSelMorning ? SLOT_SELECTED : ""}`}
+                >
+                  오전
+                  <span className="block text-[9px] opacity-80">
+                    {morning.consultRequired ? "상담" : SHORT_LABEL[morning.publicStatus]}
+                  </span>
+                </button>
 
-              {/* 오전 슬롯 */}
-              <button
-                disabled={morningView.effectiveStatus === "off" || morningView.effectiveStatus === "closed"}
-                onClick={() => handleSlotClick(dateStr, "morning")}
-                className={`mb-0.5 w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${slotStyle(morningView.effectiveStatus, isSelectedMorning)}`}
-              >
-                오전
-                {morningView.effectiveStatus === "available" && (
-                  <span className="block text-[9px] opacity-80">{morningView.remaining}건</span>
-                )}
-                {morningView.effectiveStatus === "closed" && <span className="block text-[9px]">마감</span>}
-                {morningView.effectiveStatus === "off" && <span className="block text-[9px]">-</span>}
-                {morningView.effectiveStatus === "consult_required" && <span className="block text-[9px]">상담</span>}
-              </button>
-
-              {/* 오후 슬롯 */}
-              <button
-                disabled={afternoonView.effectiveStatus === "off" || afternoonView.effectiveStatus === "closed"}
-                onClick={() => handleSlotClick(dateStr, "afternoon")}
-                className={`w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${slotStyle(afternoonView.effectiveStatus, isSelectedAfternoon)}`}
-              >
-                오후
-                {afternoonView.effectiveStatus === "available" && (
-                  <span className="block text-[9px] opacity-80">{afternoonView.remaining}건</span>
-                )}
-                {afternoonView.effectiveStatus === "closed" && <span className="block text-[9px]">마감</span>}
-                {afternoonView.effectiveStatus === "off" && <span className="block text-[9px]">-</span>}
-                {afternoonView.effectiveStatus === "consult_required" && <span className="block text-[9px]">상담</span>}
-              </button>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* 범례 */}
-      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-[var(--ink-soft)]">
-        <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded bg-[var(--mint-soft)]" />예약 가능</span>
-        <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded bg-[var(--sand-deep)]" />마감</span>
-        <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded bg-[#FBE9D3]" />상담 필요</span>
-        <span className="flex items-center gap-1"><span className="inline-block h-2.5 w-2.5 rounded bg-transparent border border-[#CFCDC2]" />휴무</span>
-      </div>
-
-      {/* 선택된 슬롯 안내 */}
-      {selected && (
-        <div className="mt-3 rounded-lg bg-[var(--mint-soft)] px-3 py-2 text-xs font-medium text-[var(--mint)]">
-          📅 {selected.date} {selected.timeSlot === "morning" ? "오전" : "오후"} 선택됨
-          <button onClick={() => { setSelected(null); }} className="ml-2 opacity-60 hover:opacity-100">✕</button>
+                <button
+                  type="button"
+                  disabled={!afternoon.selectable && !afternoon.consultRequired}
+                  onClick={() => handleSlotClick(dateStr, "afternoon", afternoon)}
+                  aria-label={`${dateStr} 오후 ${afternoon.publicStatus}`}
+                  className={`min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${SLOT_STYLE[afternoon.publicStatus]} ${isSelAfternoon ? SLOT_SELECTED : ""}`}
+                >
+                  오후
+                  <span className="block text-[9px] opacity-80">
+                    {afternoon.consultRequired ? "상담" : SHORT_LABEL[afternoon.publicStatus]}
+                  </span>
+                </button>
+              </div>
+            );
+          })}
         </div>
       )}
+
+      {/* 범례 — 3종 공개상태 */}
+      <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 border-t border-[var(--line)] pt-3 text-xs text-[var(--ink-soft)]">
+        <Legend color="bg-[var(--mint-soft)]" label="예약가능" />
+        <Legend color="bg-[#FBE9D3]" label="예약진행 중" />
+        <Legend color="bg-[var(--sand-deep)]" label="예약완료" />
+      </div>
     </div>
+  );
+}
+
+function Legend({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={`inline-block h-3 w-3 rounded ${color}`} />
+      {label}
+    </span>
   );
 }

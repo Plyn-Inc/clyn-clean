@@ -7,7 +7,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const connectionUrl = pathToFileURL(path.join(root, 'src/database/connection.ts')).href;
 const stubMap = new Map([
   ['next/server', pathToFileURL(path.join(root, 'tests/stubs/next-server.mjs')).href],
-  ['zod', pathToFileURL(path.join(root, 'tests/stubs/zod.mjs')).href],
   ['@/lib/session', pathToFileURL(path.join(root, 'tests/stubs/session.mjs')).href],
 ]);
 

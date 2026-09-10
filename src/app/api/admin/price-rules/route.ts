@@ -33,6 +33,8 @@ const ruleSchema = z.object({
   areaMin: z.number().min(0).max(MAX_AREA).finite(),
   areaMax: z.number().min(0).max(MAX_AREA).finite().nullable().optional(),
   basePrice: z.number().min(0).max(MAX_PRICE).finite(),
+  // 평형별 예약 선금. 총 청소금액에 포함되는 금액이며 추가 비용이 아니다.
+  depositAmount: z.number().min(0).max(MAX_PRICE).finite().optional(),
   isActive: z.boolean().optional().default(true),
   note: z.string().max(200).trim().optional().nullable(),
 }).superRefine((data, ctx) => {
@@ -82,7 +84,7 @@ export async function POST(req: NextRequest) {
         );
       }
 
-      const { id: editId, serviceType, basePrice, isActive, note } = parsed.data;
+      const { id: editId, serviceType, basePrice, depositAmount, isActive, note } = parsed.data;
       if (serviceType !== "입주청소" || !note || !FIXED_HOUSE_KEYS.has(note)) {
         return NextResponse.json(
           { error: "가격 설정은 등록된 입주청소 고정 상품만 수정할 수 있습니다." },
@@ -97,12 +99,28 @@ export async function POST(req: NextRequest) {
       );
       const targetId = editId ?? existing?.id;
 
+      // 예약금은 총 청소금액을 넘을 수 없다 (예약금은 총액에 포함되는 금액).
+      const nextDeposit =
+        depositAmount != null ? Math.round(depositAmount) : Math.round(existing?.deposit_amount ?? 0);
+      const nextBase = Math.round(basePrice);
+      if (nextDeposit > nextBase && nextBase > 0) {
+        return NextResponse.json(
+          {
+            error:
+              `예약금(${nextDeposit.toLocaleString("ko-KR")}원)은 ` +
+              `청소금액(${nextBase.toLocaleString("ko-KR")}원)보다 클 수 없습니다.`,
+          },
+          { status: 400 }
+        );
+      }
+
       await upsertPriceRule({
         id: targetId,
         service_type: "입주청소",
         area_min: 0,
         area_max: null,
-        base_price: Math.round(basePrice),
+        base_price: nextBase,
+        deposit_amount: nextDeposit,
         is_active: isActive !== false ? 1 : 0,
         note,
       });

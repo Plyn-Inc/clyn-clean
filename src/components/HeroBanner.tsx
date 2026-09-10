@@ -1,5 +1,8 @@
 "use client";
 
+import Image from "next/image";
+import { HERO_IMAGE } from "@/lib/images";
+
 export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phone: string }) {
   function scrollTo(id: string) {
     document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -7,9 +10,20 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
 
   return (
     <section className="relative overflow-hidden bg-[var(--navy)]">
-      <div className="absolute inset-0 opacity-[0.07]" aria-hidden>
-        <CalendarGridDecoration />
-      </div>
+      {/* 실제 입주청소 완료 현장 사진 — LCP 대상이므로 priority */}
+      <Image
+        src={HERO_IMAGE.src}
+        alt={HERO_IMAGE.alt}
+        fill
+        priority
+        sizes="100vw"
+        className="object-cover object-center"
+      />
+      {/* 텍스트 가독성을 위한 최소한의 gradient overlay */}
+      <div
+        className="absolute inset-0 bg-gradient-to-r from-[var(--navy-deep)]/92 via-[var(--navy)]/78 to-[var(--navy)]/45"
+        aria-hidden
+      />
 
       <div className="relative mx-auto max-w-6xl px-5 py-20 md:px-8 md:py-28">
         <p className="mb-4 inline-block rounded-full border border-white/20 px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint-bright)]">
@@ -59,20 +73,5 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
         {phone && <p className="mt-6 text-sm text-[#8B95A6]">전화 문의 {phone}</p>}
       </div>
     </section>
-  );
-}
-
-function CalendarGridDecoration() {
-  const cells = Array.from({ length: 42 });
-  return (
-    <div className="grid h-full grid-cols-7 gap-3 p-10">
-      {cells.map((_, i) => (
-        <div
-          key={i}
-          className="rounded-lg border border-white/40"
-          style={{ opacity: (i % 7 === 2 || i % 11 === 0) ? 0.9 : 0.25 }}
-        />
-      ))}
-    </div>
   );
 }

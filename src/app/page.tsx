@@ -3,7 +3,10 @@ import HeroBanner from "@/components/HeroBanner";
 import BookingSection from "@/components/booking/BookingSection";
 import ServiceList from "@/components/ServiceList";
 import WorkScopeSection from "@/components/WorkScopeSection";
-import ExtraOptionsSection from "@/components/ExtraOptionsSection";
+import PricingSection from "@/components/PricingSection";
+import BeforeAfterGallery from "@/components/BeforeAfterGallery";
+import CleaningPortfolio from "@/components/CleaningPortfolio";
+import CtaBanner from "@/components/CtaBanner";
 import ReviewsPreview from "@/components/ReviewsPreview";
 import BlogPreview from "@/components/BlogPreview";
 import ContactSection from "@/components/ContactSection";
@@ -32,9 +35,12 @@ export default async function Home() {
 
       <ServiceList />
       <WorkScopeSection />
-      <ExtraOptionsSection />
+      <PricingSection />
+      <BeforeAfterGallery />
+      <CleaningPortfolio />
       <ReviewsPreview />
       <BlogPreview />
+      <CtaBanner />
       <ContactSection company={company} />
     </>
   );

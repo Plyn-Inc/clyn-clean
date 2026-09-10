@@ -23,6 +23,7 @@ export const TIME_SLOT_LABEL: Record<TimeSlot, string> = {
 
 export type ReservationStatus =
   | "received"
+  | "approved_awaiting_deposit"
   | "awaiting_deposit"
   | "awaiting_admin_check"
   | "confirmed"
@@ -31,7 +32,8 @@ export type ReservationStatus =
   | "completed";
 
 export const RESERVATION_STATUS_LABEL: Record<ReservationStatus, string> = {
-  received: "예약 접수",
+  received: "예약 신청 접수 / 검토 중",
+  approved_awaiting_deposit: "예약 승인 / 예약금 입금 대기",
   awaiting_deposit: "선입금 대기",
   awaiting_admin_check: "선입금 확인 / 확정 대기",
   confirmed: "예약 확정",
@@ -97,6 +99,7 @@ export type ServiceType = (typeof SERVICE_TYPES)[number];
 export const HOUSE_TYPES_FIXED = [
   "원룸",
   "원룸 복층",
+  "1.5룸",
   "투룸",
   "쓰리룸",
 ] as const;
@@ -180,6 +183,23 @@ export const PET_TYPE_LABEL: Record<PetType, string> = {
 export interface Reservation {
   id: number;
   reservation_code: string;
+  // --- 최소 고객정보: 작업지역 (행정구역 동 기준) ---
+  area_sido: string | null;
+  area_sigungu: string | null;
+  area_dong: string | null;
+  // --- 서비스 동의 3종 (개별 저장) ---
+  core_principles_agreed: number;
+  service_terms_agreed: number;
+  additional_charge_agreed: number;
+  agreement_version: string | null;
+  agreed_at: string | null;
+  // --- 예약금 계좌 안내 / 입금기한 만료 추적 ---
+  account_revealed_at: string | null;
+  deposit_expired_at: string | null;
+  auto_released: number;
+  // --- 레거시(현 흐름 미사용, 스키마 호환 유지) ---
+  approved_at: string | null;
+  approved_by_admin_id: number | null;
   customer_name: string;
   customer_phone: string;
   customer_email: string | null;
@@ -274,4 +294,118 @@ export interface Post {
   is_published: number;
   created_at: string;
   updated_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// 평형별 예약 선금 (확정 기준)
+//
+// 예약 선금은 총 청소금액에 "포함"되는 금액이며 추가 비용이 아니다.
+//   총 청소금액 = 예약 선금 + 현장 잔금
+//
+// 실제 적용 값은 price_rules.deposit_amount(관리자 수정 가능)를 우선하며,
+// 이 상수는 최초 seed 및 fallback 기준값이다.
+// ---------------------------------------------------------------------------
+export const DEFAULT_DEPOSIT_BY_HOUSE_TYPE: Record<string, number> = {
+  "원룸": 60000,
+  "원룸 복층": 60000,
+  "1.5룸": 60000,
+  "투룸": 60000,
+  "쓰리룸": 60000,
+  "18평": 60000,
+  "24평": 60000,
+  "28평": 70000,
+  "32평": 70000,
+  "34평": 70000,
+  "38평": 80000,
+  "40평": 90000,
+};
+
+
+// ---------------------------------------------------------------------------
+// 확정 기본 청소금액 (VAT 별도)
+//
+// 이 상수는 price_rules seed 및 fallback의 single source of truth이다.
+// 실제 적용 금액은 price_rules.base_price(관리자 수정 가능)를 우선한다.
+// 홈페이지/견적 어디에서도 VAT를 자동 가산하지 않는다.
+// ---------------------------------------------------------------------------
+export const DEFAULT_BASE_PRICE_BY_HOUSE_TYPE: Record<string, number> = {
+  "원룸": 169000,
+  "원룸 복층": 219000,
+  "1.5룸": 229000,
+  "투룸": 249000,
+  "쓰리룸": 299000,
+  "18평": 309000,
+  "24평": 339000,
+  "28평": 389000,
+  "32평": 419000,
+  "34평": 449000,
+  "38평": 490000,
+  "40평": 529000,
+};
+
+/** 홈페이지/동의서 공통 VAT 안내 문구 (총액 자동 계산 금지) */
+export const VAT_NOTICE = "※ 표시된 청소금액은 VAT 별도입니다.";
+
+/**
+ * 상품별 표준 주거 구조 기준.
+ * 이 구조를 초과하는 범위는 현장 확인 후 고객 동의를 받아 추가 작업으로 진행한다.
+ */
+export const HOUSE_TYPE_STRUCTURE: Record<string, string> = {
+  "원룸": "한 공간의 방/주방, 욕실 1",
+  "원룸 복층": "2층 공간, 1층 주방·욕실·생활공간",
+  "1.5룸": "방 1, 주방 1, 욕실 1",
+  "투룸": "방 2, 욕실 1",
+  "쓰리룸": "방 3, 욕실 1, 다용도실 1",
+  "18평": "방 2, 거실 1, 욕실 1, 주방 1",
+  "24평": "방 3, 욕실 1, 거실 1, 주방 1, 다용도실",
+  "28평": "방 3, 욕실 2, 거실 1, 주방 1, 다용도실",
+  "32평": "방 3, 욕실 2, 거실 1, 주방 1, 다용도실",
+  "34평": "방 3, 욕실 2, 거실 1, 주방 1, 다용도실",
+  "38평": "방 4, 욕실 2, 거실 1, 주방 1, 다용도실",
+  "40평": "방 4, 욕실 2, 거실 1, 주방 1, 다용도실",
+};
+
+// ---------------------------------------------------------------------------
+// 고객 공개 예약 상태 (요구사항 21~22)
+//
+// 고객에게는 내부 상태값을 그대로 보여주지 않는다.
+// 수량(1건 남음 등)은 절대 표시하지 않는다.
+// ---------------------------------------------------------------------------
+export type PublicSlotStatus = "예약가능" | "예약진행 중" | "예약완료";
+
+/**
+ * 내부 예약상태 → 고객 공개상태 매핑.
+ *  - 예약진행 중: 해당 슬롯 고객이 예약금 입금 절차를 진행 중 (타 고객 예약 불가)
+ *  - 예약완료:   관리자가 예약금 입금을 실제 확인한 상태
+ */
+export function toPublicReservationStatus(status: ReservationStatus): PublicSlotStatus {
+  switch (status) {
+    case "confirmed":
+    case "completed":
+      return "예약완료";
+    case "received":
+    case "approved_awaiting_deposit":
+    case "awaiting_deposit":
+    case "awaiting_admin_check":
+      return "예약진행 중";
+    default:
+      // cancelled / consult_required 등은 슬롯을 점유하지 않는다
+      return "예약가능";
+  }
+}
+
+/**
+ * 슬롯 잔여 수량 → 고객 공개상태.
+ * remaining 값 자체는 고객에게 노출하지 않는다.
+ */
+export function toPublicSlotStatus(params: {
+  effectiveStatus: string;
+  remaining: number;
+  hasConfirmed: boolean;
+}): PublicSlotStatus {
+  if (params.effectiveStatus === "off" || params.effectiveStatus === "consult_required") {
+    return "예약완료";
+  }
+  if (params.remaining > 0) return "예약가능";
+  return params.hasConfirmed ? "예약완료" : "예약진행 중";
 }

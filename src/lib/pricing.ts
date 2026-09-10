@@ -1,6 +1,6 @@
 import { execute, queryRows } from "@/database/connection";
 import { getSetting } from "./settings";
-import { JIPJEONGRI_PACKAGES } from "./types";
+import { JIPJEONGRI_PACKAGES, DEFAULT_DEPOSIT_BY_HOUSE_TYPE, DEFAULT_BASE_PRICE_BY_HOUSE_TYPE } from "./types";
 
 export interface PriceRule {
   id: number;
@@ -8,6 +8,8 @@ export interface PriceRule {
   area_min: number;
   area_max: number | null;
   base_price: number;
+  /** 평형별 예약 선금(원). 총 청소금액에 포함되며 추가 비용이 아니다. */
+  deposit_amount: number;
   is_active: number;
   note: string | null;
 }
@@ -20,22 +22,15 @@ export interface OptionPrice {
   is_active: number;
 }
 
-export const MOVE_IN_BASE_PRICES: Record<string, number> = {
-  "원룸": 179000,
-  "원룸 복층": 279000,
-  "투룸": 269000,
-  "쓰리룸": 319000,
-  "18평": 329000,
-  "24평": 369000,
-  "28평": 420000,
-  "32평": 459000,
-  "34평": 489000,
-  "38평": 539000,
-  "40평": 579000,
-};
+/**
+ * 입주청소 기준가격.
+ * 실제 값은 types.ts의 DEFAULT_BASE_PRICE_BY_HOUSE_TYPE 한 곳에서만 정의한다.
+ * (가격을 여러 파일에 중복 하드코딩하지 않기 위함)
+ */
+export const MOVE_IN_BASE_PRICES: Record<string, number> = DEFAULT_BASE_PRICE_BY_HOUSE_TYPE;
 
 export const SIZE_40_PLUS_LABEL = "40평 이상";
-export const SIZE_40_PLUS_MIN = 579000;
+export const SIZE_40_PLUS_MIN = DEFAULT_BASE_PRICE_BY_HOUSE_TYPE["40평"];
 
 export const SERVICE_MULTIPLIER: Record<string, number> = {
   "입주청소": 1.0,
@@ -90,6 +85,30 @@ export async function getMoveInBasePrice(houseTypeKey: string): Promise<number |
   return MOVE_IN_BASE_PRICES[houseTypeKey] ?? null;
 }
 
+/**
+ * 평형별 예약 선금을 조회한다.
+ *
+ * 우선순위:
+ *   1. price_rules.deposit_amount (관리자가 수정 가능)
+ *   2. DEFAULT_DEPOSIT_BY_HOUSE_TYPE 상수 (fallback)
+ *
+ * 예약 선금은 총 청소금액에 포함되는 금액이며 추가 비용이 아니다.
+ */
+export async function getDepositAmountForHouseType(houseTypeKey: string): Promise<number> {
+  const rules = await queryRows<PriceRule>(
+    `SELECT * FROM price_rules
+     WHERE service_type = '입주청소' AND note = ?
+     ORDER BY id DESC
+     LIMIT 1`,
+    [houseTypeKey]
+  );
+  if (rules.length > 0 && rules[0].is_active === 1) {
+    const amount = Number(rules[0].deposit_amount ?? 0);
+    if (Number.isFinite(amount) && amount > 0) return amount;
+  }
+  return DEFAULT_DEPOSIT_BY_HOUSE_TYPE[houseTypeKey] ?? 0;
+}
+
 export function getOptionPrices(activeOnly = true): Promise<OptionPrice[]> {
   const where = activeOnly ? " WHERE is_active = 1" : "";
   return queryRows<OptionPrice>(`SELECT * FROM option_prices${where} ORDER BY id ASC`);
@@ -119,8 +138,12 @@ export async function calculateQuote(input: QuoteInput): Promise<QuoteResult> {
   let priceConfirmed: boolean;
 
   if (is40Plus) {
-    basePrice = (await getMoveInBasePrice("40평")) ?? 0;
-    priceConfirmed = false;
+    // 40평 이상은 529,000원 정식 가격표 상품이다.
+    // 관리자 별도견적 입력 없이 고객이 계좌 단계까지 진행할 수 있어야 한다.
+    // (정식 가격표 밖의 특수 케이스만 관리자가 최종금액을 입력한다)
+    const bp40 = await getMoveInBasePrice("40평");
+    basePrice = bp40 ?? 0;
+    priceConfirmed = bp40 !== null && bp40 > 0;
   } else {
     const bp = await getMoveInBasePrice(houseTypeKey);
     basePrice = bp ?? 0;
@@ -149,7 +172,9 @@ export async function calculateQuote(input: QuoteInput): Promise<QuoteResult> {
 
   let notice: string;
   if (is40Plus) {
-    notice = `40평 이상은 기본 ${basePrice.toLocaleString("ko-KR")}원부터 시작하며, 실제 평수와 구조 확인 후 최종 견적을 안내드립니다.`;
+    notice =
+      `40평 이상 기준 금액입니다. ` +
+      `실제 공급면적과 현장 구조에 따라 추가요금이 발생할 수 있으며, 사전에 안내드립니다.`;
   } else if (!priceConfirmed) {
     notice = "견적을 확인할 수 없습니다. 상담을 통해 안내드립니다.";
   } else {
@@ -220,13 +245,13 @@ export function listPriceRules(): Promise<PriceRule[]> {
 export async function upsertPriceRule(rule: Omit<PriceRule, "id"> & { id?: number }): Promise<void> {
   if (rule.id) {
     await execute(
-      `UPDATE price_rules SET service_type=?, area_min=?, area_max=?, base_price=?, is_active=?, note=?, updated_at=datetime('now') WHERE id=?`,
-      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.is_active, rule.note ?? null, rule.id]
+      `UPDATE price_rules SET service_type=?, area_min=?, area_max=?, base_price=?, deposit_amount=?, is_active=?, note=?, updated_at=datetime('now') WHERE id=?`,
+      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.deposit_amount ?? 0, rule.is_active, rule.note ?? null, rule.id]
     );
   } else {
     await execute(
-      `INSERT INTO price_rules (service_type, area_min, area_max, base_price, is_active, note) VALUES (?, ?, ?, ?, ?, ?)`,
-      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.is_active, rule.note ?? null]
+      `INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.deposit_amount ?? 0, rule.is_active, rule.note ?? null]
     );
   }
 }

@@ -1,4 +1,5 @@
 import { getDb } from "./connection";
+import { DEFAULT_DEPOSIT_BY_HOUSE_TYPE, DEFAULT_BASE_PRICE_BY_HOUSE_TYPE } from "@/lib/types";
 
 export function migrate() {
   getDb().exec(`
@@ -94,6 +95,7 @@ export function migrate() {
       area_min REAL NOT NULL DEFAULT 0,
       area_max REAL,
       base_price INTEGER NOT NULL DEFAULT 0,
+      deposit_amount INTEGER NOT NULL DEFAULT 0,
       is_active INTEGER NOT NULL DEFAULT 1,
       note TEXT,
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -167,6 +169,22 @@ function runIncrementalMigrations() {
   tryExec("ALTER TABLE reservations ADD COLUMN price_confirmed_snapshot INTEGER");
   tryExec("ALTER TABLE reservations ADD COLUMN final_confirmed_total INTEGER");
   tryExec("ALTER TABLE reservations ADD COLUMN option_breakdown_snapshot TEXT");
+  // 예약 승인 프로세스 (20260908120000_reservation_approval_flow.sql와 동일)
+  tryExec("ALTER TABLE price_rules ADD COLUMN deposit_amount INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN approved_at TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN approved_by_admin_id INTEGER");
+  // 20260910060000_pricing_revision_and_agreements.sql와 동일
+  tryExec("ALTER TABLE reservations ADD COLUMN core_principles_agreed INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN service_terms_agreed INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN additional_charge_agreed INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN agreement_version TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN agreed_at TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN area_sido TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN area_sigungu TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN area_dong TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN account_revealed_at TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN deposit_expired_at TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN auto_released INTEGER NOT NULL DEFAULT 0");
 }
 
 function seedDefaultSettings() {
@@ -210,19 +228,7 @@ function seedDefaultSettings() {
  * 이미 존재하는 항목은 업데이트하지 않습니다 (관리자가 수정한 경우 보존).
  */
 function seedPriceRules() {
-  const houseTypePrices: [string, number][] = [
-    ["원룸", 179000],
-    ["원룸 복층", 279000],
-    ["투룸", 269000],
-    ["쓰리룸", 319000],
-    ["18평", 329000],
-    ["24평", 369000],
-    ["28평", 420000],
-    ["32평", 459000],
-    ["34평", 489000],
-    ["38평", 539000],
-    ["40평", 579000],
-  ];
+  const houseTypePrices: [string, number][] = Object.entries(DEFAULT_BASE_PRICE_BY_HOUSE_TYPE);
 
   const existingNotes = new Set(
     (getDb().prepare("SELECT note FROM price_rules WHERE service_type='입주청소'").all() as { note: string }[])
@@ -230,14 +236,30 @@ function seedPriceRules() {
   );
 
   const insert = getDb().prepare(
-    "INSERT INTO price_rules (service_type, area_min, area_max, base_price, is_active, note) VALUES (?, ?, ?, ?, 1, ?)"
+    "INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note) VALUES (?, ?, ?, ?, ?, 1, ?)"
   );
 
   for (const [key, price] of houseTypePrices) {
     if (!existingNotes.has(key)) {
       // area_min/max는 사용하지 않고 note 키로 조회
-      insert.run("입주청소", 0, null, price, key);
+      insert.run("입주청소", 0, null, price, DEFAULT_DEPOSIT_BY_HOUSE_TYPE[key] ?? 0, key);
     }
+  }
+
+  // 확정 가격표로 갱신 (예약 snapshot에는 영향 없음)
+  const updatePrice = getDb().prepare(
+    "UPDATE price_rules SET base_price = ? WHERE service_type = '입주청소' AND note = ?"
+  );
+  for (const [key, price] of houseTypePrices) {
+    updatePrice.run(price, key);
+  }
+
+  // 기존 행에 예약금이 아직 0인 경우에만 확정값을 채운다 (관리자 수정값 보존)
+  const fillDeposit = getDb().prepare(
+    "UPDATE price_rules SET deposit_amount = ? WHERE service_type = '입주청소' AND note = ? AND deposit_amount = 0"
+  );
+  for (const [key, deposit] of Object.entries(DEFAULT_DEPOSIT_BY_HOUSE_TYPE)) {
+    fillDeposit.run(deposit, key);
   }
 }
 

@@ -79,6 +79,14 @@ const reservationSchema = z.object({
   hasSitePhotos: z.boolean().optional(),
   depositorName: z.string().min(1, "선입금 입금자명을 입력해주세요.").max(50),
   privacyAgreed: z.boolean().refine(v => v === true, "개인정보 수집·이용에 동의해주세요."),
+  // --- 최소 고객정보: 작업지역 (행정구역 동 기준) ---
+  areaSido: z.string().trim().min(1, "작업지역 시/도를 선택해주세요.").max(30),
+  areaSigungu: z.string().trim().min(1, "작업지역 시/군/구를 선택해주세요.").max(30),
+  areaDong: z.string().trim().min(1, "작업지역 행정동을 선택해주세요.").max(30),
+  // --- 서비스 3종 필수 동의 (각각 저장) ---
+  corePrinciplesAgreed: z.boolean().refine(v => v === true, "안내 핵심 원칙에 동의해주세요."),
+  serviceTermsAgreed: z.boolean().refine(v => v === true, "청소 서비스 이용 및 현장 추가사항 안내에 동의해주세요."),
+  additionalChargeAgreed: z.boolean().refine(v => v === true, "견적 및 추가요금 안내에 동의해주세요."),
   clientEstimatedTotal: z.number().optional(),
 });
 
@@ -221,17 +229,10 @@ export async function POST(req: NextRequest) {
       privacyAgreed: data.privacyAgreed,
     });
 
-    const bank = await getBankSettings();
-    return NextResponse.json({
-      reservation,
-      payment,
-      bankInfo: {
-        bankName: bank.bankName,
-        accountNumber: bank.accountNumber,
-        accountHolder: bank.accountHolder,
-        paymentDueHours: bank.paymentDueHours,
-      },
-    }, { status: 201 });
+    // 계좌정보는 이 응답에 포함하지 않는다 (요구사항 14·15).
+    // 필수 고객정보 + 개인정보 동의 + 서비스 3종 동의를 서버가 재검증한 뒤
+    // 별도 엔드포인트(/api/reservations/[code]/deposit-account)로만 반환한다.
+    return NextResponse.json({ reservation, payment }, { status: 201 });
   } catch (e) {
     if (e instanceof ReservationNotReadyError) {
       return NextResponse.json({ error: e.message, code: "SETTINGS_NOT_READY" }, { status: 503 });
@@ -252,20 +253,15 @@ export async function GET() {
   const readiness = await checkReservationReadiness();
   const today = todayKST();
 
+  // 계좌번호(마스킹본 포함)를 초기 payload에 내려보내지 않는다.
+  // 예약금 안내가 필요한 시점에 서버 검증을 거쳐 별도로 반환한다.
   return NextResponse.json({
     bank: {
       bankName: bank.bankName,
-      accountNumberMasked: maskAccount(bank.accountNumber),
       accountHolder: bank.accountHolder,
       paymentDueHours: bank.paymentDueHours,
     },
     readiness,
     today,
   });
-}
-
-function maskAccount(account: string): string {
-  if (!account) return "";
-  if (account.length <= 4) return "****";
-  return account.slice(0, -4).replace(/[0-9]/g, "*") + account.slice(-4);
 }

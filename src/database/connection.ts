@@ -1,4 +1,5 @@
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
+import { createRequire } from "node:module";
 import path from "node:path";
 import fs from "node:fs";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -11,12 +12,36 @@ export function getDatabaseBackend(): DatabaseBackend {
   return process.env.NODE_ENV === "production" ? "postgres" : "sqlite";
 }
 
+/**
+ * SQLite 파일 경로를 결정한다.
+ *
+ * 반드시 lazy 호출해야 한다 — 모듈 최상위에서 호출하면 import만으로
+ * 파일시스템에 디렉터리를 만들게 되어, Vercel serverless(/var/task 읽기 전용)에서
+ * `ENOENT: mkdir '/var/task/.local-data'` 오류가 발생한다.
+ *
+ * PostgreSQL 모드에서는 호출되어서는 안 된다.
+ */
 function resolveDbPath(): string {
+  if (getDatabaseBackend() === "postgres") {
+    throw new Error(
+      "[clyn-clean] PostgreSQL 모드에서 SQLite 경로를 확인하려 했습니다. " +
+        "DATABASE_URL이 설정된 환경에서는 SQLite 파일을 사용하지 않습니다."
+    );
+  }
   if (process.env.DATABASE_PATH) return process.env.DATABASE_PATH;
-  return path.join(process.cwd(), ".local-data", "cleaning-reservation.db");
+  // 로컬/테스트 환경에서만 .local-data를 생성한다 (이 함수가 실제 호출될 때).
+  const devDir = path.join(process.cwd(), ".local-data");
+  if (!fs.existsSync(devDir)) fs.mkdirSync(devDir, { recursive: true });
+  return path.join(devDir, "cleaning-reservation.db");
 }
 
-export const DB_PATH = resolveDbPath();
+/**
+ * SQLite DB 파일 경로. 기존 `DB_PATH` 상수를 대체한다.
+ * 모듈 로드 시점이 아니라 호출 시점에 평가된다.
+ */
+export function getDbPath(): string {
+  return resolveDbPath();
+}
 
 function ensureParentDir(filePath: string) {
   const dir = path.dirname(filePath);
@@ -25,7 +50,6 @@ function ensureParentDir(filePath: string) {
 
 declare global {
   var __cleaningReservationDb: DatabaseSync | undefined;
-  // eslint-disable-next-line no-var
   var __cleaningReservationPg: unknown | undefined;
 }
 
@@ -33,8 +57,13 @@ let _sqliteInitialized = false;
 
 function initSqlite(): DatabaseSync {
   if (global.__cleaningReservationDb) return global.__cleaningReservationDb;
-  ensureParentDir(DB_PATH);
-  const conn = new DatabaseSync(DB_PATH);
+  const dbPath = getDbPath();
+  ensureParentDir(dbPath);
+  // node:sqlite는 lazy load — PostgreSQL 모드에서는 로드조차 하지 않는다.
+  // ESM/CJS 양쪽에서 동작하도록 createRequire 사용.
+  const nodeRequire = createRequire(import.meta.url);
+  const { DatabaseSync: SqliteCtor } = nodeRequire("node:sqlite");
+  const conn = new SqliteCtor(dbPath) as DatabaseSync;
   conn.exec("PRAGMA journal_mode = WAL;");
   conn.exec("PRAGMA foreign_keys = ON;");
   global.__cleaningReservationDb = conn;
@@ -127,6 +156,26 @@ export async function execute(sql: string, params: unknown[] = []): Promise<void
   }
   const client = pgTransaction.getStore() ?? await getPostgresClient();
   await client.unsafe(toPostgresSql(sql), params);
+}
+
+/**
+ * 조건부 atomic update용 — 실제로 변경된 행 수를 반환한다.
+ *
+ * 동시성 방어에 사용한다. 예:
+ *   UPDATE reservations SET ... WHERE id = ? AND reservation_status = 'approved_awaiting_deposit'
+ * 반환값이 0이면 그 사이 다른 트랜잭션이 상태를 바꾼 것이므로 호출부가 중단해야 한다.
+ *
+ * SQLite/PostgreSQL 양쪽에서 동일한 의미를 보장한다.
+ */
+export async function executeReturningCount(sql: string, params: unknown[] = []): Promise<number> {
+  if (getDatabaseBackend() === "sqlite") {
+    const result = getDb().prepare(sql).run(...(params as import("node:sqlite").SQLInputValue[]));
+    return Number(result.changes ?? 0);
+  }
+  const client = pgTransaction.getStore() ?? await getPostgresClient();
+  const result = await client.unsafe(toPostgresSql(sql), params);
+  // postgres.js는 결과 배열에 count 속성으로 영향 행 수를 제공한다
+  return Number((result as unknown as { count?: number }).count ?? 0);
 }
 
 export async function insertReturningId(sql: string, params: unknown[] = []): Promise<number> {

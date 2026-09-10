@@ -34,7 +34,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
   const payment = await getPaymentByReservationId(reservationId);
 
   // 조건 1: 예약 상태 확인 (received 또는 awaiting_deposit만 허용)
-  const allowedStatuses = ["received", "awaiting_deposit"];
+  const allowedStatuses = ["received", "approved_awaiting_deposit", "awaiting_deposit"];
   if (!allowedStatuses.includes(reservation.reservation_status)) {
     return NextResponse.json(
       {

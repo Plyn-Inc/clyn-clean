@@ -75,9 +75,11 @@ export function remove(date: string, timeSlot: TimeSlot): Promise<void> {
 }
 
 export async function countActiveReservationsOnSlot(date: string, timeSlot: TimeSlot): Promise<number> {
+  // 입금기한(계좌 안내 후 24시간)이 지난 미입금 예약은 슬롯을 더 이상 점유하지 않는다.
+  // 예약 row는 삭제하지 않고 슬롯만 자동 해제한다 (요구사항 25·26).
   const expiredExcludeClause = `
     NOT (
-      rs.reservation_status = 'awaiting_deposit'
+      rs.reservation_status IN ('awaiting_deposit','approved_awaiting_deposit')
       AND EXISTS (
         SELECT 1 FROM payments p
         WHERE p.reservation_id = rs.id
@@ -92,17 +94,35 @@ export async function countActiveReservationsOnSlot(date: string, timeSlot: Time
   if (timeSlot === "all_day") {
     query = `SELECT COUNT(*) as c FROM reservations rs
              WHERE rs.desired_date = ?
-               AND rs.reservation_status IN ('received','awaiting_deposit','awaiting_admin_check','confirmed')
+               AND rs.reservation_status IN ('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')
                AND ${expiredExcludeClause}`;
     params = [date];
   } else {
     query = `SELECT COUNT(*) as c FROM reservations rs
              WHERE rs.desired_date = ?
                AND (rs.time_slot = ? OR rs.time_slot = 'all_day')
-               AND rs.reservation_status IN ('received','awaiting_deposit','awaiting_admin_check','confirmed')
+               AND rs.reservation_status IN ('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')
                AND ${expiredExcludeClause}`;
     params = [date, timeSlot];
   }
   const row = await queryRow<{ c: number | string }>(query, params);
   return Number(row?.c ?? 0);
+}
+
+/**
+ * 해당 날짜/슬롯에 입금확인 완료(confirmed/completed) 예약이 있는지 확인한다.
+ * 고객 공개상태를 "예약완료"로 표시할지 판단하는 데 사용한다.
+ */
+export async function hasConfirmedReservationOnSlot(
+  date: string,
+  timeSlot: "morning" | "afternoon"
+): Promise<boolean> {
+  const row = await queryRow<{ c: number }>(
+    `SELECT COUNT(*) as c FROM reservations rs
+      WHERE rs.desired_date = ?
+        AND (rs.time_slot = ? OR rs.time_slot = 'all_day')
+        AND rs.reservation_status IN ('confirmed','completed')`,
+    [date, timeSlot]
+  );
+  return Number(row?.c ?? 0) > 0;
 }

@@ -196,8 +196,7 @@ export default function ReservationLookup() {
               ) : reservation.estimated_total_snapshot != null && reservation.estimated_total_snapshot > 0 ? (
                 reservation.price_confirmed_snapshot === 0 ? (
                   <div className="rounded-lg bg-[#FBE9D3] px-3 py-2 text-xs text-[var(--amber)]">
-                    ℹ 이 예약의 기본 견적은 <strong>{reservation.estimated_total_snapshot.toLocaleString("ko-KR")}원부터</strong>입니다.
-                    실제 평수와 구조 확인 후 담당자가 최종 금액을 안내드립니다.
+                    ℹ 이 예약은 별도 견적이 필요한 건입니다. 담당자가 현장 조건 확인 후 최종 금액을 안내드립니다.
                   </div>
                 ) : (
                   <>

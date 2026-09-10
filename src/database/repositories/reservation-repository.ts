@@ -1,4 +1,4 @@
-import { execute, insertReturningId, queryRow, queryRows } from "../connection";
+import { execute, executeReturningCount, insertReturningId, queryRow, queryRows } from "../connection";
 import type { Reservation, Payment, ReservationStatus, PaymentStatus, ConfirmationLog } from "@/lib/types";
 
 export interface CreateReservationRow {
@@ -30,6 +30,16 @@ export interface CreateReservationRow {
   priceConfirmedSnapshot: number;
   instantDiscountEligible: number;
   privacyAgreed: number;
+  // --- 최소 고객정보: 작업지역 ---
+  areaSido: string | null;
+  areaSigungu: string | null;
+  areaDong: string | null;
+  // --- 서비스 3종 동의 (각각 저장) ---
+  corePrinciplesAgreed: number;
+  serviceTermsAgreed: number;
+  additionalChargeAgreed: number;
+  /** 3종 동의 완료 시에만 값이 들어간다 */
+  agreementVersion: string | null;
 }
 
 export function insertReservation(row: CreateReservationRow): Promise<number> {
@@ -44,10 +54,16 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       price_confirmed_snapshot,
       instant_discount_eligible, instant_discount_applied,
       privacy_agreed, privacy_agreed_at,
+      area_sido, area_sigungu, area_dong,
+      core_principles_agreed, service_terms_agreed, additional_charge_agreed,
+      agreement_version, agreed_at,
       reservation_status
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
       ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
+      ?, ?, ?,
+      ?, ?, ?,
+      ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END,
       'received'
     )`,
     [
@@ -59,6 +75,9 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       row.estimatedTotalSnapshot, row.estimatedBalanceSnapshot,
       row.priceConfirmedSnapshot, row.instantDiscountEligible,
       row.privacyAgreed, row.privacyAgreed,
+      row.areaSido, row.areaSigungu, row.areaDong,
+      row.corePrinciplesAgreed, row.serviceTermsAgreed, row.additionalChargeAgreed,
+      row.agreementVersion, row.agreementVersion,
     ]
   );
 }
@@ -130,6 +149,129 @@ export function insertPayment(params: { reservationId: number; amount: number; d
   );
 }
 
+/**
+ * 해당 예약에 연결된 payment 개수. 중복 승인/중복 payment 방어에 사용한다.
+ */
+export async function countPaymentsByReservationId(reservationId: number): Promise<number> {
+  const row = await queryRow<{ c: number }>(
+    "SELECT COUNT(*) as c FROM payments WHERE reservation_id = ?",
+    [reservationId]
+  );
+  return Number(row?.c ?? 0);
+}
+
+/**
+ * 예약금 계좌 공개 시점의 예약금/최종금액/잔금 snapshot을 예약에 기록한다.
+ * 이후 모든 계산은 price_rules를 다시 조회하지 않고 이 snapshot을 사용한다.
+ *
+ * account_revealed_at은 입금기한 24시간의 기준 시각이다.
+ * 이 흐름은 고객 셀프 진행이므로 approved_by_admin_id는 기록하지 않는다.
+ */
+/**
+ * 입금기한이 지난 미입금 예약을 찾아 만료 처리 대상으로 반환한다.
+ * 아직 만료 이력이 기록되지 않은 건만 대상으로 한다.
+ */
+export function findExpiredUnpaidReservations(): Promise<
+  { id: number; desired_date: string | null; time_slot: string }[]
+> {
+  return queryRows(
+    `SELECT rs.id, rs.desired_date, rs.time_slot
+       FROM reservations rs
+      WHERE rs.reservation_status IN ('awaiting_deposit','approved_awaiting_deposit')
+        AND rs.auto_released = 0
+        AND EXISTS (
+          SELECT 1 FROM payments p
+           WHERE p.reservation_id = rs.id
+             AND p.payment_status = 'pending'
+             AND p.payment_due_date IS NOT NULL
+             AND p.payment_due_date < datetime('now')
+        )`
+  );
+}
+
+/**
+ * 동시성 방어 — 조건부 atomic 상태 전이.
+ *
+ * 지정한 현재 상태(expectedStatuses)일 때만 nextStatus로 바꾸고, 변경된 행 수를 반환한다.
+ * 0이면 그 사이 다른 트랜잭션이 상태를 바꾼 것이므로 호출부가 처리를 중단해야 한다.
+ *
+ * PostgreSQL에서 이 UPDATE는 해당 row에 행 수준 배타 잠금을 걸므로,
+ * confirmPayment()와 cancelOverdueReservation()이 동시에 실행돼도
+ * 하나만 성공하고 나머지는 0을 받는다. (SQLite 직렬화에 의존하지 않는다)
+ */
+export async function compareAndSetReservationStatus(
+  reservationId: number,
+  expectedStatuses: ReservationStatus[],
+  nextStatus: ReservationStatus
+): Promise<number> {
+  const placeholders = expectedStatuses.map(() => "?").join(", ");
+  return executeReturningCount(
+    `UPDATE reservations
+        SET reservation_status = ?, updated_at = datetime('now')
+      WHERE id = ?
+        AND reservation_status IN (${placeholders})`,
+    [nextStatus, reservationId, ...expectedStatuses]
+  );
+}
+
+/**
+ * 동시성 방어 — pending 결제만 confirmed로 전이한다.
+ * 이미 unconfirmed(만료 처리됨)이면 0을 반환한다.
+ */
+export async function compareAndSetPaymentConfirmed(
+  reservationId: number,
+  adminId: number | null
+): Promise<number> {
+  return executeReturningCount(
+    `UPDATE payments
+        SET payment_status = 'confirmed',
+            confirmed_at = datetime('now'),
+            confirmed_by_admin_id = ?,
+            updated_at = datetime('now')
+      WHERE reservation_id = ?
+        AND payment_status IN ('pending', 'unconfirmed')`,
+    [adminId, reservationId]
+  );
+}
+
+/**
+ * 입금기한 만료 이력을 기록한다.
+ * 예약 row는 삭제하지 않는다 (요구사항 26 — 고객 문의/관리자 이력용).
+ */
+export function markDepositExpired(reservationId: number): Promise<void> {
+  return execute(
+    `UPDATE reservations
+        SET deposit_expired_at = datetime('now'),
+            auto_released = 1,
+            updated_at = datetime('now')
+      WHERE id = ?`,
+    [reservationId]
+  );
+}
+
+export function setDepositSnapshot(params: {
+  reservationId: number;
+  depositAmountSnapshot: number;
+  finalConfirmedTotal: number;
+  estimatedBalanceSnapshot: number;
+}): Promise<void> {
+  return execute(
+    `UPDATE reservations
+        SET deposit_amount_snapshot = ?,
+            final_confirmed_total = ?,
+            estimated_balance_snapshot = ?,
+            account_revealed_at = datetime('now'),
+            updated_at = datetime('now')
+      WHERE id = ?`,
+    [
+      params.depositAmountSnapshot,
+      params.finalConfirmedTotal,
+      params.estimatedBalanceSnapshot,
+      params.reservationId,
+    ]
+  );
+}
+
 export function findPaymentByReservationId(reservationId: number): Promise<Payment | undefined> {
   return queryRow<Payment>("SELECT * FROM payments WHERE reservation_id = ? ORDER BY id DESC LIMIT 1", [reservationId]);
 }
@@ -189,7 +331,7 @@ export async function countActiveReservationsOnSlotExcluding(
     `SELECT COUNT(*) as c FROM reservations rs
      WHERE rs.desired_date = ?
        AND (rs.time_slot = ? OR rs.time_slot = 'all_day')
-       AND rs.reservation_status IN ('received','awaiting_deposit','awaiting_admin_check','confirmed')
+       AND rs.reservation_status IN ('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')
        AND rs.id != ?
        AND NOT (
          rs.reservation_status = 'awaiting_deposit'

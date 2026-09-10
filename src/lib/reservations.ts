@@ -1,9 +1,10 @@
 import * as reservationRepo from "@/database/repositories/reservation-repository";
 import { lockReservationSlot, withTransaction } from "@/database/connection";
-import { generateReservationCode, addHoursISO } from "./utils";
+import { generateReservationCode, addHoursISO, isValidKoreanPhone, isValidWorkArea } from "./utils";
 import { getSlotEffectiveStatus, getDaySlotView } from "./calendar";
-import { getPricingSettings, getBankSettings, checkReservationReadiness } from "./settings";
-import { calculateQuote } from "./pricing";
+import { getPricingSettings, checkReservationReadiness } from "./settings";
+import { calculateQuote, getDepositAmountForHouseType } from "./pricing";
+import { isAllAgreed, missingAgreements, AGREEMENT_VERSION, isAgreementContentReady } from "./agreement";
 import type {
   Reservation,
   Payment,
@@ -84,11 +85,19 @@ export interface CreateReservationInput {
   hasSitePhotos?: boolean;
   depositorName: string;
   privacyAgreed?: boolean;
+  // --- 최소 고객정보: 작업지역 (행정구역 동 기준) ---
+  areaSido?: string;
+  areaSigungu?: string;
+  areaDong?: string;
+  // --- 서비스 3종 동의 (각각 저장) ---
+  corePrinciplesAgreed?: boolean;
+  serviceTermsAgreed?: boolean;
+  additionalChargeAgreed?: boolean;
 }
 
 export interface CreateReservationResult {
   reservation: Reservation;
-  payment: Payment;
+  payment: Payment | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,9 +168,20 @@ export async function createReservation(
     throw new ReservationNotReadyError(readiness.missingFields);
   }
 
-  const [pricing, bank] = await Promise.all([getPricingSettings(), getBankSettings()]);
+  // 계좌 정보는 예약 생성 시점에 필요하지 않다.
+  // 필수 동의 검증을 통과한 뒤 revealDepositAccount()에서만 조회한다.
+  const pricing = await getPricingSettings();
+
+  // 서비스 3종 동의 완료 여부 — 모두 완료된 경우에만 동의서 버전/시각을 기록한다
+  // 약관 원문이 준비되지 않았으면 동의 자체를 유효한 것으로 기록하지 않는다.
+  const allAgreed =
+    isAgreementContentReady() &&
+    isAllAgreed({
+      corePrinciplesAgreed: input.corePrinciplesAgreed === true,
+      serviceTermsAgreed: input.serviceTermsAgreed === true,
+      additionalChargeAgreed: input.additionalChargeAgreed === true,
+    });
   const code = generateReservationCode();
-  const dueDate = addHoursISO(bank.paymentDueHours);
 
   let reservationId = 0;
 
@@ -267,16 +287,20 @@ export async function createReservation(
       priceConfirmedSnapshot: priceConfirmedSnap,
       instantDiscountEligible: eligible ? 1 : 0,
       privacyAgreed: input.privacyAgreed ? 1 : 0,
+      areaSido: input.areaSido?.trim() || null,
+      areaSigungu: input.areaSigungu?.trim() || null,
+      areaDong: input.areaDong?.trim() || null,
+      corePrinciplesAgreed: input.corePrinciplesAgreed ? 1 : 0,
+      serviceTermsAgreed: input.serviceTermsAgreed ? 1 : 0,
+      additionalChargeAgreed: input.additionalChargeAgreed ? 1 : 0,
+      // 3종 동의가 모두 완료된 경우에만 동의서 버전/시각을 기록한다
+      agreementVersion: allAgreed ? AGREEMENT_VERSION : null,
     });
 
-    await reservationRepo.setReservationStatusRaw(reservationId, "awaiting_deposit");
-
-    await reservationRepo.insertPayment({
-      reservationId,
-      amount: pricing.depositAmount,
-      depositorName: input.depositorName,
-      dueDate,
-    });
+    // 예약 신청 단계에서는 payment를 생성하지 않는다.
+    // 관리자가 승인(approveReservation)하는 시점에 금액을 확정하고 payment를 만든다.
+    // 이렇게 해야 승인 전 고객에게 계좌/입금기한이 노출되지 않고 불필요한 환불이 발생하지 않는다.
+    await reservationRepo.setReservationStatusRaw(reservationId, "received");
 
     await reservationRepo.insertLog(
       reservationId,
@@ -289,10 +313,12 @@ export async function createReservation(
   });
 
   const reservation = await reservationRepo.findReservationById(reservationId);
-  const payment = await reservationRepo.findPaymentByReservationId(reservationId);
-  if (!reservation || !payment) throw new Error("예약 생성 결과를 찾을 수 없습니다.");
+  if (!reservation) throw new Error("예약 생성 결과를 찾을 수 없습니다.");
 
-  return { reservation, payment };
+  // 승인 전이므로 payment는 아직 존재하지 않는다 (null).
+  const payment = await reservationRepo.findPaymentByReservationId(reservationId);
+
+  return { reservation, payment: payment ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -327,12 +353,15 @@ export function listOverdueUnpaidReservations() {
 // 예약 상태 변경 (관리자)
 // ---------------------------------------------------------------------------
 
+// approved_awaiting_deposit 진입은 approveReservation()으로만 가능하다.
+// (일반 status API로 임의 전환할 수 없도록 어느 항목의 목표 상태에도 넣지 않는다)
 const ALLOWED_RESERVATION_TRANSITIONS: Record<ReservationStatus, ReservationStatus[]> = {
-  received: ["awaiting_deposit", "consult_required", "cancelled"],
+  received: ["consult_required", "cancelled"],
+  approved_awaiting_deposit: ["consult_required", "cancelled"],
   awaiting_deposit: ["consult_required", "cancelled"],
   awaiting_admin_check: ["consult_required", "cancelled"],
   confirmed: ["completed", "cancelled"],
-  consult_required: ["awaiting_deposit", "cancelled"],
+  consult_required: ["cancelled"],
   cancelled: [],
   completed: [],
 };
@@ -391,6 +420,255 @@ export function getLogsByReservationId(reservationId: number): Promise<Confirmat
   return reservationRepo.findLogsByReservationId(reservationId);
 }
 
+// ---------------------------------------------------------------------------
+// 예약금 계좌 공개 (revealDepositAccount)
+//
+// 고객이 필수 고객정보 + 개인정보 동의 + 서비스 3종 동의를 완료하고
+// 서버 검증을 통과한 시점에 호출된다. 관리자 사전 승인은 필요하지 않다.
+//
+// 이 시점에 처음으로 payment가 생성되고 계좌정보가 공개된다.
+// 그 전에는 계좌정보가 클라이언트로 전달되지 않는다.
+//
+// 원자성 (withTransaction 하나로 묶음 — 중간 실패 시 전부 롤백):
+//   슬롯 재검증 → 상태검증 → 중복 payment 방지 → 금액확정/검증
+//   → deposit snapshot 저장 → payment 생성 → account_revealed_at 기록
+//   → approved_awaiting_deposit(고객 공개: "예약진행 중") 전환
+//
+// 금액 규칙:
+//   총 청소금액 = 예약 선금 + 현장 잔금  (VAT 자동 가산 없음)
+//   balance = final_confirmed_total - deposit_amount_snapshot
+//   deposit_amount_snapshot <= final_confirmed_total (위반 시 실패)
+// ---------------------------------------------------------------------------
+
+/**
+ * 예약금 입금기한(시간). 계좌 안내 시점부터 카운트한다. (요구사항 24)
+ */
+export const DEPOSIT_DEADLINE_HOURS = 24;
+
+export class DepositAccountError extends Error {
+  code: string;
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "DepositAccountError";
+    this.code = code;
+  }
+}
+
+export interface RevealDepositAccountResult {
+  reservationId: number;
+  finalConfirmedTotal: number;
+  depositAmountSnapshot: number;
+  balanceAmount: number;
+  paymentId: number;
+}
+
+export async function revealDepositAccount(
+  reservationId: number,
+  options?: { finalTotalOverride?: number; memo?: string }
+): Promise<RevealDepositAccountResult> {
+  return withTransaction(async () => {
+    // 1) 예약 조회
+    const reservation = await reservationRepo.findReservationById(reservationId);
+    if (!reservation) {
+      throw new DepositAccountError("예약을 찾을 수 없습니다.", "NOT_FOUND");
+    }
+
+    // 2) 승인 가능 상태 검증 (received 에서만 승인 가능)
+    if (reservation.reservation_status !== "received") {
+      throw new DepositAccountError(
+        `현재 예약 상태(${reservation.reservation_status})에서는 예약금 계좌를 안내할 수 없습니다.`,
+        "INVALID_STATUS"
+      );
+    }
+
+    // 2-0) 필수 고객정보 · 개인정보 동의 · 서비스 3종 동의 서버 재검증 (요구사항 14)
+    //      클라이언트 검증만 신뢰하지 않는다. 요청을 직접 조작해도 여기서 차단된다.
+
+    // 약관 원문이 준비되지 않았다면 어떤 동의도 유효하지 않다.
+    // 빈 약관에 동의한 상태로 계좌가 공개되는 것을 막는다.
+    if (!isAgreementContentReady()) {
+      throw new DepositAccountError(
+        "서비스 이용 동의서가 아직 준비되지 않아 예약금 계좌를 안내할 수 없습니다.",
+        "AGREEMENT_CONTENT_NOT_READY"
+      );
+    }
+    if (!reservation.customer_name?.trim()) {
+      throw new DepositAccountError("예약자 이름이 필요합니다.", "MISSING_NAME");
+    }
+    if (!isValidKoreanPhone(reservation.customer_phone ?? "")) {
+      throw new DepositAccountError("연락처 형식이 올바르지 않습니다.", "INVALID_PHONE");
+    }
+    if (!isValidWorkArea({
+      sido: reservation.area_sido ?? "",
+      sigungu: reservation.area_sigungu ?? "",
+      dong: reservation.area_dong ?? "",
+    })) {
+      throw new DepositAccountError(
+        "작업지역(시/도 · 시군구 · 행정동)을 모두 입력해주세요.",
+        "MISSING_WORK_AREA"
+      );
+    }
+    if (reservation.privacy_agreed !== 1) {
+      throw new DepositAccountError(
+        "개인정보 수집·이용 동의가 필요합니다.",
+        "PRIVACY_NOT_AGREED"
+      );
+    }
+    const consent = {
+      corePrinciplesAgreed: reservation.core_principles_agreed === 1,
+      serviceTermsAgreed: reservation.service_terms_agreed === 1,
+      additionalChargeAgreed: reservation.additional_charge_agreed === 1,
+    };
+    if (!isAllAgreed(consent)) {
+      throw new DepositAccountError(
+        `서비스 이용 동의가 완료되지 않았습니다: ${missingAgreements(consent).join(", ")}`,
+        "AGREEMENT_INCOMPLETE"
+      );
+    }
+    if (!reservation.agreement_version) {
+      throw new DepositAccountError("동의서 버전이 기록되지 않았습니다.", "AGREEMENT_VERSION_MISSING");
+    }
+
+    // 2-1) 동시 예약 방지 — 계좌 공개 직전에 슬롯 가용성을 다시 검증한다.
+    //      프런트에서 "예약가능"으로 보였다는 이유만으로 확정하지 않는다.
+    if (
+      reservation.desired_date &&
+      (reservation.time_slot === "morning" || reservation.time_slot === "afternoon")
+    ) {
+      const slot = reservation.time_slot;
+      await lockReservationSlot(reservation.desired_date, slot);
+      const view = await getDaySlotView(reservation.desired_date);
+      const slotView = slot === "morning" ? view.morning : view.afternoon;
+      const others = await reservationRepo.countActiveReservationsOnSlotExcluding(
+        reservation.desired_date,
+        slot,
+        reservationId
+      );
+      if (slotView.status === "off" || slotView.status === "consult_required") {
+        throw new DepositAccountError(
+          `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"}은 현재 예약을 받을 수 없습니다.`,
+          "SLOT_UNAVAILABLE"
+        );
+      }
+      if (others >= slotView.capacity) {
+        throw new DepositAccountError(
+          `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"} 시간대는 이미 다른 예약이 진행 중입니다.`,
+          "SLOT_TAKEN"
+        );
+      }
+    }
+
+    // 3) 중복 payment 방어 — 트랜잭션 내부에서 확인
+    const existingPayments = await reservationRepo.countPaymentsByReservationId(reservationId);
+    if (existingPayments > 0) {
+      throw new DepositAccountError(
+        "이미 예약금 계좌가 안내된 예약입니다.",
+        "ALREADY_REVEALED"
+      );
+    }
+
+    // 4) final_confirmed_total 확정
+    //    - 자동 산정 평형(price_confirmed_snapshot === 1): 자동견적 금액을 최종금액으로 확정
+    //    - 별도견적 평형(40평 이상 등, price_confirmed_snapshot === 0): 관리자가 반드시 금액 입력
+    let finalTotal: number;
+    if (options?.finalTotalOverride != null) {
+      finalTotal = Math.round(options.finalTotalOverride);
+    } else if (reservation.final_confirmed_total != null) {
+      finalTotal = reservation.final_confirmed_total;
+    } else if (
+      reservation.price_confirmed_snapshot === 1 &&
+      reservation.estimated_total_snapshot != null &&
+      reservation.estimated_total_snapshot > 0
+    ) {
+      finalTotal = reservation.estimated_total_snapshot;
+    } else {
+      throw new DepositAccountError(
+        "최종 확정금액이 없습니다. 별도 견적이 필요한 예약은 관리자가 최종 금액을 입력해야 합니다.",
+        "FINAL_TOTAL_REQUIRED"
+      );
+    }
+
+    if (!Number.isFinite(finalTotal) || finalTotal <= 0) {
+      throw new DepositAccountError(
+        "최종 확정금액이 올바르지 않습니다.",
+        "INVALID_FINAL_TOTAL"
+      );
+    }
+
+    // 5) 예약금 결정 — price_rules.deposit_amount 조회 (이 시점 값을 snapshot으로 고정)
+    const houseTypeKey = reservation.house_type_key ?? "";
+    let depositAmount = houseTypeKey
+      ? await getDepositAmountForHouseType(houseTypeKey)
+      : 0;
+    depositAmount = Math.round(depositAmount);
+
+    if (!Number.isFinite(depositAmount) || depositAmount < 0) {
+      throw new DepositAccountError(
+        "예약금이 올바르지 않습니다.",
+        "INVALID_DEPOSIT"
+      );
+    }
+
+    // 6) 금액 검증 — 예약금은 총금액에 포함되므로 총금액을 넘을 수 없다
+    if (depositAmount > finalTotal) {
+      throw new DepositAccountError(
+        `예약금(${depositAmount.toLocaleString("ko-KR")}원)이 ` +
+          `최종 금액(${finalTotal.toLocaleString("ko-KR")}원)보다 클 수 없습니다.`,
+        "DEPOSIT_EXCEEDS_TOTAL"
+      );
+    }
+
+    const balanceAmount = finalTotal - depositAmount;
+    if (balanceAmount < 0) {
+      throw new DepositAccountError("잔금이 음수가 될 수 없습니다.", "NEGATIVE_BALANCE");
+    }
+
+    // 7) snapshot 저장 — 이후 계산은 price_rules를 다시 조회하지 않는다.
+    //    이 흐름은 고객 셀프 진행이므로 approved_by_admin_id는 기록하지 않는다
+    //    (관리자 승인 증빙으로 오인되지 않도록 null 유지).
+    await reservationRepo.setDepositSnapshot({
+      reservationId,
+      depositAmountSnapshot: depositAmount,
+      finalConfirmedTotal: finalTotal,
+      estimatedBalanceSnapshot: balanceAmount,
+    });
+
+    // 8) payment 생성 (snapshot 금액 기준)
+    //    입금기한은 계좌 안내 시점부터 24시간 (요구사항 24)
+    const dueDate = addHoursISO(DEPOSIT_DEADLINE_HOURS);
+    const paymentId = await reservationRepo.insertPayment({
+      reservationId,
+      amount: depositAmount,
+      depositorName: reservation.customer_name,
+      dueDate,
+    });
+
+    // 9) 상태 전환
+    await reservationRepo.setReservationStatusRaw(reservationId, "approved_awaiting_deposit");
+
+    await reservationRepo.insertLog(
+      reservationId,
+      null,
+      "시스템",
+      "deposit_account_revealed",
+      `예약금 계좌 안내 — 총 ${finalTotal.toLocaleString("ko-KR")}원 / ` +
+        `예약금 ${depositAmount.toLocaleString("ko-KR")}원 / ` +
+        `잔금 ${balanceAmount.toLocaleString("ko-KR")}원 / 입금기한 ${DEPOSIT_DEADLINE_HOURS}시간` +
+        (options?.memo ? ` (${options.memo})` : ""),
+      "received",
+      "approved_awaiting_deposit"
+    );
+
+    return {
+      reservationId,
+      finalConfirmedTotal: finalTotal,
+      depositAmountSnapshot: depositAmount,
+      balanceAmount,
+      paymentId,
+    };
+  });
+}
+
 export async function confirmPayment(
   reservationId: number,
   adminName: string,
@@ -401,26 +679,46 @@ export async function confirmPayment(
   if (!reservation) throw new Error("예약을 찾을 수 없습니다.");
   const payment = await reservationRepo.findPaymentByReservationId(reservationId);
   if (!payment) throw new Error("결제 정보를 찾을 수 없습니다.");
-  if (reservation.reservation_status !== "awaiting_deposit") {
-    throw new Error(`현재 예약 상태(${reservation.reservation_status})에서는 선입금 확인을 처리할 수 없습니다.`);
+  // 신규 흐름(approved_awaiting_deposit)과 기존 데이터(awaiting_deposit) 모두 허용
+  const payableStatuses: ReservationStatus[] = ["approved_awaiting_deposit", "awaiting_deposit"];
+  if (!payableStatuses.includes(reservation.reservation_status)) {
+    throw new Error(`현재 예약 상태(${reservation.reservation_status})에서는 예약금 입금 확인을 처리할 수 없습니다.`);
   }
   if (payment.payment_status !== "pending" && payment.payment_status !== "unconfirmed") {
-    throw new Error(`현재 입금 상태(${payment.payment_status})에서는 선입금 확인을 처리할 수 없습니다.`);
+    throw new Error(`현재 입금 상태(${payment.payment_status})에서는 예약금 입금 확인을 처리할 수 없습니다.`);
   }
 
-  await reservationRepo.confirmPaymentRow(reservationId, adminId);
-  // 선입금 확인만으로 최종 예약확정이 아님 — awaiting_admin_check으로 이동
-  await reservationRepo.setReservationStatusRaw(reservationId, "awaiting_admin_check");
+  const prevStatus = reservation.reservation_status;
+
+  // 관리자가 실제 입금을 수기로 확인한 시점 = 예약완료 (요구사항 27)
+  // 기존 데이터(awaiting_deposit)는 종전대로 awaiting_admin_check을 거친다.
+  const nextStatus: ReservationStatus =
+    prevStatus === "approved_awaiting_deposit" ? "confirmed" : "awaiting_admin_check";
+
+  // 동시성 방어 — 입금대기 상태일 때만 전이한다.
+  // 만료 배치(cancelOverdueReservation)와 동시에 실행돼도 이 UPDATE가 row 배타 잠금을
+  // 잡으므로 한쪽만 성공한다. PostgreSQL에서도 동일하게 보장된다.
+  const changed = await reservationRepo.compareAndSetReservationStatus(
+    reservationId,
+    ["approved_awaiting_deposit", "awaiting_deposit"],
+    nextStatus
+  );
+  if (changed === 0) {
+    throw new Error(
+      "예약 상태가 변경되어 입금 확인을 처리할 수 없습니다. 예약 상태를 다시 확인해주세요."
+    );
+  }
+  await reservationRepo.compareAndSetPaymentConfirmed(reservationId, adminId);
   await reservationRepo.insertLog(
     reservationId,
     adminId,
     adminName,
     "payment_confirmed",
-    memo
-      ? `선입금 확인 완료 / 관리자 예약확정 대기 (${memo})`
-      : "선입금 확인 완료 / 관리자 예약확정 대기",
-    "awaiting_deposit",
-    "awaiting_admin_check"
+    (nextStatus === "confirmed"
+      ? "예약금 입금 확인 완료 / 예약완료"
+      : "선입금 확인 완료 / 관리자 예약확정 대기") + (memo ? ` (${memo})` : ""),
+    prevStatus,
+    nextStatus
   );
 }
 
@@ -538,31 +836,55 @@ export async function cancelOverdueReservation(
   adminName = "시스템",
   adminId: number | null = null
 ) {
-  const res = await reservationRepo.findReservationById(reservationId);
-  if (!res) throw new Error("예약을 찾을 수 없습니다.");
+  return withTransaction(async () => {
+    const res = await reservationRepo.findReservationById(reservationId);
+    if (!res) throw new Error("예약을 찾을 수 없습니다.");
 
-  const payment = await reservationRepo.findPaymentByReservationId(reservationId);
-  if (!payment) throw new Error("결제 정보를 찾을 수 없습니다.");
+    const payment = await reservationRepo.findPaymentByReservationId(reservationId);
+    if (!payment) throw new Error("결제 정보를 찾을 수 없습니다.");
 
-  const now = new Date();
-  const due = payment.payment_due_date ? new Date(payment.payment_due_date) : null;
+    const now = new Date();
+    const due = payment.payment_due_date ? new Date(payment.payment_due_date) : null;
 
-  if (res.reservation_status !== "awaiting_deposit")
-    throw new Error("입금 대기 상태가 아닙니다.");
-  if (payment.payment_status !== "pending")
-    throw new Error("이미 입금된 예약입니다.");
-  if (!due) throw new Error("입금기한이 설정되지 않았습니다.");
-  if (now <= due) throw new Error("아직 입금기한이 지나지 않았습니다.");
+    // 신규 흐름(approved_awaiting_deposit)과 기존 데이터(awaiting_deposit) 모두 허용
+    const expirableStatuses: ReservationStatus[] = [
+      "approved_awaiting_deposit",
+      "awaiting_deposit",
+    ];
+    if (!expirableStatuses.includes(res.reservation_status))
+      throw new Error("입금 대기 상태가 아닙니다.");
+    if (payment.payment_status !== "pending")
+      throw new Error("이미 입금된 예약입니다.");
+    if (!due) throw new Error("입금기한이 설정되지 않았습니다.");
+    if (now <= due) throw new Error("아직 입금기한이 지나지 않았습니다.");
 
-  await reservationRepo.setReservationStatusRaw(reservationId, "cancelled");
-  await reservationRepo.markPendingPaymentAsUnconfirmedByReservationId(reservationId);
-  await reservationRepo.insertLog(
-    reservationId,
-    adminId,
-    adminName,
-    "auto_cancel",
-    "입금기한 초과 자동 취소"
-  );
+    const prev = res.reservation_status;
+
+    // 동시성 방어 — 입금대기 상태일 때만 취소로 전이한다.
+    // 관리자 입금확인(confirmPayment)이 먼저 커밋됐다면 여기서 0이 반환되어
+    // confirmed가 cancelled로 덮어써지지 않는다. PostgreSQL row lock 기준.
+    const changed = await reservationRepo.compareAndSetReservationStatus(
+      reservationId,
+      ["approved_awaiting_deposit", "awaiting_deposit"],
+      "cancelled"
+    );
+    if (changed === 0) {
+      throw new Error("예약 상태가 변경되어 만료 처리를 진행하지 않았습니다.");
+    }
+
+    // 만료 이력 기록 — 예약 row는 삭제하지 않는다 (요구사항 26)
+    await reservationRepo.markDepositExpired(reservationId);
+    await reservationRepo.markPendingPaymentAsUnconfirmedByReservationId(reservationId);
+    await reservationRepo.insertLog(
+      reservationId,
+      adminId,
+      adminName,
+      "auto_cancel",
+      `입금기한(${DEPOSIT_DEADLINE_HOURS}시간) 초과 자동 취소 — 슬롯이 해제되고 예약 기록은 보존됩니다.`,
+      prev,
+      "cancelled"
+    );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -646,4 +968,32 @@ export async function getDashboardStats() {
     reservationRepo.countByStatus("completed"),
   ]);
   return { total, received, awaitingDeposit, confirmed, consultRequired, cancelled, completed };
+}
+
+// ---------------------------------------------------------------------------
+// 입금기한 만료 일괄 처리 (요구사항 25·26)
+//
+// 기존 cancelOverdueReservation()을 그대로 재사용한다 (중복 스케줄러/로직 없음).
+// 계좌 API, 캘린더 조회, 예약 생성 등 자연스러운 트래픽 시점에 lazy 호출된다.
+//
+// 처리 내용 (건별 트랜잭션):
+//   deposit_expired_at 기록 + auto_released = 1
+//   + reservation_status = cancelled (슬롯 해제 → 공개상태 "예약가능")
+//   + pending payment를 unconfirmed로 정리
+//   예약 row는 삭제하지 않는다.
+// ---------------------------------------------------------------------------
+export async function releaseExpiredDepositReservations(): Promise<number> {
+  const expired = await reservationRepo.findExpiredUnpaidReservations();
+  if (expired.length === 0) return 0;
+
+  let released = 0;
+  for (const row of expired) {
+    try {
+      await cancelOverdueReservation(row.id, "시스템", null);
+      released += 1;
+    } catch {
+      // 그 사이 입금확인됐거나 이미 처리된 건은 건너뛴다
+    }
+  }
+  return released;
 }

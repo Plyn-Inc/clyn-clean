@@ -97,3 +97,66 @@ export function getMonthRangeKST(year: number, month: number): { start: string; 
   const end = `${year}-${String(month + 1).padStart(2, "0")}-${String(lastDay).padStart(2, "0")}`;
   return { start, end };
 }
+
+// ---------------------------------------------------------------------------
+// 최소 고객정보 검증 (서버측)
+// ---------------------------------------------------------------------------
+
+/**
+ * 연락처를 숫자만 남긴 형태로 정규화한다.
+ * 하이픈/공백/국가번호(+82)를 처리한다.
+ */
+export function normalizePhone(raw: string): string {
+  let digits = String(raw ?? "").replace(/[^\d+]/g, "");
+  if (digits.startsWith("+82")) digits = "0" + digits.slice(3);
+  else if (digits.startsWith("82") && digits.length > 10) digits = "0" + digits.slice(2);
+  return digits.replace(/\D/g, "");
+}
+
+/**
+ * 한국 휴대폰/일반전화 형식 검증.
+ * 서버에서도 반드시 호출한다 (클라이언트 검증만으로 처리하지 않음).
+ */
+export function isValidKoreanPhone(raw: string): boolean {
+  const d = normalizePhone(raw);
+  if (!d.startsWith("0")) return false;
+  if (d.length < 9 || d.length > 11) return false;
+  // 휴대폰 01X-XXXX-XXXX / 지역번호 0XX-XXX(X)-XXXX
+  return /^01[0-9]\d{7,8}$/.test(d) || /^0(2|[3-6][1-5])\d{6,8}$/.test(d);
+}
+
+/** 010-1234-5678 형태로 표시용 포맷 */
+export function formatPhone(raw: string): string {
+  const d = normalizePhone(raw);
+  if (/^01[0-9]\d{8}$/.test(d)) return `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}`;
+  if (/^01[0-9]\d{7}$/.test(d)) return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
+  if (d.startsWith("02")) {
+    return d.length === 10 ? `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6)}` : `${d.slice(0, 2)}-${d.slice(2, 5)}-${d.slice(5)}`;
+  }
+  if (d.length >= 10) return `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}`;
+  return d;
+}
+
+/** 관리자 화면 마스킹 표시용 (010-****-5678) */
+export function maskPhone(raw: string): string {
+  const f = formatPhone(raw);
+  const parts = f.split("-");
+  if (parts.length !== 3) return f;
+  return `${parts[0]}-${"*".repeat(parts[1].length)}-${parts[2]}`;
+}
+
+export interface WorkArea {
+  sido: string;
+  sigungu: string;
+  dong: string;
+}
+
+/** 작업지역(시/도 · 시군구 · 행정동)이 모두 입력됐는지 검증 */
+export function isValidWorkArea(area: Partial<WorkArea> | null | undefined): boolean {
+  return !!(area?.sido?.trim() && area?.sigungu?.trim() && area?.dong?.trim());
+}
+
+/** "서울특별시 강남구 역삼동" 형태로 합친다 */
+export function formatWorkArea(area: Partial<WorkArea> | null | undefined): string {
+  return [area?.sido, area?.sigungu, area?.dong].filter(Boolean).join(" ").trim();
+}
