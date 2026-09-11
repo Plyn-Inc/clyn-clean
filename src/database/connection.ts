@@ -106,9 +106,12 @@ async function getPostgresClient(): Promise<PostgresClient> {
   const mod = await import("postgres");
   const postgres = mod.default;
   const client = postgres(postgresUrl(), {
-    max: 5,
+    // Vercel serverless에서는 인스턴스마다 별도 pool이 생기므로
+    // 인스턴스당 1개 연결만 유지해 Supabase 연결 수 고갈을 방지한다.
+    max: 1,
     idle_timeout: 20,
     connect_timeout: 10,
+    // Supabase transaction pooler는 prepared statement를 지원하지 않는다
     prepare: false,
   }) as unknown as PostgresClient;
   global.__cleaningReservationPg = client;
