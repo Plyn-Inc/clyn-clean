@@ -13,6 +13,10 @@ process.env.SITE_URL = 'https://clyn.test';
 
 let db;
 let pricing;
+let specialDays;
+let calendar;
+let specialDayStore;
+let getDateAdjustment;
 let reservations;
 let priceRulesRoute;
 let quoteRoute;
@@ -21,18 +25,19 @@ let paymentStatusRoute;
 let reservationStatusRoute;
 
 const CANONICAL_PRICES = {
-  '원룸': 169000,
-  '원룸 복층': 219000,
-  '1.5룸': 229000,
-  '투룸': 249000,
-  '쓰리룸': 299000,
-  '18평': 309000,
-  '24평': 339000,
-  '28평': 389000,
-  '32평': 419000,
-  '34평': 449000,
-  '38평': 490000,
-  '40평': 529000,
+  '원룸': 179000,
+  '원룸 복층': 239000,
+  '1.5룸': 249000,
+  '투룸': 269000,
+  '쓰리룸': 319000,
+  '18평': 329000,
+  '24평': 369000,
+  '28평': 420000,
+  '32평': 459000,
+  '34평': 489000,
+  '38평': 539000,
+  // 40평 이상은 확정가가 아니라 상담 참고 시작가
+  '40평': 579000,
 };
 
 // 평형별 예약 선금 (총 청소금액에 포함되는 금액 — 추가 비용이 아님)
@@ -67,6 +72,13 @@ before(async () => {
   db = new DatabaseSync(dbPath);
   db.exec('PRAGMA foreign_keys = ON;');
   pricing = await import('../src/lib/pricing.ts');
+  specialDays = await import('../src/lib/special-days.ts');
+  calendar = await import('../src/lib/calendar.ts');
+  specialDayStore = await import('../src/lib/special-days-store.ts');
+  // 특수일 캐시를 채운다. KASI_SERVICE_KEY가 없는 테스트 환경에서는
+  // 오프라인 generator 데이터로 backfill된다.
+  await specialDayStore.syncSpecialDays({ from: '2026-01-01', days: 800 });
+  getDateAdjustment = specialDays.getDateAdjustment;
   reservations = await import('../src/lib/reservations.ts');
   priceRulesRoute = await importFresh('../src/app/api/admin/price-rules/route.ts', 'price-rules');
   quoteRoute = await importFresh('../src/app/api/quote/route.ts', 'quote');
@@ -213,16 +225,17 @@ test('P0-2 명시적으로 비활성화한 주택상품은 하드코딩 가격�
   assert.equal(await pricing.getMoveInBasePrice('34평'), null);
 });
 
-// [정책 변경] 40평 이상 529,000원은 정식 가격표 상품이 되었다.
-// 관리자 별도견적 입력 없이 고객이 계좌 단계까지 진행할 수 있어야 한다.
-test('P0-5 40평 이상은 정식 가격표 상품이므로 별도견적 없이 계좌 단계까지 진행된다', async () => {
-  const { reservation, payment } = await createReservationWithDepositAccount({
-    houseTypeKey: '40평', actualPyeong: 45, customerPhone: '010-4000-0001', desiredDate: '2026-12-29',
-  });
-  assert.equal(reservation.reservation_status, 'approved_awaiting_deposit');
-  assert.equal(reservation.final_confirmed_total, CANONICAL_PRICES['40평']);
-  assert.equal(reservation.deposit_amount_snapshot, EXPECTED_DEPOSITS['40평']);
-  assert.ok(payment, '계좌 단계에서 payment가 생성되어야 한다');
+// [정책 변경] 40평 이상은 확정 자동견적 상품이 아니라 상담 전환 대상이다.
+test('P0-5 40평 이상은 상담 전환 대상이며 예약 생성 API가 거부한다', async () => {
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(
+    fullyAgreedReservationBody({
+      houseTypeKey: '40평', actualPyeong: 45,
+      customerPhone: '010-4000-0001', desiredDate: '2026-12-29',
+    })
+  ));
+  assert.equal(res.status, 409, '40평 이상은 일반 예약으로 생성되면 안 된다');
+  assert.equal(res.body.code, 'CONSULT_REQUIRED');
+  assert.equal(res.body.consultReason, 'size_40_plus');
 });
 
 // [위험 보존] 정식 가격표 밖의 특수 케이스(기준가 확정 불가)는
@@ -317,7 +330,9 @@ test('P0-3/P0-4 고객조회 UI는 final_confirmed_total을 우선하고 잔금�
 test('P1-4 공개 예약 UI는 정적 EXTRA_OPTIONS 전체가 아니라 활성 옵션 목록을 사용한다', async () => {
   const source = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
   assert.doesNotMatch(source, /\{EXTRA_OPTIONS\.map\(/);
-  assert.match(source, /availableOptions|activeOptions/);
+  // 정적 EXTRA_OPTIONS 전체를 순회하지 않고, 서버가 내려준 활성 옵션 목록을 사용해야 한다
+  assert.match(source, /availableOptions|activeOptions|options\.map\(/);
+  assert.match(source, /\/api\/quote/, '활성 옵션을 서버에서 받아와야 한다');
 });
 
 // [정책 변경] 고객이 추가서비스를 선택해 가격을 즉시 올리는 계산기 UI는 제거됐다.
@@ -375,19 +390,15 @@ test('P0-2 비활성 주택상품은 quote API에서 0원 견적으로 예약 �
   assert.match(res.body.error, /가격|견적|상품|비활성/);
 });
 
-// [정책 변경] 40평 이상도 관리자 입금확인만으로 예약완료(confirmed)가 된다.
-// 관리자 최종금액 입력은 정식 가격표 밖 특수 케이스에서만 사용한다.
-test('40평 이상은 관리자 입금확인으로 예약완료되며 최종금액 snapshot이 보존된다', async () => {
-  const { reservation } = await createReservationWithDepositAccount({
-    houseTypeKey: '40평', actualPyeong: 45, customerPhone: '010-4000-0003', desiredDate: '2026-12-31',
-  });
-  await reservations.confirmPayment(reservation.id, '관리자', null);
-  const row = db.prepare(`SELECT reservation_status, final_confirmed_total, deposit_amount_snapshot, estimated_balance_snapshot FROM reservations WHERE id=?`).get(reservation.id);
-  assert.equal(row.reservation_status, 'confirmed');
-  assert.equal(row.final_confirmed_total, CANONICAL_PRICES['40평']);
-  assert.equal(row.deposit_amount_snapshot, EXPECTED_DEPOSITS['40평']);
-  // 총금액 = 예약 선금 + 현장 잔금
-  assert.equal(row.estimated_balance_snapshot, CANONICAL_PRICES['40평'] - EXPECTED_DEPOSITS['40평']);
+// [정책 변경] 40평 이상은 예약금/계좌 단계로 진행하지 않는다.
+test('40평 이상은 예약금/계좌 단계로 진행되지 않는다', async () => {
+  const q = await pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 45 });
+  assert.equal(q.consultRequired, true);
+  assert.equal(q.consultReason, 'size_40_plus');
+  assert.equal(q.priceConfirmed, false, '확정 자동견적이 아니다');
+  // 시작가 표기 — 확정금액처럼 보이면 안 된다
+  assert.equal(q.isStartingPrice, true);
+  assert.match(q.displayPriceLabel, /579,000원부터/);
 });
 
 test('P1-3 입금확인된 예약은 일반 예약상태 API로 바로 취소할 수 없다', async () => {
@@ -413,8 +424,8 @@ for (const [houseTypeKey, basePrice] of Object.entries(CANONICAL_PRICES)) {
       assert.equal(q.basePrice, basePrice);
       assert.equal(q.multiplier, multiplier);
       assert.equal(q.estimatedTotal, Math.round(basePrice * multiplier));
-      // 40평 이상도 529,000원 정식 가격표 상품이므로 확정가로 취급한다
-      assert.equal(q.priceConfirmed, true);
+      // [정책] 40평 이상은 상담 전환 대상이므로 확정 자동견적이 아니다
+      assert.equal(q.priceConfirmed, houseTypeKey !== '40평');
     });
   }
 }
@@ -605,9 +616,13 @@ test('관리자에서 변경한 40평 이상 시작가가 공개 quote에 반영
   }));
   assert.equal(res.status, 200);
   assert.equal(res.body.quote.basePrice, 599000);
-  assert.equal(res.body.quote.estimatedTotal, 599000);
-  // [정책 변경] 40평 이상도 정식 가격표 상품이므로 확정가로 취급한다
-  assert.equal(res.body.quote.priceConfirmed, true);
+  // [정책] 40평 이상은 상담 전환 대상 — 확정 자동견적이 아니다
+  assert.equal(res.body.quote.priceConfirmed, false);
+  assert.equal(res.body.quote.consultRequired, true);
+  assert.equal(res.body.quote.isStartingPrice, true);
+  assert.match(res.body.quote.displayPriceLabel, /599,000원부터/);
+  // 공개 응답에는 내부 상담 사유가 없어야 한다
+  assert.equal(res.body.quote.consultReason, undefined);
 });
 
 test('40평 이상 시작가를 관리자에서 OFF하면 공개 quote도 차단한다', async () => {
@@ -906,14 +921,14 @@ test('확정 가격표 12개 상품이 모두 price_rules에 존재하고 금액
 
 test('1.5룸은 신규 정식 상품으로 견적/예약 전 경로에서 동작한다', async () => {
   // 가격표
-  assert.equal(CANONICAL_PRICES['1.5룸'], 229000);
+  assert.equal(CANONICAL_PRICES['1.5룸'], 249000);
 
   // 견적 API
   const quote = await quoteRoute.POST(makeReq({
     serviceType: '입주청소', houseTypeKey: '1.5룸', extraOptions: [],
   }));
   assert.equal(quote.status, 200);
-  assert.equal(quote.body.quote.basePrice, 229000);
+  assert.equal(quote.body.quote.basePrice, CANONICAL_PRICES['1.5룸']);
   assert.equal(quote.body.quote.priceConfirmed, true);
 
   // 예약 + 계좌 단계까지
@@ -921,7 +936,7 @@ test('1.5룸은 신규 정식 상품으로 견적/예약 전 경로에서 동작
     houseTypeKey: '1.5룸', customerPhone: '010-5000-0001', desiredDate: '2027-01-05',
   });
   assert.equal(reservation.house_type_key, '1.5룸');
-  assert.equal(reservation.final_confirmed_total, 229000);
+  assert.equal(reservation.final_confirmed_total, CANONICAL_PRICES['1.5룸']);
   assert.equal(reservation.deposit_amount_snapshot, 60000);
 });
 
@@ -929,9 +944,10 @@ test('홈페이지 견적은 VAT를 자동 가산하지 않는다', async () => 
   const quote = await quoteRoute.POST(makeReq({
     serviceType: '입주청소', houseTypeKey: '32평', extraOptions: [],
   }));
-  assert.equal(quote.body.quote.estimatedTotal, 419000);
-  // 419,000 * 1.1 = 460,900 — 이 값이 나오면 VAT 자동합산 버그
-  assert.notEqual(quote.body.quote.estimatedTotal, 460900);
+  // 평일 기준 — 날짜 보정 없음
+  assert.equal(quote.body.quote.estimatedTotal, CANONICAL_PRICES['32평']);
+  // 부가세를 다시 곱해 표시하면 안 된다 (표시가가 이미 부가세 포함)
+  assert.notEqual(quote.body.quote.estimatedTotal, Math.round(CANONICAL_PRICES['32평'] * 1.1));
 });
 
 // ===========================================================================
@@ -949,7 +965,8 @@ test('예약금은 총 청소금액에 포함되며 잔금 = 총액 - 예약금�
   const { reservation } = await createReservationWithDepositAccount({
     houseTypeKey: '38평', customerPhone: '010-5000-0002', desiredDate: '2027-01-06',
   });
-  const total = CANONICAL_PRICES['38평'];
+  // 날짜 조건이 걸린 날이면 서버가 30,000원을 1회 가산한다
+  const total = CANONICAL_PRICES['38평'] + getDateAdjustment('2027-01-06');
   const deposit = EXPECTED_DEPOSITS['38평'];
   assert.equal(reservation.final_confirmed_total, total);
   assert.equal(reservation.deposit_amount_snapshot, deposit);
@@ -1161,11 +1178,14 @@ test('3종 동의 완료 후에만 계좌정보와 금액 3단이 반환된다',
   assert.ok(payment.payment_due_date, '입금기한이 설정되어야 한다');
   assert.ok(reservation.account_revealed_at, '계좌 안내 시각이 기록되어야 한다');
   // 금액 3단: 총액 = 예약금 + 잔금
-  assert.equal(reservation.final_confirmed_total, CANONICAL_PRICES['24평']);
+  // 날짜 조건(토/일/공휴일/손없는날)이 걸린 날이면 서버가 30,000원을 1회 가산한다.
+  const adj = getDateAdjustment('2027-02-05');
+  const expectedTotal = CANONICAL_PRICES['24평'] + adj;
+  assert.equal(reservation.final_confirmed_total, expectedTotal);
   assert.equal(reservation.deposit_amount_snapshot, EXPECTED_DEPOSITS['24평']);
   assert.equal(
     reservation.estimated_balance_snapshot,
-    CANONICAL_PRICES['24평'] - EXPECTED_DEPOSITS['24평']
+    expectedTotal - EXPECTED_DEPOSITS['24평']
   );
 });
 
@@ -1250,7 +1270,7 @@ test('(B) 약관 원문이 준비된 상태에서 동의서 1~11번 본문이 �
   assert.equal(agreement.isAgreementContentReady(), true);
   // 핵심 원칙 3종 (VAT 별도 포함)
   assert.equal(agreement.CORE_PRINCIPLES.length, 3);
-  assert.ok(agreement.CORE_PRINCIPLES.some((p) => p.includes('VAT 별도')));
+  assert.ok(agreement.CORE_PRINCIPLES.some((p) => p.includes('부가세가 포함')));
 });
 
 test('(B) 원문 준비 + 필수정보/개인정보동의/3종동의 완료 시 계좌가 공개된다', async () => {
@@ -1315,11 +1335,1670 @@ test('동의서 원문은 한 곳에서만 관리되며 표준 구조/VAT 문구
   const section1 = agreement.AGREEMENT_SECTIONS.find((s) => s.no === 1);
   // 1.5룸이 표준 구조 기준에 포함되어야 한다
   assert.match(section1.body, /1\.5룸/);
-  assert.match(section1.body, /VAT 별도/);
-  // 8번 잔금 정산에도 VAT 별도 문구 유지
+  assert.match(section1.body, /부가세가 포함/);
+  // 8번 잔금 정산에도 부가세 포함 문구 유지
   const section8 = agreement.AGREEMENT_SECTIONS.find((s) => s.no === 8);
-  assert.match(section8.body, /VAT 별도/);
+  assert.match(section8.body, /부가세가 포함/);
   // 3번 추가요금 항목
   const section3 = agreement.AGREEMENT_SECTIONS.find((s) => s.no === 3);
   assert.match(section3.body, /곰팡이|니코틴|반려동물/);
+});
+
+// ===========================================================================
+// [신규] 확정 기본가격 12개 (부가세 포함 고객 표시금액)
+// ===========================================================================
+
+test('확정 기본가격 12개 상품이 최신 정책값과 일치한다', async () => {
+  const expected = {
+    '원룸': 179000, '원룸 복층': 239000, '1.5룸': 249000, '투룸': 269000,
+    '쓰리룸': 319000, '18평': 329000, '24평': 369000, '28평': 420000,
+    '32평': 459000, '34평': 489000, '38평': 539000, '40평': 579000,
+  };
+  for (const [key, price] of Object.entries(expected)) {
+    assert.equal(CANONICAL_PRICES[key], price, `${key} 상수`);
+    const rule = db.prepare(
+      `SELECT base_price FROM price_rules WHERE service_type='입주청소' AND note=?`
+    ).get(key);
+    assert.equal(rule.base_price, price, `${key} DB 가격`);
+  }
+});
+
+test('가격은 단일 원천에서만 정의되고 UI/API에 중복 하드코딩되지 않는다', async () => {
+  const types = fs.readFileSync(path.join(process.cwd(), 'src/lib/types.ts'), 'utf8');
+  assert.match(types, /DEFAULT_BASE_PRICE_BY_HOUSE_TYPE/);
+  // pricing.ts는 상수를 참조만 한다
+  const pricingSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/pricing.ts'), 'utf8');
+  assert.match(pricingSrc, /MOVE_IN_BASE_PRICES: Record<string, number> = DEFAULT_BASE_PRICE_BY_HOUSE_TYPE/);
+  // 컴포넌트/라우트에 가격 숫자를 직접 박지 않는다
+  for (const f of ['src/components/PricingSection.tsx', 'src/app/api/pricing/route.ts']) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.doesNotMatch(src, /179000|239000|369000|579000/, `${f}에 가격 하드코딩`);
+  }
+});
+
+// ===========================================================================
+// [신규] 40평 이상 상담 전환
+// ===========================================================================
+
+test('40평 이상은 579,000원부터 시작가이며 확정 자동견적이 아니다', async () => {
+  const q = await pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 50 });
+  assert.equal(q.basePrice, CANONICAL_PRICES['40평']);
+  assert.equal(q.priceConfirmed, false);
+  assert.equal(q.consultRequired, true);
+  assert.equal(q.consultReason, 'size_40_plus');
+  assert.equal(q.isStartingPrice, true);
+  assert.match(q.displayPriceLabel, /579,000원부터/);
+  assert.match(q.notice, /상담 접수|영업일 기준 24시간/);
+});
+
+test('40평 이상은 날짜 조건 가산을 확정가처럼 더하지 않는다', async () => {
+  // 2026-12-19는 손없는날 — 일반 상품이면 +30,000
+  const q = await pricing.calculateQuote({
+    serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 50, desiredDate: '2026-12-19',
+  });
+  assert.equal(q.dateAdjustmentAmount, 0, '상담 상품에는 날짜 보정을 적용하지 않는다');
+  assert.match(q.displayPriceLabel, /579,000원부터/);
+});
+
+test('40평 이상은 예약금/계좌 단계로 진행할 수 없다', async () => {
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(
+    fullyAgreedReservationBody({
+      houseTypeKey: '40평', actualPyeong: 50,
+      customerPhone: '010-9100-0001', desiredDate: '2027-03-10',
+    })
+  ));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'CONSULT_REQUIRED');
+});
+
+// ===========================================================================
+// [신규] 날짜 조건 내부 가격 보정 (+30,000원 1회)
+// ===========================================================================
+
+const BASE_1R = 179000;
+const ADJ = 30000;
+
+async function quoteOn(date) {
+  return pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '원룸', desiredDate: date });
+}
+
+test('평일(특별일 아님)은 날짜 가산이 없다', async () => {
+  // 2026-12-15 화요일, 공휴일/손없는날 아님
+  const q = await quoteOn('2026-12-15');
+  assert.equal(q.dateAdjustmentAmount, 0);
+  assert.equal(q.estimatedTotal, BASE_1R);
+});
+
+test('토요일은 +30,000원이 가산된다', async () => {
+  const meta = specialDays.getSpecialDayMeta('2026-12-12'); // 토
+  assert.equal(meta.isWeekend, true);
+  const q = await quoteOn('2026-12-12');
+  assert.equal(q.dateAdjustmentAmount, ADJ);
+  assert.equal(q.estimatedTotal, BASE_1R + ADJ);
+});
+
+test('일요일은 +30,000원이 가산된다', async () => {
+  const meta = specialDays.getSpecialDayMeta('2026-12-13'); // 일
+  assert.equal(meta.isWeekend, true);
+  const q = await quoteOn('2026-12-13');
+  assert.equal(q.dateAdjustmentAmount, ADJ);
+  assert.equal(q.estimatedTotal, BASE_1R + ADJ);
+});
+
+test('공휴일은 +30,000원이 가산된다', async () => {
+  const meta = specialDays.getSpecialDayMeta('2026-12-25'); // 성탄절(금)
+  assert.equal(meta.isHoliday, true);
+  assert.equal(meta.isWeekend, false, '주말이 아닌 공휴일로 검증');
+  const q = await quoteOn('2026-12-25');
+  assert.equal(q.dateAdjustmentAmount, ADJ);
+  assert.equal(q.estimatedTotal, BASE_1R + ADJ);
+});
+
+test('손없는날은 +30,000원이 가산된다', async () => {
+  // 2026-12-17(목) = 음력 11월 9일 — 손없는날, 주말·공휴일 아님
+  const meta = specialDays.getSpecialDayMeta('2026-12-17');
+  assert.equal(meta.isSonEomneunDay, true);
+  assert.equal(meta.isWeekend, false);
+  assert.equal(meta.isHoliday, false);
+  const q = await quoteOn('2026-12-17');
+  assert.equal(q.dateAdjustmentAmount, ADJ);
+  assert.equal(q.estimatedTotal, BASE_1R + ADJ);
+});
+
+test('토요일+손없는날이 겹쳐도 +30,000원만 1회 적용된다', async () => {
+  // 2026-02-07(토) = 음력 12월 20일 — 토요일 + 손없는날
+  const meta = specialDays.getSpecialDayMeta('2026-02-07');
+  assert.equal(meta.isWeekend, true);
+  assert.equal(meta.isSonEomneunDay, true);
+  const q = await quoteOn('2026-02-07');
+  assert.equal(q.dateAdjustmentAmount, ADJ, '조건 2개여도 30,000원 1회');
+  assert.equal(q.estimatedTotal, BASE_1R + ADJ);
+  assert.notEqual(q.estimatedTotal, BASE_1R + ADJ * 2);
+});
+
+test('공휴일+손없는날이 겹쳐도 +30,000원만 1회 적용된다', async () => {
+  // 2026-02-16(월) = 설날 연휴 + 음력 12월 29일(손없는날)
+  const meta = specialDays.getSpecialDayMeta('2026-02-16');
+  assert.equal(meta.isHoliday, true);
+  assert.equal(meta.isSonEomneunDay, true);
+  assert.equal(meta.isWeekend, false, '주말이 아닌 조건 중복으로 검증');
+  assert.equal(specialDays.getDateAdjustment('2026-02-16'), ADJ);
+});
+
+test('일요일+공휴일이 겹쳐도 +30,000원만 1회 적용된다', async () => {
+  // 2027-03-01 삼일절(월)이 아니라 주말 겹치는 날 확인
+  const dates = ['2026-03-01']; // 삼일절 일요일
+  for (const d of dates) {
+    const meta = specialDays.getSpecialDayMeta(d);
+    assert.equal(meta.isWeekend && meta.isHoliday, true, `${d}는 일요일+공휴일`);
+    assert.equal(specialDays.getDateAdjustment(d), ADJ);
+  }
+});
+
+test('날짜 보정은 서비스 승수 적용 후 총액에 1회만 더해진다', async () => {
+  const q = await pricing.calculateQuote({
+    serviceType: '사이청소', houseTypeKey: '원룸', desiredDate: '2026-12-12',
+  });
+  // 사이청소 = 기준가 × 1.5, 그 뒤 날짜 보정 1회
+  assert.equal(q.priceAfterMultiplier, Math.round(BASE_1R * 1.5));
+  assert.equal(q.dateAdjustmentAmount, ADJ);
+  assert.equal(q.estimatedTotal, Math.round(BASE_1R * 1.5) + ADJ);
+});
+
+// ===========================================================================
+// [신규] 고객 API 내부 사유 비노출
+// ===========================================================================
+
+test('공개 quote 응답에 날짜 가산 사유/내부 금액 필드가 없다', async () => {
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '원룸', extraOptions: [], desiredDate: '2026-12-12',
+  }));
+  assert.equal(res.status, 200);
+  const q = res.body.quote;
+  // 보정이 반영된 최종 금액만 본다
+  assert.equal(q.estimatedTotal, BASE_1R + ADJ);
+  // 내부 필드는 제거되어야 한다
+  assert.equal(q.dateAdjustmentApplied, undefined);
+  assert.equal(q.dateAdjustmentAmount, undefined);
+  assert.equal(q.consultReason, undefined);
+  const serialized = JSON.stringify(res.body);
+  for (const banned of ['weekendSurcharge', 'holidayFee', 'sonEomneunFee', '주말 할증', '공휴일 할증', '손없는날 할증']) {
+    assert.doesNotMatch(serialized, new RegExp(banned), `${banned}가 노출되면 안 된다`);
+  }
+});
+
+test('고객 견적 안내 문구에 VAT 별도/부가세 별도 표현이 없다', async () => {
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', extraOptions: [],
+  }));
+  const serialized = JSON.stringify(res.body);
+  assert.doesNotMatch(serialized, /VAT 별도/);
+  assert.doesNotMatch(serialized, /부가세 별도/);
+  assert.match(res.body.quote.notice, /부가세가 포함/);
+});
+
+test('소스 전체에 VAT 별도/부가세 별도 문구가 남아 있지 않다', async () => {
+  const roots = ['src/lib', 'src/components', 'src/app'];
+  const offenders = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (/\.(ts|tsx)$/.test(e.name)) {
+        const src = fs.readFileSync(full, 'utf8');
+        // 정책을 설명하는 주석 라인은 허용한다 (고객에게 노출되는 문자열만 검사)
+        const lines = src.split('\n').filter((l) => {
+          if (!/VAT 별도|부가세 별도/.test(l)) return false;
+          const t = l.trim();
+          const isComment = t.startsWith('//') || t.startsWith('*') || t.startsWith('/*');
+          if (isComment) return false;
+          // 정규식으로 구 문구를 차단하는 코드도 허용
+          if (/banned|sanitize|doesNotMatch|assert/.test(l)) return false;
+          return true;
+        });
+        if (lines.length) offenders.push(`${full}: ${lines[0].trim()}`);
+      }
+    }
+  };
+  for (const r of roots) walk(path.join(process.cwd(), r));
+  assert.deepEqual(offenders, [], `VAT 별도 문구 잔존:\n${offenders.join('\n')}`);
+});
+
+// ===========================================================================
+// [신규] 특별일 데이터 지원 범위
+// ===========================================================================
+
+test('특별일 데이터는 예약 가능 기간(오늘+365일)을 커버한다', async () => {
+  const today = new Date();
+  const maxDate = new Date(today);
+  maxDate.setDate(maxDate.getDate() + 365);
+  const maxYear = maxDate.getFullYear();
+  assert.ok(
+    maxYear <= specialDays.SUPPORTED_YEARS.max,
+    `예약 가능 최대 연도(${maxYear})가 특별일 데이터 범위(${specialDays.SUPPORTED_YEARS.max})를 벗어남 — 데이터 확장 필요`
+  );
+});
+
+test('지원 범위 밖 연도는 조용히 일반일로 처리하지 않고 supported=false로 표시한다', async () => {
+  const meta = specialDays.getSpecialDayMeta('2030-01-01');
+  assert.equal(meta.supported, false);
+  // 주말 판정은 연도와 무관하게 정확해야 한다
+  const sat = specialDays.getSpecialDayMeta('2030-01-05');
+  assert.equal(sat.isWeekend, true);
+});
+
+// ===========================================================================
+// [신규] 반려동물 상담 전환
+// ===========================================================================
+
+test('반려동물 있음은 상담 전환 대상이다', async () => {
+  const q = await pricing.calculateQuote({
+    serviceType: '입주청소', houseTypeKey: '24평', hasPet: true,
+  });
+  assert.equal(q.consultRequired, true);
+  assert.equal(q.consultReason, 'pet');
+  assert.match(q.notice, /반려동물|영업일 기준 24시간/);
+});
+
+test('반려동물 있음은 예약 생성 API가 일반 예약 대신 상담접수로 전환한다', async () => {
+  const before = db.prepare('SELECT COUNT(*) as c FROM reservations').get().c;
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(
+    fullyAgreedReservationBody({
+      houseTypeKey: '24평', hasPet: true,
+      customerPhone: '010-9200-0001', desiredDate: '2027-04-05',
+    })
+  ));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'CONSULT_REQUIRED');
+  assert.equal(res.body.consultReason, 'pet');
+  assert.ok(res.body.requestCode, '상담접수 번호가 발급되어야 한다');
+  const after = db.prepare('SELECT COUNT(*) as c FROM reservations').get().c;
+  assert.equal(after, before, '일반 예약이 생성되면 안 된다');
+});
+
+test('반려동물 상담 건은 deposit-account 접근이 차단된다', async () => {
+  const { reservation } = await createReservationWithDepositAccount({
+    houseTypeKey: '24평', customerPhone: '010-9200-0002', desiredDate: '2027-04-06',
+  });
+  // 데이터가 어떤 경로로든 pet=1이 되면 계좌 gate가 다시 막아야 한다
+  db.prepare(`UPDATE reservations SET has_pet=1, account_revealed_at=NULL WHERE id=?`).run(reservation.id);
+  db.prepare(`DELETE FROM payments WHERE reservation_id=?`).run(reservation.id);
+  db.prepare(`UPDATE reservations SET reservation_status='received' WHERE id=?`).run(reservation.id);
+
+  await assert.rejects(
+    () => reservations.revealDepositAccount(reservation.id),
+    /반려동물|상담/,
+    '반려동물 상담 건에 계좌가 공개되면 안 된다'
+  );
+});
+
+test('반려동물 정보는 정식 컬럼(has_pet)에 저장된다', async () => {
+  const { reservation } = await createReservationWithDepositAccount({
+    houseTypeKey: '24평', customerPhone: '010-9200-0003', desiredDate: '2027-04-07',
+  });
+  const row = db.prepare('SELECT has_pet FROM reservations WHERE id=?').get(reservation.id);
+  assert.equal(row.has_pet, 0, '반려동물 없음은 0');
+});
+
+// ===========================================================================
+// [신규] 상담접수 파이프라인
+// ===========================================================================
+
+test('상담접수는 캘린더 capacity/remaining을 차감하지 않는다', async () => {
+  const date = '2027-05-10';
+  await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
+  const before = await calendar.getDaySlotView(date);
+
+  const consultations = await import('../src/lib/consultations.ts');
+  await consultations.createConsultation({
+    customerName: '상담고객', customerPhone: '010-9300-0001',
+    serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 55,
+    preferredDate: date, preferredTimeSlot: 'morning',
+    reason: 'size_40_plus', privacyAgreed: true,
+  });
+
+  const after = await calendar.getDaySlotView(date);
+  assert.equal(after.morning.remaining, before.morning.remaining, '상담접수는 슬롯을 점유하지 않는다');
+  assert.equal(after.morning.bookedCount, before.morning.bookedCount);
+});
+
+test('상담접수는 예약/payment를 생성하지 않는다', async () => {
+  const consultations = await import('../src/lib/consultations.ts');
+  const resCount = db.prepare('SELECT COUNT(*) as c FROM reservations').get().c;
+  const payCount = db.prepare('SELECT COUNT(*) as c FROM payments').get().c;
+
+  const created = await consultations.createConsultation({
+    customerName: '상담고객2', customerPhone: '010-9300-0002',
+    serviceType: '입주청소', houseTypeKey: '40평',
+    reason: 'size_40_plus', privacyAgreed: true,
+  });
+
+  assert.match(created.request_code, /^CS-/);
+  assert.equal(created.status, 'received');
+  assert.equal(db.prepare('SELECT COUNT(*) as c FROM reservations').get().c, resCount);
+  assert.equal(db.prepare('SELECT COUNT(*) as c FROM payments').get().c, payCount);
+});
+
+test('상담접수의 참고 시작가는 확정 견적이 아니다', async () => {
+  const consultations = await import('../src/lib/consultations.ts');
+  const created = await consultations.createConsultation({
+    customerName: '상담고객3', customerPhone: '010-9300-0003',
+    serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 60,
+    reason: 'size_40_plus', privacyAgreed: true,
+  });
+  // 시작가만 보존하고 확정 총액/예약금 필드는 없다
+  assert.equal(created.reference_price, CANONICAL_PRICES['40평']);
+  assert.equal(created.converted_reservation_id, null);
+});
+
+// ===========================================================================
+// [신규] 공개 캘린더 수량 비노출 / 관리자 수량 유지
+// ===========================================================================
+
+test('공개 캘린더 API는 remaining/capacity/bookedCount를 노출하지 않는다', async () => {
+  const calendarRoute = await import('../src/app/api/calendar/route.ts');
+  const res = await calendarRoute.GET({ url: 'http://localhost/api/calendar?start=2026-12-01&end=2026-12-03' });
+  const body = await res.json();
+  const serialized = JSON.stringify(body);
+  for (const banned of ['remaining', 'capacity', 'bookedCount']) {
+    assert.doesNotMatch(serialized, new RegExp(banned), `${banned}가 공개 응답에 있으면 안 된다`);
+  }
+  // 공개상태와 특별일 메타는 있어야 한다
+  assert.ok(body.days[0].morning.publicStatus);
+  assert.equal(typeof body.days[0].isSonEomneunDay, 'boolean');
+});
+
+test('관리자 캘린더는 내부 수량 데이터를 그대로 유지한다', async () => {
+  const view = await calendar.getDaySlotView('2026-12-01');
+  assert.equal(typeof view.morning.capacity, 'number');
+  assert.equal(typeof view.morning.bookedCount, 'number');
+  assert.equal(typeof view.morning.remaining, 'number');
+});
+
+// ===========================================================================
+// [신규] 홈페이지 구성 / 사진 20장 / 브랜드
+// ===========================================================================
+
+test('홈페이지 메인에 PricingSection이 렌더링되지 않는다', async () => {
+  const page = fs.readFileSync(path.join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+  assert.doesNotMatch(page, /<PricingSection/);
+  assert.doesNotMatch(page, /import PricingSection/);
+});
+
+test('서비스 섹션 제목은 "청소 서비스 구분"이고 선택 유도 표현이 없다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/ServiceList.tsx'), 'utf8');
+  assert.match(src, /청소 서비스 구분/);
+  assert.doesNotMatch(src, /필요한 청소를 선택하세요/);
+});
+
+test('Hero는 제공된 2장을 모두 슬라이드로 사용한다', async () => {
+  const images = await import('../src/lib/images.ts');
+  assert.equal(images.HERO_SLIDES.length, 2);
+  const srcs = images.HERO_SLIDES.map((s) => s.src);
+  assert.ok(srcs.includes('/images/clean/hero/hero-living-room.webp'));
+  assert.ok(srcs.includes('/images/clean/hero/hero-kitchen.webp'));
+  const hero = fs.readFileSync(path.join(process.cwd(), 'src/components/HeroBanner.tsx'), 'utf8');
+  assert.match(hero, /HERO_SLIDES\.map/, 'Hero가 두 장을 모두 렌더링해야 한다');
+});
+
+test('제공된 사진 20장이 모두 컴포넌트 트리에서 실제로 사용된다', async () => {
+  const publicDir = path.join(process.cwd(), 'public/images/clean');
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (e.name.endsWith('.webp')) files.push(full.replace(path.join(process.cwd(), 'public'), ''));
+    }
+  };
+  walk(publicDir);
+  assert.equal(files.length, 20, '제공 사진은 20장이다');
+
+  // images.ts에 전부 등록되어야 한다
+  const imagesSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/images.ts'), 'utf8');
+  const unregistered = files.filter((f) => !imagesSrc.includes(f));
+  assert.deepEqual(unregistered, [], `images.ts 미등록:\n${unregistered.join('\n')}`);
+
+  // 등록된 export가 실제 컴포넌트에서 렌더링되어야 한다
+  const images = await import('../src/lib/images.ts');
+  const used = new Set();
+  images.HERO_SLIDES.forEach((i) => used.add(i.src));
+  used.add(images.CTA_IMAGE.src);
+  images.BEFORE_AFTER_PAIRS.forEach((p) => { used.add(p.before.src); used.add(p.after.src); });
+  images.PORTFOLIO_ITEMS.forEach((p) => used.add(p.image.src));
+  images.DETAIL_CASES.forEach((d) => used.add(d.image.src));
+  const notUsed = files.filter((f) => !used.has(f));
+  assert.deepEqual(notUsed, [], `화면에서 사용되지 않는 사진:\n${notUsed.join('\n')}`);
+
+  // 각 배열을 렌더링하는 컴포넌트가 존재해야 한다
+  const comps = {
+    'src/components/HeroBanner.tsx': /HERO_SLIDES/,
+    'src/components/BeforeAfterGallery.tsx': /BEFORE_AFTER_PAIRS/,
+    'src/components/CleaningPortfolio.tsx': /PORTFOLIO_ITEMS/,
+    'src/components/DetailCleaningFocus.tsx': /DETAIL_CASES/,
+    'src/components/CtaBanner.tsx': /CTA_IMAGE/,
+  };
+  for (const [file, re] of Object.entries(comps)) {
+    const src = fs.readFileSync(path.join(process.cwd(), file), 'utf8');
+    assert.match(src, re, `${file}이 이미지를 렌더링해야 한다`);
+  }
+
+  // 해당 컴포넌트들이 홈페이지에 배치되어야 한다
+  const page = fs.readFileSync(path.join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+  for (const c of ['HeroBanner', 'BeforeAfterGallery', 'CleaningPortfolio', 'DetailCleaningFocus', 'CtaBanner']) {
+    assert.match(page, new RegExp(`<${c}`), `${c}가 홈페이지에 없다`);
+  }
+});
+
+test('Footer에 주식회사 플린과 사업자 정보가 표시된다', async () => {
+  const footer = fs.readFileSync(path.join(process.cwd(), 'src/components/SiteFooter.tsx'), 'utf8');
+  assert.match(footer, /legalCompanyName/);
+  assert.match(footer, /bizNumber/);
+  assert.match(footer, /mailOrderNumber/);
+  assert.match(footer, /brandName/);
+});
+
+test('브랜드/법인 settings fallback이 동작한다', async () => {
+  const settings = await import('../src/lib/settings.ts');
+  assert.equal(settings.BRAND_FALLBACK.brandName, 'CLYN CLEAN CARE');
+  assert.equal(settings.BRAND_FALLBACK.legalCompanyName, '주식회사 플린');
+  assert.equal(settings.BRAND_FALLBACK.legalCompanyNameEn, 'Plyn Inc.');
+  assert.equal(settings.BRAND_FALLBACK.bizNumber, '792-81-04045');
+  // 사용자가 제공한 주소 표기를 임의 교정하지 않는다
+  assert.match(settings.BRAND_FALLBACK.address, /경원빌딘/);
+
+  const company = await settings.getCompanySettings();
+  assert.equal(company.brandName, 'CLYN CLEAN CARE');
+  assert.equal(company.legalCompanyName, '주식회사 플린');
+});
+
+test('Header에 상담 접수 메뉴가 있다', async () => {
+  const header = fs.readFileSync(path.join(process.cwd(), 'src/components/SiteHeader.tsx'), 'utf8');
+  assert.match(header, /\/consultation/);
+  assert.match(header, /상담 접수/);
+});
+
+test('Header는 텍스트 로고타입이 아니라 실제 BI 이미지를 사용한다', async () => {
+  const header = fs.readFileSync(path.join(process.cwd(), 'src/components/SiteHeader.tsx'), 'utf8');
+  // next/image로 BI를 렌더링해야 한다
+  assert.match(header, /from "next\/image"/);
+  assert.match(header, /BRAND_LOGO/);
+  // 임시 텍스트 로고타입은 제거되어야 한다
+  assert.doesNotMatch(header, /tracking-\[0\.18em\]/, '텍스트 로고타입이 남아 있으면 안 된다');
+});
+
+test('BI 원본 파일이 존재하고 종횡비가 보존된다', async () => {
+  const logoPath = path.join(process.cwd(), 'public/images/brand/clyn-clean-care-logo.png');
+  assert.ok(fs.existsSync(logoPath), 'BI 원본 파일이 있어야 한다');
+
+  const images = await import('../src/lib/images.ts');
+  assert.equal(images.BRAND_LOGO.src, '/images/brand/clyn-clean-care-logo.png');
+  // 원본 크기 그대로 (임의 크롭/리사이즈 금지)
+  assert.equal(images.BRAND_LOGO.width, 1448);
+  assert.equal(images.BRAND_LOGO.height, 1086);
+
+  // 실제 PNG 헤더의 크기와 일치해야 한다
+  const buf = fs.readFileSync(logoPath);
+  assert.equal(buf.readUInt32BE(16), images.BRAND_LOGO.width);
+  assert.equal(buf.readUInt32BE(20), images.BRAND_LOGO.height);
+});
+
+// ===========================================================================
+// [신규] 공식 기준 날짜 검증
+//
+// 테스트가 코드 테이블을 자기검증하지 않도록, 독립적인 음력 변환 라이브러리
+// (한국천문연구원 기준)로 손없는날을 재계산해 대조한다.
+// ===========================================================================
+
+test('손없는날 데이터가 KASI 음력 변환 결과와 정확히 일치한다', async () => {
+  const { createRequire } = await import('node:module');
+  const KLC = createRequire(import.meta.url)('korean-lunar-calendar');
+  const SON = new Set([9, 10, 19, 20, 29, 30]);
+  const pad = (n) => String(n).padStart(2, '0');
+
+  // 라이브러리 자체를 먼저 검증 — KASI 공식 명절 날짜와 대조
+  const known = [
+    ['2026-02-17', 1, 1],   // 설날
+    ['2026-09-25', 8, 15],  // 추석
+    ['2026-05-24', 4, 8],   // 부처님오신날
+    ['2027-02-07', 1, 1],
+    ['2027-09-15', 8, 15],
+  ];
+  for (const [date, lm, ld] of known) {
+    const [y, m, d] = date.split('-').map(Number);
+    const c = new KLC();
+    c.setSolarDate(y, m, d);
+    const l = c.getLunarCalendar();
+    assert.equal(l.month, lm, `${date} 음력 월`);
+    assert.equal(l.day, ld, `${date} 음력 일`);
+  }
+
+  // 독립 재계산 결과와 코드 테이블 대조
+  for (const year of [2026, 2027, 2028]) {
+    const expected = [];
+    for (let m = 1; m <= 12; m++) {
+      const last = new Date(Date.UTC(year, m, 0)).getUTCDate();
+      for (let d = 1; d <= last; d++) {
+        const c = new KLC();
+        if (!c.setSolarDate(year, m, d)) continue;
+        const l = c.getLunarCalendar();
+        if (l && SON.has(l.day)) expected.push(`${year}-${pad(m)}-${pad(d)}`);
+      }
+    }
+    const actual = expected.filter((d) => specialDays.getSpecialDayMeta(d).isSonEomneunDay);
+    assert.deepEqual(actual, expected, `${year} 손없는날 누락`);
+
+    // 손없는날이 아닌 날이 잘못 포함되지 않았는지 역방향 확인
+    for (let m = 1; m <= 12; m++) {
+      const last = new Date(Date.UTC(year, m, 0)).getUTCDate();
+      for (let d = 1; d <= last; d++) {
+        const ds = `${year}-${pad(m)}-${pad(d)}`;
+        if (expected.includes(ds)) continue;
+        assert.equal(
+          specialDays.getSpecialDayMeta(ds).isSonEomneunDay, false,
+          `${ds}는 손없는날이 아닌데 포함됨`
+        );
+      }
+    }
+  }
+});
+
+test('2026·2027 공휴일에 노동절과 제헌절이 포함된다', async () => {
+  // 2026-05-11 시행: 제헌절 공휴일 재지정, 노동절 공휴일 지정
+  const cases = [
+    ['2026-05-01', '노동절'],
+    ['2026-07-17', '제헌절'],
+    ['2027-05-01', '노동절'],
+    ['2027-07-17', '제헌절'],
+  ];
+  for (const [date, name] of cases) {
+    const meta = specialDays.getSpecialDayMeta(date);
+    assert.equal(meta.isHoliday, true, `${date} ${name}이 공휴일이어야 한다`);
+    assert.match(meta.holidayName, new RegExp(name));
+  }
+});
+
+test('2027 노동절·제헌절 대체공휴일이 정확하다', async () => {
+  // 2027-05-01(토) 노동절 → 2027-05-03(월) 대체
+  const labor = specialDays.getSpecialDayMeta('2027-05-03');
+  assert.equal(labor.isHoliday, true);
+  assert.match(labor.holidayName, /노동절 대체공휴일/);
+
+  // 2027-07-17(토) 제헌절 → 2027-07-19(월) 대체
+  const consti = specialDays.getSpecialDayMeta('2027-07-19');
+  assert.equal(consti.isHoliday, true);
+  assert.match(consti.holidayName, /제헌절 대체공휴일/);
+});
+
+test('설날·추석 연휴는 토요일 겹침으로 대체공휴일이 생기지 않는다', async () => {
+  // 2026 추석: 9/24(목) 9/25(금) 9/26(토) — 토요일 겹침은 대체 대상 아님
+  assert.equal(specialDays.getSpecialDayMeta('2026-09-28').isHoliday, false);
+  // 2027 설날: 2/6(토) 2/7(일) 2/8(월) — 일요일 겹침 1일만 대체
+  assert.equal(specialDays.getSpecialDayMeta('2027-02-09').isHoliday, true);
+  assert.equal(specialDays.getSpecialDayMeta('2027-02-10').isHoliday, false, '대체는 1일만');
+});
+
+test('공휴일 테이블에 필수 공휴일이 연도별로 모두 존재한다', async () => {
+  const required = ['신정', '삼일절', '노동절', '어린이날', '현충일', '제헌절', '광복절', '개천절', '한글날', '성탄절', '설날', '추석', '부처님오신날'];
+  for (const year of [2026, 2027, 2028]) {
+    const names = [];
+    for (let m = 1; m <= 12; m++) {
+      const last = new Date(Date.UTC(year, m, 0)).getUTCDate();
+      for (let d = 1; d <= last; d++) {
+        const meta = specialDays.getSpecialDayMeta(`${year}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`);
+        if (meta.holidayName) names.push(meta.holidayName);
+      }
+    }
+    for (const r of required) {
+      assert.ok(names.some((n) => n.includes(r)), `${year}년에 ${r}이 없다`);
+    }
+  }
+});
+
+// ===========================================================================
+// [신규] 지원 범위 밖 날짜는 예약을 허용하지 않는다
+// ===========================================================================
+
+test('특별일 데이터 지원 범위는 예약 가능 기간(오늘+365일)을 커버한다', async () => {
+  const max = new Date();
+  max.setDate(max.getDate() + 365);
+  assert.ok(
+    max.getFullYear() <= specialDays.SUPPORTED_YEARS.max,
+    `예약 가능 최대 연도(${max.getFullYear()})가 데이터 범위(${specialDays.SUPPORTED_YEARS.max})를 초과 — scripts/generate-special-days.mjs로 확장 필요`
+  );
+});
+
+test('캐시에 없는 날짜는 견적 계산이 거부된다 (일반일로 간주 금지)', async () => {
+  await assert.rejects(
+    () => pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '원룸', desiredDate: '2030-06-15' }),
+    /공휴일 정보가 아직 준비되지 않았습니다/,
+    '캐시에 없는 날짜로 금액을 확정하면 안 된다'
+  );
+});
+
+test('지원 범위 밖 날짜는 quote API가 400으로 거부한다', async () => {
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '원룸', extraOptions: [], desiredDate: '2030-06-15',
+  }));
+  assert.equal(res.status, 400);
+  // 예약 가능 기간 검증이 먼저 걸러내고, 통과하더라도 특별일 데이터 범위에서 다시 막힌다
+  assert.ok(
+    ['OUT_OF_BOOKING_WINDOW', 'SPECIAL_DAY_NOT_SYNCED'].includes(res.body.code),
+    `예상 밖 코드: ${res.body.code}`
+  );
+});
+
+test('특수일 캐시 검증은 예약 창과 독립적으로도 동작한다', async () => {
+  // 예약 가능 기간을 통과하더라도 calculateQuote가 캐시 부재를 직접 막는다
+  await assert.rejects(
+    () => pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '원룸', desiredDate: '2030-06-15' }),
+    /공휴일 정보가 아직 준비되지 않았습니다/
+  );
+  const synced = await specialDayStore.isDateSynced('2030-06-15');
+  assert.equal(synced, false);
+});
+
+// ===========================================================================
+// [신규] 상담 개인정보 동의 우회 방지
+// ===========================================================================
+
+test('동의를 전송하는 모든 폼이 privacyAgreed를 하드코딩하지 않는다', async () => {
+  const forms = [
+    'src/components/booking/BookingForm.tsx',
+    'src/app/consultation/ConsultationForm.tsx',
+  ];
+  for (const f of forms) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.doesNotMatch(src, /privacyAgreed:\s*true/, `${f}에 동의값 하드코딩`);
+    assert.doesNotMatch(src, /Agreed:\s*true/, `${f}에 동의값 하드코딩`);
+  }
+  // 실제 체크 state를 전송해야 한다
+  const booking = fs.readFileSync(path.join(process.cwd(), forms[0]), 'utf8');
+  assert.match(booking, /privacyAgreed:\s*consultPrivacyAgreed/);
+  assert.match(booking, /privacyAgreed,/, '일반 예약도 체크값 전송');
+  const consult = fs.readFileSync(path.join(process.cwd(), forms[1]), 'utf8');
+  assert.match(consult, /privacyAgreed:\s*agreed/);
+});
+
+test('소스 전체에 동의값 하드코딩이 없다', async () => {
+  const offenders = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (/\.tsx?$/.test(e.name)) {
+        const src = fs.readFileSync(full, 'utf8');
+        // 서버가 검증 후 저장하는 경로(lib/api)는 제외하고 클라이언트 폼만 검사
+        if (!full.includes('components') && !full.includes('app/consultation')) continue;
+        if (/(privacyAgreed|corePrinciplesAgreed|serviceTermsAgreed|additionalChargeAgreed):\s*true/.test(src)) {
+          offenders.push(full.replace(process.cwd() + '/', ''));
+        }
+      }
+    }
+  };
+  walk(path.join(process.cwd(), 'src'));
+  assert.deepEqual(offenders, [], `동의값 하드코딩:\n${offenders.join('\n')}`);
+});
+
+test('상담접수 API는 개인정보 미동의를 거부한다', async () => {
+  const route = await import('../src/app/api/consultations/route.ts');
+  const headers = new Headers();
+  headers.set('x-forwarded-for', '198.51.100.77');
+  const res = await route.POST({
+    headers,
+    async json() {
+      return {
+        customerName: '테스트', customerPhone: '010-9999-1234',
+        serviceType: '입주청소', privacyAgreed: false,
+      };
+    },
+  });
+  assert.equal(res.status, 400);
+});
+
+test('반려동물 확인 UI가 있었음/관련없음으로 제공된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  assert.match(src, /있었음/);
+  assert.match(src, /관련없음/);
+  assert.match(src, /petConfirmed/);
+});
+
+// ===========================================================================
+// [신규] 개인정보처리방침 / 브랜드·법인 분리
+// ===========================================================================
+
+test('개인정보처리방침이 legacy company_name 대신 법적 운영주체를 사용한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/privacy/page.tsx'), 'utf8');
+  assert.doesNotMatch(src, /getSetting\("company_name"\)/, 'legacy company_name 직접 사용 금지');
+  assert.match(src, /getCompanySettings/);
+  assert.match(src, /legalCompanyName/);
+  // placeholder가 남아 있으면 안 된다
+  assert.doesNotMatch(src, /\[회사명\]/);
+  assert.doesNotMatch(src, /\[연락처\]/);
+  assert.doesNotMatch(src, /\[사업자등록번호\]/);
+});
+
+test('기본 상태에서 운영주체 정보가 placeholder 없이 표시된다', async () => {
+  const settings = await import('../src/lib/settings.ts');
+  const company = await settings.getCompanySettings();
+  assert.equal(company.legalCompanyName, '주식회사 플린');
+  assert.equal(company.legalCompanyNameEn, 'Plyn Inc.');
+  assert.equal(company.bizNumber, '792-81-04045');
+  assert.equal(company.phone, '070-4155-5403');
+  assert.match(company.mailOrderNumber, /2026-의정부흥선-0327/);
+});
+
+test('관리자 settings에서 브랜드/법인 필드를 편집할 수 있다', async () => {
+  const api = fs.readFileSync(path.join(process.cwd(), 'src/app/api/admin/settings/route.ts'), 'utf8');
+  for (const key of ['brand_name', 'legal_company_name', 'legal_company_name_en', 'company_mail_order_number']) {
+    assert.match(api, new RegExp(`"${key}"`), `${key}가 allowlist에 없다`);
+  }
+  const ui = fs.readFileSync(path.join(process.cwd(), 'src/app/admin/(protected)/settings/page.tsx'), 'utf8');
+  for (const key of ['brand_name', 'legal_company_name', 'legal_company_name_en', 'company_mail_order_number']) {
+    assert.match(ui, new RegExp(key), `${key} 편집 필드가 없다`);
+  }
+});
+
+test('환불 페이지에 반려동물 추가금 미확정 문구가 없다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/refund/page.tsx'), 'utf8');
+  assert.doesNotMatch(src, /반려동물 추가금/);
+  // 현재 정책(상담 전환)이 반영되어야 한다
+  assert.match(src, /상담/);
+});
+
+// ===========================================================================
+// [신규] 가격 migration / 반려동물 동의문구 / 선거일
+// ===========================================================================
+
+test('가격 갱신은 기존 migration 수정이 아니라 신규 migration으로 추가됐다', async () => {
+  const dir = path.join(process.cwd(), 'supabase/migrations');
+  const files = fs.readdirSync(dir).sort();
+
+  // 이미 Supabase에 적용된 migration은 내용이 변경되면 안 된다.
+  // 원본 ZIP 기준 SHA-256으로 고정한다.
+  const crypto = await import('node:crypto');
+  const FROZEN = {
+    '20260908090000_initial_clyn_clean.sql':
+      '28fd0758644e00a58544b850059032ba53c0902fdc3e5092b388fc12c44054fb',
+    '20260908091500_database_hardening.sql':
+      'ddbb3386cd315361913c4dadaabe5a7195016a700176f4302bf6abecc0721d65',
+  };
+  for (const [name, hash] of Object.entries(FROZEN)) {
+    const actual = crypto
+      .createHash('sha256')
+      .update(fs.readFileSync(path.join(dir, name)))
+      .digest('hex');
+    assert.equal(actual, hash, `${name}이 수정됐다 — 기존 migration은 변경 금지`);
+  }
+
+  // 신규 가격 migration이 존재하고 12개 가격을 모두 갱신한다
+  const rev = files.find((f) => f.includes('price_revision_vat_included'));
+  assert.ok(rev, '가격 갱신 신규 migration이 있어야 한다');
+  const sql = fs.readFileSync(path.join(dir, rev), 'utf8');
+  for (const price of [179000, 239000, 249000, 269000, 319000, 329000, 369000, 420000, 459000, 489000, 539000, 579000]) {
+    assert.match(sql, new RegExp(String(price)), `${price} 갱신 누락`);
+  }
+  // 파괴적 구문 금지
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+  assert.doesNotMatch(sql, /DELETE\s+FROM/i);
+});
+
+test('DB 가격이 12개 상품 모두 최신 값과 일치한다', async () => {
+  const expected = {
+    '원룸': 179000, '원룸 복층': 239000, '1.5룸': 249000, '투룸': 269000,
+    '쓰리룸': 319000, '18평': 329000, '24평': 369000, '28평': 420000,
+    '32평': 459000, '34평': 489000, '38평': 539000, '40평': 579000,
+  };
+  for (const [note, price] of Object.entries(expected)) {
+    const row = db.prepare(
+      `SELECT base_price FROM price_rules WHERE service_type='입주청소' AND note=?`
+    ).get(note);
+    assert.ok(row, `${note} 가격 규칙 없음`);
+    assert.equal(row.base_price, price, `${note} DB 가격`);
+  }
+});
+
+test('40평은 DB 기준가 579,000을 유지하되 고객에게는 시작가로만 표시된다', async () => {
+  const row = db.prepare(`SELECT base_price FROM price_rules WHERE service_type='입주청소' AND note='40평'`).get();
+  assert.equal(row.base_price, 579000, 'DB에는 기준가를 그대로 저장');
+
+  const q = await pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 50 });
+  assert.equal(q.consultRequired, true);
+  assert.equal(q.priceConfirmed, false);
+  assert.equal(q.isStartingPrice, true);
+  assert.match(q.displayPriceLabel, /579,000원부터/);
+});
+
+test('동의서의 반려동물 문구가 상담 전환 정책과 일치한다', async () => {
+  const agreement = await import('../src/lib/agreement.ts');
+  const sec3 = agreement.AGREEMENT_SECTIONS.find((s) => s.no === 3);
+  // 반려동물을 단순 추가요금 항목으로 열거하면 안 된다
+  assert.doesNotMatch(sec3.body, /반려동물 털 등 특수·과다 오염 : 별도 추가요금/);
+  // 상담 전환 정책이 명시되어야 한다
+  assert.match(sec3.body, /반려동물이 있었던 공간/);
+  assert.match(sec3.body, /상담/);
+});
+
+test('공휴일 생성기가 선거일/임시공휴일 데이터 구조를 지원한다', async () => {
+  const gen = fs.readFileSync(path.join(process.cwd(), 'scripts/generate-holidays.mjs'), 'utf8');
+  assert.match(gen, /ELECTION_DAYS/);
+  assert.match(gen, /TEMPORARY_HOLIDAYS/);
+  // 선거일은 대체공휴일 적용 대상이 아니다
+  assert.match(gen, /대체공휴일 미적용|대체공휴일 적용 대상이 아니/);
+});
+
+test('선거일이 공휴일로 판정되고 날짜 가산에 반영된다', async () => {
+  // 2026-06-03 제9회 전국동시지방선거 (수요일)
+  const meta = specialDays.getSpecialDayMeta('2026-06-03');
+  assert.equal(meta.isHoliday, true);
+  assert.match(meta.holidayName, /지방선거/);
+  assert.equal(meta.isWeekend, false, '평일 선거일로 검증');
+  assert.equal(specialDays.getDateAdjustment('2026-06-03'), 30000);
+});
+
+test('선거일에는 대체공휴일이 생기지 않는다', async () => {
+  // 2026-06-03(수) 선거일 다음 평일에 대체공휴일이 생기면 안 된다
+  assert.equal(specialDays.getSpecialDayMeta('2026-06-04').isHoliday, false);
+});
+
+// ===========================================================================
+// [신규] balance_notice 부가세 포함 정책 / 반려동물 최종 확인 동기화
+// ===========================================================================
+
+test('balance_notice forward migration이 재실행 안전하게 추가됐다', async () => {
+  const dir = path.join(process.cwd(), 'supabase/migrations');
+  const f = fs.readdirSync(dir).find((n) => n.includes('balance_notice_vat_included'));
+  assert.ok(f, 'balance_notice 갱신 migration이 있어야 한다');
+  const sql = fs.readFileSync(path.join(dir, f), 'utf8');
+  assert.match(sql, /표시 금액은 부가세가 포함된 금액입니다/);
+  // 행 유무와 무관하게 동작해야 한다
+  assert.match(sql, /ON CONFLICT\s*\(key\)\s*DO UPDATE/i);
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+  assert.doesNotMatch(sql, /DELETE\s+FROM/i);
+});
+
+test('구 balance_notice 값이 DB에 남아 있어도 고객 견적에 노출되지 않는다', async () => {
+  const prev = db.prepare(`SELECT value FROM settings WHERE key='balance_notice'`).get()?.value;
+  try {
+    // 구 정책 값을 강제로 되돌려 놓는다
+    db.prepare(`UPDATE settings SET value=? WHERE key='balance_notice'`)
+      .run('잔금은 작업 완료 후 현장에서 안내드립니다.');
+
+    // 일반 견적
+    const q = await pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '24평' });
+    assert.doesNotMatch(q.notice, /잔금은 작업 완료 후/);
+    assert.match(q.notice, /부가세가 포함/);
+
+    // 집정리 견적 — balanceNotice를 직접 사용하는 경로
+    const j = await pricing.calculateQuote({ serviceType: '집정리', jipjeongriPackage: '2p4h' });
+    assert.doesNotMatch(j.notice, /잔금은 작업 완료 후/, '집정리 notice에 구 문구가 새어나오면 안 된다');
+    assert.doesNotMatch(j.notice, /VAT 별도|부가세 별도/);
+
+    // 공개 API 응답에도 없어야 한다
+    const res = await quoteRoute.POST(makeReq({
+      serviceType: '집정리', jipjeongriPackage: '2p4h', extraOptions: [],
+    }));
+    assert.doesNotMatch(JSON.stringify(res.body), /잔금은 작업 완료 후/);
+  } finally {
+    if (prev !== undefined) {
+      db.prepare(`UPDATE settings SET value=? WHERE key='balance_notice'`).run(prev);
+    }
+  }
+});
+
+test('VAT 별도 문구가 DB에 있어도 고객 견적에서 정화된다', async () => {
+  const prev = db.prepare(`SELECT value FROM settings WHERE key='balance_notice'`).get()?.value;
+  try {
+    db.prepare(`UPDATE settings SET value=? WHERE key='balance_notice'`)
+      .run('표시된 청소금액은 VAT 별도입니다.');
+    const q = await pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '원룸' });
+    assert.doesNotMatch(q.notice, /VAT 별도/);
+    assert.match(q.notice, /부가세가 포함/);
+  } finally {
+    if (prev !== undefined) {
+      db.prepare(`UPDATE settings SET value=? WHERE key='balance_notice'`).run(prev);
+    }
+  }
+});
+
+test('반려동물 최종 확인이 hasPet과 단일 source of truth로 동기화된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  // 최종 확인 버튼은 confirmPet 하나만 호출해야 한다
+  assert.match(src, /function confirmPet\(v: boolean\) \{[\s\S]*?setPetConfirmed\(v\);[\s\S]*?setHasPet\(v\);/);
+  // petConfirmed만 따로 바꾸는 잔재가 없어야 한다
+  assert.doesNotMatch(src, /onClick=\{\(\) => setPetConfirmed\(v\)\}/, 'hasPet과 분리된 핸들러가 남아 있으면 안 된다');
+  assert.doesNotMatch(src, /if \(v\) setHasPet\(true\)/, '단방향 동기화 잔재');
+  // 두 곳(상담 단계 / 동의 단계) 모두 confirmPet 사용
+  const calls = src.match(/confirmPet\(v\)/g) ?? [];
+  assert.equal(calls.length, 2, '상담 단계와 동의 단계 모두 confirmPet을 사용해야 한다');
+});
+
+test('40평 상담 건에서 최종 확인 "있었음"이면 반려동물 정보가 상담 데이터에 보존된다', async () => {
+  const consultations = await import('../src/lib/consultations.ts');
+  // 시나리오: 40평 이상 + 3단계에서 반려동물 없음 + 최종 확인에서 "있었음"
+  // → BookingForm이 hasPet=true로 동기화한 뒤 petMeta를 함께 전송한다
+  const created = await consultations.createConsultation({
+    customerName: '40평펫고객',
+    customerPhone: '010-9400-0001',
+    serviceType: '입주청소',
+    houseTypeKey: '40평',
+    actualPyeong: 55,
+    preferredDate: '2027-06-10',
+    reason: 'size_40_plus',
+    petMeta: { hasPet: true, confirmedAtFinalStep: true, type: '미입력', count: '미입력', hairSoil: '미입력', smell: false, feces: false, note: '' },
+    privacyAgreed: true,
+  });
+
+  assert.equal(created.reason, 'size_40_plus', '40평이 주 사유');
+  assert.ok(created.pet_meta, '반려동물 정보가 누락되면 안 된다');
+  const meta = JSON.parse(created.pet_meta);
+  assert.equal(meta.hasPet, true);
+  assert.equal(meta.confirmedAtFinalStep, true, '최종 확인 단계에서 선택했음을 기록');
+});
+
+test('최종 확인 "있었음"은 서버 상담 gate를 통과하지 못한다', async () => {
+  // hasPet=true가 전달되면 40평이 아니어도 서버가 상담으로 전환한다
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(
+    fullyAgreedReservationBody({
+      houseTypeKey: '24평', hasPet: true,
+      customerPhone: '010-9400-0002', desiredDate: '2027-06-11',
+      petMeta: { hasPet: true, confirmedAtFinalStep: true },
+    })
+  ));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'CONSULT_REQUIRED');
+  assert.equal(res.body.consultReason, 'pet');
+  assert.ok(res.body.requestCode);
+
+  // 상담 데이터에 반려동물 정보가 보존됐는지 확인
+  const row = db.prepare(
+    `SELECT pet_meta FROM consultation_requests WHERE request_code=?`
+  ).get(res.body.requestCode);
+  assert.ok(row?.pet_meta, '상담 데이터에 반려동물 정보가 저장되어야 한다');
+  assert.equal(JSON.parse(row.pet_meta).hasPet, true);
+});
+
+// ===========================================================================
+// [신규] 예약 가능기간 단일 source / 상담 필수정보 / 대체공휴일 중복 방지
+// ===========================================================================
+
+test('예약 가능기간이 booking-window 단일 원천으로 통일됐다', async () => {
+  const bw = await import('../src/lib/booking-window.ts');
+  assert.equal(bw.BOOKING_WINDOW_DAYS, 365);
+
+  const min = bw.bookingMinDate();
+  const max = bw.bookingMaxDate();
+  assert.match(min, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(max, /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(max > min);
+
+  // 365일 간격이어야 한다
+  const diff = (new Date(`${max}T00:00:00Z`) - new Date(`${min}T00:00:00Z`)) / 86400000;
+  assert.equal(diff, 365);
+
+  assert.equal(bw.isWithinBookingWindow(min), true);
+  assert.equal(bw.isWithinBookingWindow(max), true);
+  assert.equal(bw.isWithinBookingWindow('2020-01-01'), false);
+  assert.equal(bw.isWithinBookingWindow('2099-01-01'), false);
+});
+
+test('모든 소비처가 365를 하드코딩하지 않고 booking-window를 사용한다', async () => {
+  const consumers = [
+    'src/app/api/reservations/route.ts',
+    'src/app/api/quote/route.ts',
+    'src/app/api/calendar/route.ts',
+    'src/components/booking/ReservationCalendar.tsx',
+    'src/components/booking/BookingForm.tsx',
+  ];
+  for (const f of consumers) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.match(src, /booking-window/, `${f}가 booking-window를 사용해야 한다`);
+    assert.doesNotMatch(src, /isTooFarFuture\([^)]*365/, `${f}에 365 하드코딩`);
+  }
+});
+
+test('예약 가능기간 밖 날짜는 예약 생성 API가 거부한다', async () => {
+  const bw = await import('../src/lib/booking-window.ts');
+  const beyond = new Date(`${bw.bookingMaxDate()}T00:00:00Z`);
+  beyond.setUTCDate(beyond.getUTCDate() + 1);
+  const ds = beyond.toISOString().slice(0, 10);
+
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(
+    fullyAgreedReservationBody({ desiredDate: ds, customerPhone: '010-9500-0001' })
+  ));
+  assert.equal(res.status, 400);
+  assert.ok(
+    ['OUT_OF_BOOKING_WINDOW', 'SPECIAL_DAY_NOT_SYNCED'].includes(res.body.code) ||
+      /1년 이후|예약은 오늘부터/.test(res.body.error),
+    `예상 밖 응답: ${JSON.stringify(res.body)}`
+  );
+});
+
+test('캘린더는 예약 가능 월 범위를 벗어나 이동할 수 없다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
+  assert.match(src, /canGoPrev/);
+  assert.match(src, /canGoNext/);
+  assert.match(src, /disabled=\{!canGoPrev\}/);
+  assert.match(src, /disabled=\{!canGoNext\}/);
+  // 최대일 이후 날짜는 선택 불가 처리
+  assert.match(src, /isBeyondWindow/);
+});
+
+test('날짜 직접 입력에도 max가 적용된다', async () => {
+  for (const f of ['src/components/booking/BookingForm.tsx', 'src/app/consultation/ConsultationForm.tsx']) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.match(src, /max=\{(maxDate|bookingMaxDate\(\))\}/, `${f}에 max 속성이 없다`);
+  }
+});
+
+// --- 상담접수 필수정보 ---
+
+async function postConsultation(body, ip) {
+  const route = await import('../src/app/api/consultations/route.ts');
+  const headers = new Headers();
+  headers.set('x-forwarded-for', ip);
+  return route.POST({ headers, async json() { return body; } });
+}
+
+function baseConsultBody(overrides = {}) {
+  return {
+    customerName: '상담필수', customerPhone: '010-9600-0001',
+    areaSido: '서울특별시', areaSigungu: '강남구', areaDong: '역삼동',
+    serviceType: '입주청소', houseTypeKey: '24평',
+    preferredDate: '2027-03-15',
+    extraNotes: '현장 확인 요청드립니다.',
+    privacyAgreed: true,
+    ...overrides,
+  };
+}
+
+test('일반 청소 상담은 필수정보가 하나라도 빠지면 API가 거부한다', async () => {
+  const cases = [
+    ['customerName', ''],
+    ['areaSido', ''],
+    ['areaSigungu', ''],
+    ['areaDong', ''],
+    ['preferredDate', undefined],
+    ['extraNotes', ''],
+    ['privacyAgreed', false],
+  ];
+  let ip = 100;
+  for (const [field, value] of cases) {
+    const body = baseConsultBody();
+    if (value === undefined) delete body[field];
+    else body[field] = value;
+    const res = await postConsultation(body, `203.0.114.${ip++}`);
+    assert.equal(res.status, 400, `${field} 누락이 거부되지 않음`);
+  }
+});
+
+test('일반 청소 상담은 주택유형과 공급면적이 모두 없으면 거부한다', async () => {
+  const body = baseConsultBody();
+  delete body.houseTypeKey;
+  const res = await postConsultation(body, '203.0.115.1');
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /주택유형|공급면적/);
+
+  // 공급면적만 있어도 통과해야 한다
+  const ok = await postConsultation(
+    { ...body, actualPyeong: 52, customerPhone: '010-9600-0002' },
+    '203.0.115.2'
+  );
+  assert.equal(ok.status, 201);
+});
+
+test('집정리 상담은 평형 대신 정리 정보를 필수로 받는다', async () => {
+  const body = baseConsultBody({
+    serviceType: '집정리', customerPhone: '010-9600-0003',
+  });
+  delete body.houseTypeKey;
+
+  // 정리 정보 없으면 거부
+  const bad = await postConsultation(body, '203.0.116.1');
+  assert.equal(bad.status, 400);
+  assert.match(bad.body.error, /정리/);
+
+  // 정리 정보가 있으면 평형 없이도 통과
+  const ok = await postConsultation(
+    { ...body, jipjeongriInfo: '드레스룸 옷 정리, 주방 상부장' },
+    '203.0.116.2'
+  );
+  assert.equal(ok.status, 201);
+  const row = db.prepare(
+    `SELECT extra_notes FROM consultation_requests WHERE request_code=?`
+  ).get(ok.body.requestCode);
+  assert.match(row.extra_notes, /정리 요청/, '정리 정보가 보존되어야 한다');
+});
+
+// --- 대체공휴일 중복 방지 ---
+
+test('같은 날짜에 공휴일 2개가 겹쳐도 대체공휴일은 1일만 생성된다', async () => {
+  // 2028-10-03: 개천절 + 추석 연휴 중복
+  const overlap = specialDays.getSpecialDayMeta('2028-10-03');
+  assert.equal(overlap.isHoliday, true);
+
+  assert.equal(specialDays.getSpecialDayMeta('2028-10-05').isHoliday, true, '대체공휴일 1일은 있어야 한다');
+  assert.equal(specialDays.getSpecialDayMeta('2028-10-06').isHoliday, false, '대체공휴일이 2개 생기면 안 된다');
+});
+
+test('공휴일 생성기가 같은 날짜에 대해 대체공휴일을 중복 생성하지 않는다', async () => {
+  const gen = fs.readFileSync(path.join(process.cwd(), 'scripts/generate-holidays.mjs'), 'utf8');
+  assert.match(gen, /substitutedDates/);
+  assert.match(gen, /if\(substitutedDates\.has\(d\)\) continue;/);
+});
+
+test('공휴일 생성기가 CLI 연도 인자를 받는다', async () => {
+  const gen = fs.readFileSync(path.join(process.cwd(), 'scripts/generate-holidays.mjs'), 'utf8');
+  assert.match(gen, /process\.argv\.slice\(2\)/);
+  // generate-special-days가 연도를 전달해야 한다
+  const sd = fs.readFileSync(path.join(process.cwd(), 'scripts/generate-special-days.mjs'), 'utf8');
+  assert.match(sd, /generate-holidays\.mjs/);
+  assert.match(sd, /\$\{year\}/, 'generate-special-days가 연도를 전달해야 한다');
+});
+
+// ===========================================================================
+// [신규] 특수일 DB 캐시 구조 (KASI OpenAPI 기반)
+// ===========================================================================
+
+test('공휴일/손없는날 판정은 DB 캐시를 단일 source로 사용한다', async () => {
+  // Production 판정 경로가 정적 목록을 직접 쓰지 않아야 한다
+  const consumers = [
+    'src/lib/pricing.ts',
+    'src/app/api/calendar/route.ts',
+    'src/app/api/reservations/route.ts',
+    'src/app/api/quote/route.ts',
+  ];
+  for (const f of consumers) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.match(src, /special-days-store/, `${f}는 DB 캐시를 사용해야 한다`);
+    assert.doesNotMatch(
+      src,
+      /from ["']@?\.?\/?(lib\/)?special-days["']/,
+      `${f}가 정적 목록을 직접 import하면 안 된다`
+    );
+  }
+});
+
+test('DB 캐시에서 공휴일과 손없는날을 읽는다', async () => {
+  const info = await specialDayStore.getSpecialDay('2026-05-01');
+  assert.equal(info.isHoliday, true);
+  assert.match(info.holidayName, /노동절/);
+
+  const son = await specialDayStore.getSpecialDay('2026-12-17');
+  assert.equal(son.isSonEomneunDay, true);
+});
+
+test('토/일은 캐시가 아니라 서버 날짜 계산으로 판정한다', async () => {
+  const sat = await specialDayStore.getSpecialDay('2026-12-12');
+  assert.equal(sat.isSaturday, true);
+  assert.equal(sat.isWeekend, true);
+  const sun = await specialDayStore.getSpecialDay('2026-12-13');
+  assert.equal(sun.isSunday, true);
+  assert.equal(sun.isWeekend, true);
+
+  // DB 행의 is_holiday/is_son과 무관하게 요일은 항상 정확하다
+  const row = db.prepare(`SELECT is_holiday, is_son_eomneun_day FROM special_days WHERE date='2026-12-12'`).get();
+  assert.ok(row, '캐시 행은 존재');
+  assert.equal(sat.isWeekend, true);
+});
+
+test('캐시에 없는 날짜는 일반일로 간주하지 않고 오류를 던진다', async () => {
+  await assert.rejects(
+    () => specialDayStore.getSpecialDay('2035-01-15'),
+    /공휴일 정보가 아직 준비되지 않았습니다/
+  );
+  await assert.rejects(
+    () => specialDayStore.getDateAdjustmentFromStore('2035-01-15'),
+    /준비되지 않았습니다/
+  );
+});
+
+test('KASI API를 고객 요청 경로에서 호출하지 않는다', async () => {
+  const customerPaths = [
+    'src/lib/pricing.ts',
+    'src/app/api/calendar/route.ts',
+    'src/app/api/quote/route.ts',
+    'src/app/api/reservations/route.ts',
+    'src/app/api/consultations/route.ts',
+  ];
+  for (const f of customerPaths) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.doesNotMatch(src, /from ["']@\/lib\/kasi["']/, `${f}가 KASI를 직접 호출하면 안 된다`);
+    assert.doesNotMatch(src, /apis\.data\.go\.kr/, `${f}에 KASI 엔드포인트 직접 호출`);
+  }
+  // KASI 호출은 동기화 계층에서만 이뤄진다
+  const store = fs.readFileSync(path.join(process.cwd(), 'src/lib/special-days-store.ts'), 'utf8');
+  assert.match(store, /from "\.\/kasi"/);
+});
+
+test('동기화는 예약 가능 기간 이상을 커버한다', async () => {
+  const coverage = await specialDayStore.checkCoverage();
+  assert.equal(coverage.covered, true, `커버리지 부족: ${coverage.missing}일 누락`);
+  assert.ok(coverage.syncedThrough >= coverage.to, '동기화 범위가 예약 가능 기간 이상이어야 한다');
+});
+
+test('관리자 manual override가 동기화에 덮어써지지 않는다', async () => {
+  const date = '2027-04-20';
+  try {
+    await specialDayStore.setManualSpecialDay({
+      date, isHoliday: true, holidayName: '임시공휴일', isSonEomneunDay: false,
+      adminNote: '국무회의 의결',
+    });
+    let info = await specialDayStore.getSpecialDay(date);
+    assert.equal(info.isHoliday, true);
+    assert.equal(info.source, 'manual');
+    assert.match(info.holidayName, /임시공휴일/);
+
+    // 재동기화해도 manual 값이 유지되어야 한다
+    const result = await specialDayStore.syncSpecialDays({ from: '2027-04-01', days: 60, force: true });
+    assert.ok(result.skippedManual >= 1, 'manual 날짜는 건너뛰어야 한다');
+    info = await specialDayStore.getSpecialDay(date);
+    assert.equal(info.source, 'manual', '동기화가 manual을 덮어쓰면 안 된다');
+    assert.equal(info.isHoliday, true);
+
+    // 임시공휴일도 날짜 가산에 반영된다
+    assert.equal(await specialDayStore.getDateAdjustmentFromStore(date), 30000);
+  } finally {
+    await specialDayStore.clearManualSpecialDay(date);
+    await specialDayStore.syncSpecialDays({ from: '2027-04-01', days: 60, force: true });
+  }
+});
+
+test('manual override 해제 후 원래 값으로 복구된다', async () => {
+  const date = '2027-04-21';
+  await specialDayStore.setManualSpecialDay({
+    date, isHoliday: true, holidayName: '테스트', isSonEomneunDay: false,
+  });
+  assert.equal((await specialDayStore.getSpecialDay(date)).source, 'manual');
+  await specialDayStore.clearManualSpecialDay(date);
+  assert.equal(await specialDayStore.isDateSynced(date), false, '해제 시 행이 제거된다');
+  await specialDayStore.syncSpecialDays({ from: '2027-04-01', days: 60 });
+  assert.equal(await specialDayStore.isDateSynced(date), true, '재동기화로 복구된다');
+});
+
+test('정적 special-days.ts는 backfill 보조 용도로만 표시된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/special-days.ts'), 'utf8');
+  assert.match(src, /Production source of truth가 아닙니다/);
+  assert.match(src, /backfill/);
+});
+
+test('캘린더 API는 예약 가능 범위를 벗어난 start/end를 제한한다', async () => {
+  const calendarRoute = await import('../src/app/api/calendar/route.ts');
+  const bw = await import('../src/lib/booking-window.ts');
+  const res = await calendarRoute.GET({
+    url: 'http://localhost/api/calendar?start=2020-01-01&end=2099-12-31',
+  });
+  const body = await res.json();
+  assert.ok(body.days.length > 0);
+  const dates = body.days.map((d) => d.date);
+  assert.ok(dates[0] >= bw.bookingMinDate(), '예약 시작일 이전은 반환하지 않는다');
+  assert.ok(dates[dates.length - 1] <= bw.bookingMaxDate(), '예약 최대일 이후는 반환하지 않는다');
+});
+
+test('캐시가 없는 날짜는 캘린더에서 선택할 수 없다', async () => {
+  const calendarRoute = await import('../src/app/api/calendar/route.ts');
+  const bw = await import('../src/lib/booking-window.ts');
+  const start = bw.bookingMinDate();
+  const res = await calendarRoute.GET({
+    url: `http://localhost/api/calendar?start=${start}&end=${start}`,
+  });
+  const body = await res.json();
+  const day = body.days[0];
+  assert.equal(day.specialDaySynced, true, '동기화된 날짜여야 한다');
+  // specialDaySynced가 false면 selectable도 false여야 한다
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
+  assert.match(src, /selectable: !!special &&/);
+});
+
+test('상담접수도 예약 가능 기간을 서버에서 검증한다', async () => {
+  const bw = await import('../src/lib/booking-window.ts');
+  const beyond = new Date(`${bw.bookingMaxDate()}T00:00:00Z`);
+  beyond.setUTCDate(beyond.getUTCDate() + 30);
+  const ds = beyond.toISOString().slice(0, 10);
+
+  const res = await postConsultation(
+    baseConsultBody({ preferredDate: ds, customerPhone: '010-9700-0001' }),
+    '203.0.117.1'
+  );
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'OUT_OF_BOOKING_WINDOW');
+});
+
+test('special_days 캐시 migration이 신규 파일로 추가됐다', async () => {
+  const dir = path.join(process.cwd(), 'supabase/migrations');
+  const f = fs.readdirSync(dir).find((n) => n.includes('special_days_cache'));
+  assert.ok(f, 'special_days migration이 있어야 한다');
+  const sql = fs.readFileSync(path.join(dir, f), 'utf8');
+  assert.match(sql, /CREATE TABLE IF NOT EXISTS public\.special_days/);
+  assert.match(sql, /source/);
+  assert.doesNotMatch(sql, /DROP\s+TABLE/i);
+});
+
+// ===========================================================================
+// [신규] KASI 실제 경로 — fixture 기반
+// ===========================================================================
+
+const KASI_FIXTURES = {
+  holidaysOk: {
+    response: {
+      header: { resultCode: '00', resultMsg: 'NORMAL SERVICE.' },
+      body: {
+        items: {
+          item: [
+            { dateKind: '01', dateName: '어린이날', isHoliday: 'Y', locdate: 20270505, seq: 1 },
+            { dateKind: '01', dateName: '부처님오신날', isHoliday: 'Y', locdate: 20270513, seq: 1 },
+            { dateKind: '02', dateName: '어버이날', isHoliday: 'N', locdate: 20270508, seq: 1 },
+          ],
+        },
+        numOfRows: 100, pageNo: 1, totalCount: 3,
+      },
+    },
+  },
+  holidaysEmpty: {
+    response: {
+      header: { resultCode: '00', resultMsg: 'NORMAL SERVICE.' },
+      body: { items: '', numOfRows: 100, pageNo: 1, totalCount: 0 },
+    },
+  },
+  lunarMonthOk: {
+    response: {
+      header: { resultCode: '00', resultMsg: 'NORMAL SERVICE.' },
+      body: {
+        items: {
+          item: [
+            { solYear: '2027', solMonth: '05', solDay: '01', lunYear: '2027', lunMonth: '03', lunDay: '26' },
+            { solYear: '2027', solMonth: '05', solDay: '05', lunYear: '2027', lunMonth: '03', lunDay: '30' },
+            { solYear: '2027', solMonth: '05', solDay: '06', lunYear: '2027', lunMonth: '04', lunDay: '01' },
+          ],
+        },
+        totalCount: 3,
+      },
+    },
+  },
+  lunarDayOk: {
+    response: {
+      header: { resultCode: '00', resultMsg: 'NORMAL SERVICE.' },
+      body: {
+        items: { item: { solYear: '2027', solMonth: '05', solDay: '05', lunMonth: '03', lunDay: '30' } },
+        totalCount: 1,
+      },
+    },
+  },
+  resultCodeError: {
+    response: {
+      header: { resultCode: '30', resultMsg: 'SERVICE KEY IS NOT REGISTERED ERROR.' },
+      body: { items: '', totalCount: 0 },
+    },
+  },
+  malformed: { unexpected: 'shape' },
+};
+
+/** fetch를 fixture로 대체 */
+function stubFetch(handler) {
+  const original = globalThis.fetch;
+  globalThis.fetch = handler;
+  return () => { globalThis.fetch = original; };
+}
+function jsonResponse(payload, status = 200) {
+  return { ok: status >= 200 && status < 300, status, async json() { return payload; } };
+}
+
+test('KASI 공휴일 정상 응답을 파싱한다 (isHoliday=N 제외)', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => jsonResponse(KASI_FIXTURES.holidaysOk));
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    const list = await kasi.fetchHolidays(2027, 5);
+    assert.equal(list.length, 2, 'isHoliday=N인 어버이날은 제외되어야 한다');
+    assert.deepEqual(list.map((h) => h.date), ['2027-05-05', '2027-05-13']);
+    assert.equal(list[0].name, '어린이날');
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI 공휴일 0건 정상 응답을 빈 배열로 처리한다', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => jsonResponse(KASI_FIXTURES.holidaysEmpty));
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    const list = await kasi.fetchHolidays(2027, 11);
+    assert.deepEqual(list, [], '공휴일 없는 달은 빈 배열');
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI 음력 월 단위 응답을 파싱한다', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => jsonResponse(KASI_FIXTURES.lunarMonthOk));
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    const map = await kasi.fetchLunarMonth(2027, 5);
+    assert.equal(map.get('2027-05-05'), 30, '음력 30일 = 손없는날');
+    assert.equal(map.get('2027-05-06'), 1);
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI 음력 일 단위 응답을 파싱한다', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => jsonResponse(KASI_FIXTURES.lunarDayOk));
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    assert.equal(await kasi.fetchLunarDay('2027-05-05'), 30);
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI resultCode 오류를 "공휴일 없음"으로 처리하지 않는다', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => jsonResponse(KASI_FIXTURES.resultCodeError));
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    await assert.rejects(() => kasi.fetchHolidays(2027, 5), /resultCode=30/);
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI malformed 응답을 거부한다', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => jsonResponse(KASI_FIXTURES.malformed));
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    await assert.rejects(() => kasi.fetchHolidays(2027, 5), /형식이 올바르지 않습니다/);
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI timeout/network 실패를 KasiUnavailableError로 변환한다', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => { throw new Error('The operation was aborted due to timeout'); });
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    await assert.rejects(() => kasi.fetchHolidays(2027, 5), /KASI 호출 실패/);
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI HTTP 오류를 거부한다', async () => {
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  const restore = stubFetch(async () => jsonResponse({}, 500));
+  try {
+    const kasi = await import('../src/lib/kasi.ts');
+    await assert.rejects(() => kasi.fetchHolidays(2027, 5), /HTTP 500/);
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+test('KASI 동기화 실패 시 기존 캐시를 훼손하지 않는다', async () => {
+  const probe = '2027-05-05';
+  const before = db.prepare(`SELECT * FROM special_days WHERE date=?`).get(probe);
+  assert.ok(before, '사전 캐시가 있어야 한다');
+
+  process.env.KASI_SERVICE_KEY = 'TEST_KEY';
+  // 공휴일은 정상, 음력은 실패 → 검증 단계에서 중단되어야 한다
+  const restore = stubFetch(async (url) => {
+    if (String(url).includes('getRestDeInfo')) return jsonResponse(KASI_FIXTURES.holidaysOk);
+    throw new Error('network down');
+  });
+  try {
+    await assert.rejects(
+      () => specialDayStore.syncSpecialDays({ from: '2027-05-01', days: 10, force: true }),
+      /KASI/
+    );
+    const after = db.prepare(`SELECT * FROM special_days WHERE date=?`).get(probe);
+    assert.deepEqual(after, before, '실패 시 기존 캐시가 변경되면 안 된다');
+  } finally {
+    restore();
+    delete process.env.KASI_SERVICE_KEY;
+  }
+});
+
+// ===========================================================================
+// [신규] Production fallback 금지 / coverage 강화 / cron
+// ===========================================================================
+
+test('Production에서는 KASI 키 없이 generator fallback을 사용하지 않는다', async () => {
+  const prev = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = 'production';
+    assert.equal(specialDayStore.isGeneratorFallbackAllowed(), false);
+    await assert.rejects(
+      () => specialDayStore.syncSpecialDays({ from: '2027-08-01', days: 5 }),
+      /KASI_SERVICE_KEY가 설정되지 않았습니다/
+    );
+  } finally {
+    process.env.NODE_ENV = prev;
+  }
+});
+
+test('development에서는 generator fallback이 허용된다', async () => {
+  assert.equal(specialDayStore.isGeneratorFallbackAllowed(), true);
+  const r = await specialDayStore.syncSpecialDays({ from: '2027-08-01', days: 5 });
+  assert.equal(r.source, 'generator');
+});
+
+test('coverage는 count만이 아니라 source와 freshness를 함께 본다', async () => {
+  const c = await specialDayStore.checkCoverage();
+  assert.equal(typeof c.expected, 'number');
+  assert.equal(typeof c.actual, 'number');
+  assert.ok(c.bySource, 'source별 집계가 있어야 한다');
+  assert.ok(Array.isArray(c.issues));
+
+  // Production 기준으로 보면 generator 데이터는 정상이 아니다
+  const prev = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = 'production';
+    const prod = await specialDayStore.checkCoverage();
+    assert.equal(prod.covered, false, 'generator 데이터만 있으면 Production 정상이 아니다');
+    assert.ok(
+      prod.issues.some((i) => /generator/.test(i)),
+      `generator 이슈가 보고되어야 한다: ${prod.issues.join(", ")}`
+    );
+  } finally {
+    process.env.NODE_ENV = prev;
+  }
+});
+
+test('Production에서 generator 행은 고객에게 제공되지 않는다 (fail-closed)', async () => {
+  const prev = process.env.NODE_ENV;
+  try {
+    process.env.NODE_ENV = 'production';
+    // 캐시에 행은 있지만 source=generator
+    await assert.rejects(
+      () => specialDayStore.getSpecialDay('2026-12-17'),
+      /준비되지 않았습니다/
+    );
+    assert.equal(await specialDayStore.isDateSynced('2026-12-17'), false);
+  } finally {
+    process.env.NODE_ENV = prev;
+  }
+});
+
+test('instrumentation은 부팅 시 전체 동기화를 실행하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/instrumentation.ts'), 'utf8');
+  assert.doesNotMatch(src, /syncSpecialDays\(/, '부팅 시 동기화를 실행하면 안 된다');
+  assert.match(src, /checkCoverage/, '커버리지 확인만 수행한다');
+  assert.match(src, /console\.warn/, '부족 시 경고만 남긴다');
+});
+
+test('cron 엔드포인트는 CRON_SECRET Bearer 인증을 요구한다', async () => {
+  const cron = await import('../src/app/api/cron/special-days/route.ts');
+  const prev = process.env.CRON_SECRET;
+  try {
+    process.env.CRON_SECRET = 'test-cron-secret';
+
+    // 인증 없음
+    const noAuth = await cron.GET({ headers: new Headers() });
+    assert.equal(noAuth.status, 401);
+
+    // 잘못된 토큰
+    const badHeaders = new Headers();
+    badHeaders.set('authorization', 'Bearer wrong');
+    const bad = await cron.GET({ headers: badHeaders });
+    assert.equal(bad.status, 401);
+
+    // 정상 토큰
+    const okHeaders = new Headers();
+    okHeaders.set('authorization', 'Bearer test-cron-secret');
+    const ok = await cron.GET({ headers: okHeaders });
+    assert.notEqual(ok.status, 401);
+  } finally {
+    if (prev === undefined) delete process.env.CRON_SECRET;
+    else process.env.CRON_SECRET = prev;
+  }
+});
+
+test('cron과 관리자 인증을 혼용하지 않는다', async () => {
+  const cronSrc = fs.readFileSync(path.join(process.cwd(), 'src/app/api/cron/special-days/route.ts'), 'utf8');
+  assert.doesNotMatch(cronSrc, /requireAdminApiSession/, 'cron은 관리자 세션을 쓰지 않는다');
+  assert.match(cronSrc, /CRON_SECRET/);
+
+  const adminSrc = fs.readFileSync(path.join(process.cwd(), 'src/app/api/admin/special-days/route.ts'), 'utf8');
+  assert.match(adminSrc, /requireAdminApiSession/, '관리자 API는 세션 인증을 유지한다');
+  assert.doesNotMatch(adminSrc, /CRON_SECRET/, '관리자 API에 cron 인증을 섞지 않는다');
+});
+
+test('vercel.json에 일 1회 동기화 cron이 등록됐다', async () => {
+  const raw = fs.readFileSync(path.join(process.cwd(), 'vercel.json'), 'utf8');
+  const cfg = JSON.parse(raw);
+  assert.ok(Array.isArray(cfg.crons));
+  const job = cfg.crons.find((c) => c.path === '/api/cron/special-days');
+  assert.ok(job, 'special-days cron이 등록되어야 한다');
+  // 일 1회 (분 시 * * *)
+  assert.match(job.schedule, /^\d+ \d+ \* \* \*$/, `일 1회 스케줄이어야 한다: ${job.schedule}`);
+});
+
+test('증분 동기화는 전체 425일을 다시 조회하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/special-days-store.ts'), 'utf8');
+  assert.match(src, /syncSpecialDaysIncremental/);
+  assert.match(src, /tail/i, 'tail 구간만 추가하는 로직이 있어야 한다');
+  // 월 단위 조회 우선 + bounded concurrency
+  assert.match(src, /fetchLunarMonth/);
+  assert.match(src, /mapWithConcurrency/);
+});
+
+test('staging smoke 스크립트가 인증키를 저장하지 않는다', async () => {
+  const p = path.join(process.cwd(), 'scripts/kasi-smoke.mjs');
+  assert.ok(fs.existsSync(p));
+  const src = fs.readFileSync(p, 'utf8');
+  assert.match(src, /process\.env\.KASI_SERVICE_KEY/);
+  assert.match(src, /Git에 저장하지 마세요|Git에 저장하지 않/);
+  // 실제 키처럼 보이는 긴 문자열이 하드코딩되면 안 된다
+  assert.doesNotMatch(src, /serviceKey=[A-Za-z0-9%+/=]{20,}/);
 });

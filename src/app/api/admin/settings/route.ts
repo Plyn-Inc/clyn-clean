@@ -13,7 +13,13 @@ const ALLOWED_KEYS = new Set([
   "bank_account_holder",
   "payment_due_hours",
   "default_daily_capacity",
+  // legacy — 브랜드/법인 분리 이후 신규 UI에서는 사용하지 않는다 (하위 호환 유지)
   "company_name",
+  // 브랜드와 법적 운영주체 분리
+  "brand_name",
+  "legal_company_name",
+  "legal_company_name_en",
+  "company_mail_order_number",
   "company_phone",
   "company_kakao_url",
   "company_address",

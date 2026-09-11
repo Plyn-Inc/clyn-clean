@@ -4,6 +4,7 @@ import "./globals.css";
 import SiteHeader from "@/components/SiteHeader";
 import SiteFooter from "@/components/SiteFooter";
 import type { CompanySettings } from "@/lib/settings";
+import { BRAND_FALLBACK } from "@/lib/settings";
 import { getSiteUrl } from "@/lib/site-url";
 
 const pretendard = localFont({
@@ -53,11 +54,15 @@ export async function generateMetadata(): Promise<Metadata> {
 }
 
 const EMPTY_COMPANY: CompanySettings = {
-  name: "",
-  phone: "",
+  name: BRAND_FALLBACK.brandName,
+  phone: BRAND_FALLBACK.phone,
   kakaoUrl: "",
-  address: "",
-  bizNumber: "",
+  address: BRAND_FALLBACK.address,
+  bizNumber: BRAND_FALLBACK.bizNumber,
+  brandName: BRAND_FALLBACK.brandName,
+  legalCompanyName: BRAND_FALLBACK.legalCompanyName,
+  legalCompanyNameEn: BRAND_FALLBACK.legalCompanyNameEn,
+  mailOrderNumber: BRAND_FALLBACK.mailOrderNumber,
 };
 
 async function getCompanyOrDefault(): Promise<CompanySettings> {

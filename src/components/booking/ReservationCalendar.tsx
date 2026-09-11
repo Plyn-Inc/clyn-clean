@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { toKSTDateString, getMonthRangeKST } from "@/lib/utils";
+import { bookingMaxDate, bookingMinMonth, bookingMaxMonth } from "@/lib/booking-window";
 import type { PublicSlotStatus } from "@/lib/types";
 
 /**
@@ -18,6 +19,12 @@ interface PublicSlot {
 }
 interface PublicDay {
   date: string;
+  /** 특별일 시각 구분용 — 가격 가산과 연결한 문구는 표시하지 않는다 */
+  isSaturday: boolean;
+  isSunday: boolean;
+  isHoliday: boolean;
+  isSonEomneunDay: boolean;
+  badge: string | null;
   morning: PublicSlot;
   afternoon: PublicSlot;
 }
@@ -50,6 +57,10 @@ export default function ReservationCalendar({
   selectedSlot?: SelectedSlot | null;
 }) {
   const todayKST = useMemo(() => toKSTDateString(new Date()), []);
+  // 예약 가능 범위 — booking-window 단일 원천
+  const maxDate = useMemo(() => bookingMaxDate(), []);
+  const minMonth = useMemo(() => bookingMinMonth(), []);
+  const maxMonth = useMemo(() => bookingMaxMonth(), []);
   const [cursor, setCursor] = useState(() => {
     const now = new Date();
     return { year: now.getFullYear(), month: now.getMonth() };
@@ -80,7 +91,16 @@ export default function ReservationCalendar({
   const lastDate = new Date(cursor.year, cursor.month + 1, 0).getDate();
   const leadingBlanks = firstDay.getDay();
 
+  const cursorIndex = cursor.year * 12 + cursor.month;
+  const minIndex = minMonth.year * 12 + minMonth.month;
+  const maxIndex = maxMonth.year * 12 + maxMonth.month;
+  const canGoPrev = cursorIndex > minIndex;
+  const canGoNext = cursorIndex < maxIndex;
+
   function moveMonth(delta: number) {
+    const next = cursorIndex + delta;
+    // 예약 가능 기간을 벗어난 월로는 이동할 수 없다
+    if (next < minIndex || next > maxIndex) return;
     setLoading(true);
     setCursor((c) => {
       const d = new Date(c.year, c.month + delta, 1);
@@ -107,8 +127,9 @@ export default function ReservationCalendar({
         <button
           type="button"
           onClick={() => moveMonth(-1)}
+          disabled={!canGoPrev}
           aria-label="이전 달"
-          className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--line)] text-sm hover:bg-[var(--sand-deep)]"
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--line)] text-sm hover:bg-[var(--sand-deep)] disabled:cursor-not-allowed disabled:opacity-35"
         >
           ‹
         </button>
@@ -116,8 +137,9 @@ export default function ReservationCalendar({
         <button
           type="button"
           onClick={() => moveMonth(1)}
+          disabled={!canGoNext}
           aria-label="다음 달"
-          className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--line)] text-sm hover:bg-[var(--sand-deep)]"
+          className="flex h-9 w-9 items-center justify-center rounded-lg border border-[var(--line)] text-sm hover:bg-[var(--sand-deep)] disabled:cursor-not-allowed disabled:opacity-35"
         >
           ›
         </button>
@@ -141,14 +163,27 @@ export default function ReservationCalendar({
             const dateNum = i + 1;
             const dateStr = `${cursor.year}-${String(cursor.month + 1).padStart(2, "0")}-${String(dateNum).padStart(2, "0")}`;
             const isPast = dateStr < todayKST;
+            // 예약 가능 최대일 이후는 선택할 수 없다
+            const isBeyondWindow = dateStr > maxDate;
             const morning = getSlot(dateStr, "morning");
             const afternoon = getSlot(dateStr, "afternoon");
             const isSelMorning = selectedSlot?.date === dateStr && selectedSlot.timeSlot === "morning";
             const isSelAfternoon = selectedSlot?.date === dateStr && selectedSlot.timeSlot === "afternoon";
+            const day = days[dateStr];
+            // 날짜 숫자 색으로 토/일/공휴일을 구분한다 (가격 문구 없음)
+            const dateColor = day?.isHoliday || day?.isSunday
+              ? "text-[var(--rose)]"
+              : day?.isSaturday
+                ? "text-[var(--navy)]"
+                : "text-[var(--ink)]";
 
-            if (isPast) {
+            if (isPast || isBeyondWindow) {
               return (
-                <div key={dateStr} className="rounded-lg p-1 text-center opacity-35">
+                <div
+                  key={dateStr}
+                  className="rounded-lg p-1 text-center opacity-35"
+                  title={isBeyondWindow ? "예약 가능 기간 이후" : undefined}
+                >
                   <p className="mb-1 text-xs text-[#CFCDC2]">{dateNum}</p>
                 </div>
               );
@@ -156,7 +191,18 @@ export default function ReservationCalendar({
 
             return (
               <div key={dateStr} className="rounded-lg p-1 text-center">
-                <p className="mb-1 text-xs font-medium text-[var(--ink)]">{dateNum}</p>
+                <p className={`mb-0.5 text-xs font-medium ${dateColor}`}>{dateNum}</p>
+                {/* 공휴일명 / 손없는날 배지 — 가격과 무관한 정보성 표시 */}
+                {day?.badge ? (
+                  <p
+                    className={`mb-1 truncate text-[8px] leading-tight ${day.isHoliday ? "text-[var(--rose)]" : "text-[var(--mint)]"}`}
+                    title={day.badge}
+                  >
+                    {day.badge}
+                  </p>
+                ) : (
+                  <p className="mb-1 h-[11px]" aria-hidden />
+                )}
 
                 <button
                   type="button"
@@ -194,6 +240,15 @@ export default function ReservationCalendar({
         <Legend color="bg-[var(--mint-soft)]" label="예약가능" />
         <Legend color="bg-[#FBE9D3]" label="예약진행 중" />
         <Legend color="bg-[var(--sand-deep)]" label="예약완료" />
+        <span className="flex items-center gap-1.5">
+          <span className="text-[var(--rose)]">●</span> 일요일 · 공휴일
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[var(--navy)]">●</span> 토요일
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[var(--mint)]">●</span> 손없는날
+        </span>
       </div>
     </div>
   );

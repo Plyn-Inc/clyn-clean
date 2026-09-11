@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 import type { Metadata } from "next";
-import { getSetting } from "@/lib/settings";
+import { getSetting, getCompanySettings } from "@/lib/settings";
 
 export const metadata: Metadata = {
   title: "개인정보처리방침",
@@ -8,15 +8,18 @@ export const metadata: Metadata = {
 };
 
 export default async function PrivacyPage() {
-  const [companyNameRaw, companyPhoneRaw, bizNumberRaw, customContent] = await Promise.all([
-    getSetting("company_name"),
-    getSetting("company_phone"),
-    getSetting("company_biz_number"),
+  // 개인정보 처리자는 브랜드가 아니라 법적 운영주체다.
+  // legacy company_name에 의존하지 않고 getCompanySettings()를 사용한다.
+  const [company, customContent] = await Promise.all([
+    getCompanySettings(),
     getSetting("privacy_policy_content"),
   ]);
-  const companyName = companyNameRaw || "[회사명]";
-  const companyPhone = companyPhoneRaw || "[연락처]";
-  const bizNumber = bizNumberRaw || "[사업자등록번호]";
+  // 운영주체 표기: 주식회사 플린 (Plyn Inc.)
+  const companyName = company.legalCompanyNameEn
+    ? `${company.legalCompanyName} (${company.legalCompanyNameEn})`
+    : company.legalCompanyName;
+  const companyPhone = company.phone;
+  const bizNumber = company.bizNumber;
 
   return (
     <div className="mx-auto max-w-3xl px-5 py-16 md:px-8">

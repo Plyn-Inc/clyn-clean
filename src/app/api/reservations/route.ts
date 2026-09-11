@@ -9,7 +9,11 @@ import {
 } from "@/lib/reservations";
 import { getBankSettings, checkReservationReadiness } from "@/lib/settings";
 import { calculateQuote, getOptionPrices } from "@/lib/pricing";
-import { todayKST, isValidDateFormat, isPastDateKST, isTooFarFuture } from "@/lib/utils";
+import { createConsultation } from "@/lib/consultations";
+import { SpecialDayNotSyncedError, isDateSynced } from "@/lib/special-days-store";
+import { CONSULTATION_COMPLETE_NOTICE } from "@/lib/types";
+import { todayKST, isValidDateFormat, isPastDateKST } from "@/lib/utils";
+import { isWithinBookingWindow, outOfWindowMessage, bookingMaxDate, BOOKING_WINDOW_DAYS } from "@/lib/booking-window";
 import {
   SERVICE_TYPES,
   HOUSE_TYPES_FIXED,
@@ -88,6 +92,10 @@ const reservationSchema = z.object({
   serviceTermsAgreed: z.boolean().refine(v => v === true, "청소 서비스 이용 및 현장 추가사항 안내에 동의해주세요."),
   additionalChargeAgreed: z.boolean().refine(v => v === true, "견적 및 추가요금 안내에 동의해주세요."),
   clientEstimatedTotal: z.number().optional(),
+  /** 반려동물 있음 — 서버 상담 gate 판정에 사용 */
+  hasPet: z.boolean().optional(),
+  /** 반려동물 상세 (상담 전환 시 보존) */
+  petMeta: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -109,7 +117,18 @@ export async function POST(req: NextRequest) {
   const dateStr: string = body.desiredDate;
   if (!isValidDateFormat(dateStr)) return NextResponse.json({ error: "날짜 형식이 올바르지 않습니다. (YYYY-MM-DD)" }, { status: 400 });
   if (isPastDateKST(dateStr)) return NextResponse.json({ error: "과거 날짜는 선택할 수 없습니다." }, { status: 400 });
-  if (isTooFarFuture(dateStr, 365)) return NextResponse.json({ error: "1년 이후 날짜는 선택할 수 없습니다." }, { status: 400 });
+  // 예약 가능 기간은 booking-window 단일 원천을 사용한다
+  if (!isWithinBookingWindow(dateStr)) {
+    return NextResponse.json({ error: outOfWindowMessage(), code: "OUT_OF_BOOKING_WINDOW" }, { status: 400 });
+  }
+  // 공휴일/손없는날 캐시가 없는 날짜는 가격을 확정할 수 없으므로 거부한다.
+  // (데이터 없음을 "일반일"로 간주하지 않는다)
+  if (!(await isDateSynced(dateStr))) {
+    return NextResponse.json(
+      { error: new SpecialDayNotSyncedError(dateStr).message, code: "SPECIAL_DAY_NOT_SYNCED" },
+      { status: 400 }
+    );
+  }
 
   const parsed = reservationSchema.safeParse(body);
   if (!parsed.success) {
@@ -184,8 +203,15 @@ export async function POST(req: NextRequest) {
       actualPyeong: data.actualPyeong,
       extraOptions: data.extraOptions,
       instantDiscountEligible: eligible,
+      // 날짜 가격 보정은 반드시 서버가 예약일 기준으로 재계산한다.
+      // 클라이언트가 평일 가격으로 토요일 예약을 넣을 수 없다.
+      desiredDate: data.desiredDate,
+      hasPet: data.hasPet,
     });
-  } catch {
+  } catch (e) {
+    if (e instanceof SpecialDayNotSyncedError) {
+      return NextResponse.json({ error: e.message, code: e.code }, { status: 400 });
+    }
     return NextResponse.json({ error: "현재 견적을 계산할 수 없습니다. 상담을 통해 안내드리겠습니다." }, { status: 400 });
   }
 
@@ -199,6 +225,50 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ── 상담 전환 gate (서버가 최종 권한) ──────────────────────────────────
+  // 40평 이상 / 반려동물 있음은 일반 예약·예약금 프로세스로 진행하지 않는다.
+  // UI에서만 막지 않고 API 자체가 거부한다.
+  if (serverQuote.consultRequired) {
+    // 같은 상담 파이프라인으로 자동 전환한다.
+    // 일반 예약 slot을 점유하지 않고 payment도 만들지 않는다.
+    try {
+      const consultation = await createConsultation({
+        customerName: data.customerName,
+        customerPhone: data.customerPhone,
+        areaSido: data.areaSido,
+        areaSigungu: data.areaSigungu,
+        areaDong: data.areaDong,
+        address: data.address,
+        serviceType: data.serviceType,
+        houseTypeKey: data.houseTypeKey,
+        actualPyeong: data.actualPyeong,
+        preferredDate: data.desiredDate,
+        preferredTimeSlot: data.timeSlot,
+        reason: serverQuote.consultReason ?? "manual",
+        petMeta: data.petMeta ?? null,
+        extraNotes: data.extraNotes,
+        privacyAgreed: data.privacyAgreed,
+      });
+      return NextResponse.json(
+        {
+          consultRequired: true,
+          requestCode: consultation.request_code,
+          notice: serverQuote.consultNotice ?? CONSULTATION_COMPLETE_NOTICE,
+          code: "CONSULT_REQUIRED",
+          consultReason: serverQuote.consultReason,
+        },
+        { status: 409 }
+      );
+    } catch (e) {
+      console.error("[reservations→consultation]", e);
+      return NextResponse.json(
+        { error: serverQuote.consultNotice ?? "상담 접수가 필요한 예약입니다.", code: "CONSULT_REQUIRED" },
+        { status: 409 }
+      );
+    }
+  }
+
+  // 클라이언트가 보낸 금액은 서버 재계산 결과와 일치할 때만 허용한다.
   if (
     data.clientEstimatedTotal !== undefined &&
     serverQuote.priceConfirmed &&
@@ -263,5 +333,8 @@ export async function GET() {
     },
     readiness,
     today,
+    // 클라이언트가 동일한 예약 가능 범위를 사용하도록 서버가 내려준다
+    bookingMaxDate: bookingMaxDate(),
+    bookingWindowDays: BOOKING_WINDOW_DAYS,
   });
 }

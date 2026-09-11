@@ -3,10 +3,10 @@ import HeroBanner from "@/components/HeroBanner";
 import BookingSection from "@/components/booking/BookingSection";
 import ServiceList from "@/components/ServiceList";
 import WorkScopeSection from "@/components/WorkScopeSection";
-import PricingSection from "@/components/PricingSection";
 import BeforeAfterGallery from "@/components/BeforeAfterGallery";
 import CleaningPortfolio from "@/components/CleaningPortfolio";
 import CtaBanner from "@/components/CtaBanner";
+import DetailCleaningFocus from "@/components/DetailCleaningFocus";
 import ReviewsPreview from "@/components/ReviewsPreview";
 import BlogPreview from "@/components/BlogPreview";
 import ContactSection from "@/components/ContactSection";
@@ -20,7 +20,10 @@ export default async function Home() {
     <>
       <HeroBanner kakaoUrl={company.kakaoUrl} phone={company.phone} />
 
-      <section className="bg-[var(--sand)] py-16 md:py-20">
+
+      <ServiceList />
+      <BeforeAfterGallery />
+      <section id="reserve" className="scroll-mt-24 bg-[var(--sand)] py-16 md:py-20">
         <div className="mx-auto max-w-6xl px-5 md:px-8">
           <SectionHeading
             eyebrow="예약"
@@ -32,12 +35,9 @@ export default async function Home() {
           </div>
         </div>
       </section>
-
-      <ServiceList />
       <WorkScopeSection />
-      <PricingSection />
-      <BeforeAfterGallery />
       <CleaningPortfolio />
+      <DetailCleaningFocus />
       <ReviewsPreview />
       <BlogPreview />
       <CtaBanner />

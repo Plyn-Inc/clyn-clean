@@ -89,6 +89,43 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS special_days (
+      date TEXT PRIMARY KEY,
+      is_holiday INTEGER NOT NULL DEFAULT 0,
+      holiday_name TEXT,
+      is_son_eomneun_day INTEGER NOT NULL DEFAULT 0,
+      source TEXT NOT NULL DEFAULT 'kasi',
+      admin_note TEXT,
+      synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS consultation_requests (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_code TEXT UNIQUE NOT NULL,
+      customer_name TEXT NOT NULL,
+      customer_phone TEXT NOT NULL,
+      area_sido TEXT,
+      area_sigungu TEXT,
+      area_dong TEXT,
+      address TEXT,
+      service_type TEXT,
+      house_type_key TEXT,
+      actual_pyeong REAL,
+      preferred_date TEXT,
+      preferred_time_slot TEXT,
+      reason TEXT NOT NULL DEFAULT 'manual',
+      pet_meta TEXT,
+      extra_notes TEXT,
+      reference_price INTEGER,
+      status TEXT NOT NULL DEFAULT 'received',
+      admin_memo TEXT,
+      converted_reservation_id INTEGER REFERENCES reservations(id),
+      privacy_agreed INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS price_rules (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       service_type TEXT NOT NULL,
@@ -185,6 +222,10 @@ function runIncrementalMigrations() {
   tryExec("ALTER TABLE reservations ADD COLUMN account_revealed_at TEXT");
   tryExec("ALTER TABLE reservations ADD COLUMN deposit_expired_at TEXT");
   tryExec("ALTER TABLE reservations ADD COLUMN auto_released INTEGER NOT NULL DEFAULT 0");
+  // 20260910120000_pet_and_consultation.sql와 동일
+  tryExec("ALTER TABLE reservations ADD COLUMN has_pet INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN date_adjustment_applied INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN date_adjustment_amount INTEGER NOT NULL DEFAULT 0");
 }
 
 function seedDefaultSettings() {
@@ -193,13 +234,19 @@ function seedDefaultSettings() {
     deposit_amount: "0",              // 선입금 금액 (미확정 시 0 — 관리자 설정)
     instant_discount_amount: "10000",
     instant_discount_enabled: "0",   // 명세 12: 즉시예약 할인 기본 OFF
-    balance_notice: "잔금은 작업 완료 후 현장에서 안내드립니다.",
+    balance_notice: "표시 금액은 부가세가 포함된 금액입니다.",
+    special_days_synced_through: "",
+    special_days_last_sync_at: "",
     bank_name: "",
     bank_account_number: "",
     bank_account_holder: "",
     payment_due_hours: "24",
     default_daily_capacity: "1",     // 한 팀 오전 1집 + 오후 1집 = 하루 최대 2집
-    company_name: "Clyn Clean",
+    company_name: "CLYN CLEAN CARE",
+    brand_name: "CLYN CLEAN CARE",
+    legal_company_name: "주식회사 플린",
+    legal_company_name_en: "Plyn Inc.",
+    company_mail_order_number: "제 2026-의정부흥선-0327 호",
     company_phone: "",
     company_kakao_url: "",
     company_address: "",

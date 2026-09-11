@@ -28,7 +28,10 @@ export default async function RefundPage() {
             <strong>안내:</strong> 예약 취소·변경 및 환불 관련 정책은 확정 후 이 페이지에 게시됩니다.
             현재 정책 문의는 아래 연락처로 문의해주세요.
           </p>
-          <p className="text-xs text-[var(--ink-soft)]">※ 취소 수수료율, 환불 비율, 반려동물 추가금 등 미확정 사항은 정책 확정 후 안내드립니다.</p>
+          <p className="text-xs leading-relaxed text-[var(--ink-soft)]">
+            ※ 취소 수수료율과 환불 비율 등 세부 기준은 정책 확정 후 안내드립니다.
+            반려동물이 있었던 공간은 상담을 통해 작업 범위와 금액을 확인한 뒤 진행합니다.
+          </p>
           <a href="/contact" className="text-[var(--mint)] hover:underline">문의하기</a>
         </div>
       )}

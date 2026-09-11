@@ -1,5 +1,5 @@
 import Image from "next/image";
-import { PORTFOLIO_ITEMS, DETAIL_CASES, CASE_DISCLAIMER } from "@/lib/images";
+import { PORTFOLIO_ITEMS, CASE_DISCLAIMER } from "@/lib/images";
 import { SectionHeading } from "./ServiceList";
 
 /**
@@ -36,32 +36,8 @@ export default function CleaningPortfolio() {
           ))}
         </div>
 
-        {/* 디테일 사례 */}
-        <div className="mt-14">
-          <p className="font-display text-lg font-bold text-[var(--ink)]">
-            보이는 곳만 닦는 청소가 아닙니다
-          </p>
-          <div className="mt-5 grid gap-4 sm:grid-cols-3">
-            {DETAIL_CASES.map((c) => (
-              <div key={c.title} className="overflow-hidden rounded-2xl border border-[var(--line)]">
-                <div className="relative aspect-[3/4]">
-                  <Image
-                    src={c.image.src}
-                    alt={c.image.alt}
-                    fill
-                    sizes="(max-width: 640px) 100vw, 33vw"
-                    className="object-cover"
-                  />
-                </div>
-                <div className="px-4 py-3">
-                  <p className="text-sm font-semibold text-[var(--ink)]">{c.title}</p>
-                  <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">{c.description}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-          <p className="mt-4 text-xs text-[var(--ink-soft)]">{CASE_DISCLAIMER}</p>
-        </div>
+        <p className="mt-5 text-xs text-[var(--ink-soft)]">{CASE_DISCLAIMER}</p>
+
       </div>
     </section>
   );

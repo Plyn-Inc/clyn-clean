@@ -40,6 +40,11 @@ export interface CreateReservationRow {
   additionalChargeAgreed: number;
   /** 3종 동의 완료 시에만 값이 들어간다 */
   agreementVersion: string | null;
+  /** 반려동물 있음 (상담 전환 판정용 정식 컬럼) */
+  hasPet: number;
+  /** 날짜 조건 가격 보정 내부 감사용 */
+  dateAdjustmentApplied: number;
+  dateAdjustmentAmount: number;
 }
 
 export function insertReservation(row: CreateReservationRow): Promise<number> {
@@ -57,6 +62,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       area_sido, area_sigungu, area_dong,
       core_principles_agreed, service_terms_agreed, additional_charge_agreed,
       agreement_version, agreed_at,
+      has_pet, date_adjustment_applied, date_adjustment_amount,
       reservation_status
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
@@ -64,6 +70,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       ?, ?, ?,
       ?, ?, ?,
       ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END,
+      ?, ?, ?,
       'received'
     )`,
     [
@@ -78,6 +85,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       row.areaSido, row.areaSigungu, row.areaDong,
       row.corePrinciplesAgreed, row.serviceTermsAgreed, row.additionalChargeAgreed,
       row.agreementVersion, row.agreementVersion,
+      row.hasPet, row.dateAdjustmentApplied, row.dateAdjustmentAmount,
     ]
   );
 }

@@ -83,12 +83,33 @@ export async function checkReservationReadiness(): Promise<ReservationReadiness>
 }
 
 export interface CompanySettings {
+  /** @deprecated 브랜드는 brandName, 법인은 legalCompanyName을 사용하세요 */
   name: string;
   phone: string;
   kakaoUrl: string;
   address: string;
   bizNumber: string;
+  // --- 브랜드와 법적 운영주체 분리 ---
+  /** 고객에게 노출되는 브랜드명 */
+  brandName: string;
+  /** 법적 운영주체 (국문) */
+  legalCompanyName: string;
+  /** 법적 운영주체 (영문) */
+  legalCompanyNameEn: string;
+  /** 통신판매업 신고번호 */
+  mailOrderNumber: string;
 }
+
+/** 브랜드/법인 fallback — settings에 값이 없을 때 사용 */
+export const BRAND_FALLBACK = {
+  brandName: "CLYN CLEAN CARE",
+  legalCompanyName: "주식회사 플린",
+  legalCompanyNameEn: "Plyn Inc.",
+  phone: "070-4155-5403",
+  address: "경기도 의정부시 경의로 19, 경원빌딘 301호",
+  bizNumber: "792-81-04045",
+  mailOrderNumber: "제 2026-의정부흥선-0327 호",
+} as const;
 
 export async function getCompanySettings(): Promise<CompanySettings> {
   const s = await getSettings([
@@ -97,12 +118,20 @@ export async function getCompanySettings(): Promise<CompanySettings> {
     "company_kakao_url",
     "company_address",
     "company_biz_number",
+    "brand_name",
+    "legal_company_name",
+    "legal_company_name_en",
+    "company_mail_order_number",
   ]);
   return {
-    name: s.company_name || "",
-    phone: s.company_phone || "",
+    name: s.company_name || BRAND_FALLBACK.brandName,
+    phone: s.company_phone || BRAND_FALLBACK.phone,
     kakaoUrl: s.company_kakao_url || "",
-    address: s.company_address || "",
-    bizNumber: s.company_biz_number || "",
+    address: s.company_address || BRAND_FALLBACK.address,
+    bizNumber: s.company_biz_number || BRAND_FALLBACK.bizNumber,
+    brandName: s.brand_name || BRAND_FALLBACK.brandName,
+    legalCompanyName: s.legal_company_name || BRAND_FALLBACK.legalCompanyName,
+    legalCompanyNameEn: s.legal_company_name_en || BRAND_FALLBACK.legalCompanyNameEn,
+    mailOrderNumber: s.company_mail_order_number || BRAND_FALLBACK.mailOrderNumber,
   };
 }

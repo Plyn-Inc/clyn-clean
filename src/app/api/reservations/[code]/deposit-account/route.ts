@@ -9,6 +9,7 @@ import {
 import { getBankSettings } from "@/lib/settings";
 import { findPaymentByReservationId } from "@/database/repositories/reservation-repository";
 import { normalizePhone, formatWorkArea } from "@/lib/utils";
+import { VAT_NOTICE } from "@/lib/types";
 
 /**
  * 예약금 입금 계좌 확인 (요구사항 14~16)
@@ -96,7 +97,7 @@ export async function POST(
     totalAmount: updated.final_confirmed_total,
     depositAmount: updated.deposit_amount_snapshot,
     balanceAmount: updated.estimated_balance_snapshot,
-    vatNotice: "표시된 청소금액은 VAT 별도입니다.",
+    vatNotice: VAT_NOTICE,
     account: {
       bankName: bank.bankName,
       accountNumber: bank.accountNumber,

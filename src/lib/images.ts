@@ -13,6 +13,17 @@ export interface CleanImage {
   height: number;
 }
 
+/**
+ * CLYN CLEAN CARE BI 원본.
+ * 원본 파일을 임의로 수정·크롭하지 않는다. 종횡비(4:3)를 그대로 유지한다.
+ */
+export const BRAND_LOGO: CleanImage = {
+  src: "/images/brand/clyn-clean-care-logo.png",
+  alt: "CLYN CLEAN CARE",
+  width: 1448,
+  height: 1086,
+};
+
 export interface BeforeAfterPair {
   id: string;
   title: string;
@@ -29,6 +40,22 @@ export const HERO_IMAGE: CleanImage = {
   width: 1672,
   height: 941,
 };
+
+/** Hero 슬라이드 — 제공된 2장을 모두 사용한다 */
+export const HERO_SLIDES: CleanImage[] = [
+  {
+    src: "/images/clean/hero/hero-living-room.webp",
+    alt: "입주청소가 완료된 밝고 깨끗한 거실",
+    width: 1672,
+    height: 941,
+  },
+  {
+    src: "/images/clean/hero/hero-kitchen.webp",
+    alt: "입주청소가 완료된 깨끗한 주방",
+    width: 1672,
+    height: 941,
+  },
+];
 
 /** 최종 예약 CTA 직전 보조 비주얼 (Hero와 다른 공간) */
 export const CTA_IMAGE: CleanImage = {
@@ -102,6 +129,38 @@ export const BEFORE_AFTER_PAIRS: BeforeAfterPair[] = [
     after: {
       src: "/images/clean/before-after/storage-after.webp",
       alt: "청소 후 깨끗해진 수납장 내부",
+      width: 1200,
+      height: 1600,
+    },
+  },
+  {
+    id: "bathroom-drain",
+    title: "욕실 배수구",
+    before: {
+      src: "/images/clean/before-after/bathroom-drain-before.webp",
+      alt: "청소 전 욕실 배수구 주변 오염",
+      width: 1200,
+      height: 1600,
+    },
+    after: {
+      src: "/images/clean/before-after/bathroom-drain-after.webp",
+      alt: "청소 후 정리된 욕실 배수구 주변",
+      width: 1200,
+      height: 1600,
+    },
+  },
+  {
+    id: "washer-gasket",
+    title: "세탁기 고무패킹",
+    before: {
+      src: "/images/clean/before-after/washer-gasket-before.webp",
+      alt: "청소 전 세탁기 고무패킹 내부 오염",
+      width: 1200,
+      height: 1600,
+    },
+    after: {
+      src: "/images/clean/before-after/washer-gasket-after.webp",
+      alt: "청소 후 깨끗해진 세탁기 고무패킹 내부",
       width: 1200,
       height: 1600,
     },

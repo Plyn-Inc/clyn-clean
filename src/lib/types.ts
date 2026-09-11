@@ -197,6 +197,11 @@ export interface Reservation {
   account_revealed_at: string | null;
   deposit_expired_at: string | null;
   auto_released: number;
+  /** 반려동물 있음 (1) — 상담 전환 판정. JSON 파싱이 아닌 정식 컬럼 */
+  has_pet: number;
+  /** 날짜 조건 가격 보정 내부 감사용 (고객 미노출) */
+  date_adjustment_applied: number;
+  date_adjustment_amount: number;
   // --- 레거시(현 흐름 미사용, 스키마 호환 유지) ---
   approved_at: string | null;
   approved_by_admin_id: number | null;
@@ -322,29 +327,49 @@ export const DEFAULT_DEPOSIT_BY_HOUSE_TYPE: Record<string, number> = {
 
 
 // ---------------------------------------------------------------------------
-// 확정 기본 청소금액 (VAT 별도)
+// 확정 기본 청소금액 (부가세 포함 고객 표시금액)
 //
 // 이 상수는 price_rules seed 및 fallback의 single source of truth이다.
 // 실제 적용 금액은 price_rules.base_price(관리자 수정 가능)를 우선한다.
 // 홈페이지/견적 어디에서도 VAT를 자동 가산하지 않는다.
 // ---------------------------------------------------------------------------
 export const DEFAULT_BASE_PRICE_BY_HOUSE_TYPE: Record<string, number> = {
-  "원룸": 169000,
-  "원룸 복층": 219000,
-  "1.5룸": 229000,
-  "투룸": 249000,
-  "쓰리룸": 299000,
-  "18평": 309000,
-  "24평": 339000,
-  "28평": 389000,
-  "32평": 419000,
-  "34평": 449000,
-  "38평": 490000,
-  "40평": 529000,
+  "원룸": 179000,
+  "원룸 복층": 239000,
+  "1.5룸": 249000,
+  "투룸": 269000,
+  "쓰리룸": 319000,
+  "18평": 329000,
+  "24평": 369000,
+  "28평": 420000,
+  "32평": 459000,
+  "34평": 489000,
+  "38평": 539000,
+  // 40평 이상은 확정 자동견적 상품이 아니다. 상담 참고 시작가.
+  "40평": 579000,
 };
 
-/** 홈페이지/동의서 공통 VAT 안내 문구 (총액 자동 계산 금지) */
-export const VAT_NOTICE = "※ 표시된 청소금액은 VAT 별도입니다.";
+/**
+ * 고객 표시 금액 안내 문구.
+ * 고객에게 표시되는 모든 금액은 부가세가 포함된 최종 표시금액이다.
+ * "VAT 별도" / "부가세 별도" 문구는 고객 UI에 사용하지 않는다.
+ */
+export const VAT_NOTICE = "※ 표시 금액은 부가세가 포함된 금액입니다.";
+
+/** 추가 서비스 공통 안내 문구 */
+export const EXTRA_SERVICE_NOTICE =
+  "※ 추가 서비스는 현장 상태와 작업 범위를 확인한 후 추가 비용이 발생할 수 있으며, 비용은 작업 전 고객 확인 및 동의 후 확정됩니다.";
+
+/** 날짜 조건 내부 가격 보정액 (고객에게 사유/금액을 노출하지 않는다) */
+export const DATE_ADJUSTMENT_AMOUNT = 30000;
+
+/** 40평 이상 상담 전환 안내 */
+export const SIZE_40_PLUS_CONSULT_NOTICE =
+  "40평 이상은 별도 확인이 필요한 서비스입니다. 상담 접수 후 담당자가 확인하여 영업일 기준 24시간 이내 연락드립니다.";
+
+/** 반려동물 상담 전환 안내 */
+export const PET_CONSULT_NOTICE =
+  "반려동물 관련 추가 확인이 필요합니다. 담당자가 확인 후 영업일 기준 24시간 이내 연락드리겠습니다.";
 
 /**
  * 상품별 표준 주거 구조 기준.
@@ -409,3 +434,61 @@ export function toPublicSlotStatus(params: {
   if (params.remaining > 0) return "예약가능";
   return params.hasConfirmed ? "예약완료" : "예약진행 중";
 }
+
+
+// ---------------------------------------------------------------------------
+// 상담접수 (consultation_requests)
+//
+// 40평 이상 / 반려동물 있음 등 자동예약이 불가한 건을 일반 예약과 분리해 관리한다.
+// 상담접수는 캘린더 슬롯을 점유하지 않는다.
+// ---------------------------------------------------------------------------
+export type ConsultationStatus = "received" | "contacting" | "converted" | "closed";
+
+export const CONSULTATION_STATUS_LABEL: Record<ConsultationStatus, string> = {
+  received: "신규 접수",
+  contacting: "연락 진행 중",
+  converted: "예약 전환 완료",
+  closed: "종료",
+};
+
+/** 상담 전환 사유 */
+export type ConsultationReason = "size_40_plus" | "pet" | "price_unconfirmed" | "manual";
+
+export const CONSULTATION_REASON_LABEL: Record<ConsultationReason, string> = {
+  size_40_plus: "40평 이상",
+  pet: "반려동물",
+  price_unconfirmed: "견적 확인 필요",
+  manual: "직접 상담 신청",
+};
+
+export interface ConsultationRequest {
+  id: number;
+  request_code: string;
+  customer_name: string;
+  customer_phone: string;
+  area_sido: string | null;
+  area_sigungu: string | null;
+  area_dong: string | null;
+  address: string | null;
+  service_type: string | null;
+  house_type_key: string | null;
+  actual_pyeong: number | null;
+  preferred_date: string | null;
+  preferred_time_slot: string | null;
+  reason: string;
+  /** 반려동물 상세 JSON */
+  pet_meta: string | null;
+  extra_notes: string | null;
+  /** 상담 참고용 시작가. 확정 견적이 아니다 */
+  reference_price: number | null;
+  status: ConsultationStatus;
+  admin_memo: string | null;
+  converted_reservation_id: number | null;
+  privacy_agreed: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** 상담 접수 완료 안내 */
+export const CONSULTATION_COMPLETE_NOTICE =
+  "상담 접수가 완료되었습니다. 담당자가 확인 후 영업일 기준 24시간 이내 연락드리겠습니다.";

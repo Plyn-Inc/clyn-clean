@@ -107,8 +107,39 @@ export default function AdminSettingsPage() {
         />
       </SectionBlock>
 
-      <SectionBlock title="회사 정보">
-        <TextField label="회사명" value={settings.company_name} onChange={(v) => set("company_name", v)} />
+      <SectionBlock title="브랜드 (고객 노출)">
+        <TextField
+          label="브랜드명"
+          value={settings.brand_name}
+          onChange={(v) => set("brand_name", v)}
+        />
+        <p className="text-xs text-[var(--ink-soft)]">
+          Header BI와 Footer 상단에 노출되는 고객용 브랜드명입니다.
+        </p>
+      </SectionBlock>
+
+      <SectionBlock title="법적 운영주체">
+        <TextField
+          label="법인명 (국문)"
+          value={settings.legal_company_name}
+          onChange={(v) => set("legal_company_name", v)}
+        />
+        <TextField
+          label="법인명 (영문)"
+          value={settings.legal_company_name_en}
+          onChange={(v) => set("legal_company_name_en", v)}
+        />
+        <TextField
+          label="통신판매업 신고번호"
+          value={settings.company_mail_order_number}
+          onChange={(v) => set("company_mail_order_number", v)}
+        />
+        <p className="text-xs text-[var(--ink-soft)]">
+          Footer·개인정보처리방침 등 법적 고지에 사용됩니다. 브랜드명과 별도로 관리됩니다.
+        </p>
+      </SectionBlock>
+
+      <SectionBlock title="연락처 / 사업자 정보">
         <TextField label="전화번호" value={settings.company_phone} onChange={(v) => set("company_phone", v)} />
         <TextField
           label="카카오톡 채널 URL"

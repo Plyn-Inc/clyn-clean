@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { calculateQuote, getOptionPrices } from "@/lib/pricing";
 import { computeInstantDiscountEligible } from "@/lib/reservations";
+import { SpecialDayNotSyncedError } from "@/lib/special-days-store";
+import { isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
 import {
   SERVICE_TYPES,
   HOUSE_TYPES_FIXED,
@@ -26,6 +28,8 @@ const quoteSchema = z.object({
   entryRoute: z.enum(["calendar", "direct"]).optional(),
   desiredDate: z.string().optional(),
   timeSlot: z.enum(["morning", "afternoon"]).optional(),
+  /** 반려동물 있음 — 상담 전환 판정에 사용 */
+  hasPet: z.boolean().optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -47,7 +51,16 @@ export async function POST(req: NextRequest) {
     entryRoute,
     desiredDate,
     timeSlot,
+    hasPet,
   } = parsed.data;
+
+  // 예약 가능 기간 밖 날짜는 견적을 확정하지 않는다 (booking-window 단일 원천)
+  if (desiredDate && !isWithinBookingWindow(desiredDate)) {
+    return NextResponse.json(
+      { error: outOfWindowMessage(), code: "OUT_OF_BOOKING_WINDOW" },
+      { status: 400 }
+    );
+  }
 
   if (["입주청소", "사이청소", "거주청소"].includes(serviceType) && !houseTypeKey) {
     return NextResponse.json({ error: "주택유형을 선택해주세요." }, { status: 400 });
@@ -93,6 +106,8 @@ export async function POST(req: NextRequest) {
       actualPyeong,
       extraOptions,
       instantDiscountEligible: eligible,
+      desiredDate,
+      hasPet,
     });
 
     if (
@@ -105,8 +120,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    return NextResponse.json({ quote });
+    // 공개 DTO — 내부 가격 보정 사유와 rule 이름을 고객에게 노출하지 않는다.
+    // dateAdjustmentApplied / dateAdjustmentAmount / consultReason은 제거한다.
+    const {
+      dateAdjustmentApplied: _a,
+      dateAdjustmentAmount: _b,
+      consultReason: _c,
+      ...publicQuote
+    } = quote;
+    void _a; void _b; void _c;
+    return NextResponse.json({ quote: publicQuote });
   } catch (e) {
+    if (e instanceof SpecialDayNotSyncedError) {
+      return NextResponse.json({ error: e.message, code: e.code }, { status: 400 });
+    }
     console.error(e);
     return NextResponse.json({ error: "견적 계산 중 오류가 발생했습니다." }, { status: 500 });
   }

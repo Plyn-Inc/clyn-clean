@@ -1,20 +1,28 @@
 @import "tailwindcss";
 
 :root {
-  --background: #FAFAF8;
-  --foreground: #1A2230;
+  /*
+   * CLYN CLEAN CARE 팔레트.
+   * BI의 딥네이비블루 + 클린블루를 기준으로 밝고 산뜻한 톤을 구성한다.
+   * 변수명은 기존 컴포넌트 호환을 위해 유지한다.
+   */
+  --background: #FBFDFF;
+  --foreground: #16233A;
 
-  --ink: #1A2230;
-  --ink-soft: #4A5568;
-  --navy: #16213A;
-  --navy-deep: #0E1626;
-  --mint: #1FA37A;
-  --mint-soft: #E3F5EE;
-  --mint-bright: #2DD4A8;
-  --sand: #FAFAF8;
-  --sand-deep: #F0EEE6;
-  --line: #E4E1D6;
-  --amber: #D98E2F;
+  --ink: #16233A;
+  --ink-soft: #56657C;
+  /* BI 딥네이비블루 */
+  --navy: #164E87;
+  --navy-deep: #103A66;
+  /* BI 클린블루 (accent) */
+  --mint: #2E90D9;
+  --mint-soft: #E4F2FC;
+  --mint-bright: #42A5F5;
+  /* 쿨화이트 배경 */
+  --sand: #F4F9FD;
+  --sand-deep: #E8F1F8;
+  --line: #DCE7F0;
+  --amber: #C77C1E;
   --rose: #C2543C;
 
   --radius-card: 18px;

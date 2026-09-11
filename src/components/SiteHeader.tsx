@@ -1,7 +1,9 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useState } from "react";
+import { BRAND_LOGO } from "@/lib/images";
 
 export default function SiteHeader({ companyName }: { companyName: string }) {
   const [open, setOpen] = useState(false);
@@ -9,13 +11,20 @@ export default function SiteHeader({ companyName }: { companyName: string }) {
   return (
     <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--sand)]/90 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4 md:px-8">
-        <Link href="/" className="flex items-center gap-2">
-          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-[var(--navy)] text-sm font-bold text-[var(--mint-bright)]">
-            ●
-          </span>
-          <span className="font-display text-lg font-bold tracking-tight text-[var(--ink)]">
-            {companyName || "입주청소 예약센터"}
-          </span>
+        {/*
+          CLYN CLEAN CARE BI 원본을 그대로 사용한다.
+          원본 종횡비(1448x1086, 4:3)를 유지하고 임의 크롭/재디자인하지 않는다.
+        */}
+        <Link href="/" className="flex items-center" aria-label={companyName}>
+          <Image
+            src={BRAND_LOGO.src}
+            alt={BRAND_LOGO.alt}
+            width={BRAND_LOGO.width}
+            height={BRAND_LOGO.height}
+            priority
+            sizes="(max-width: 768px) 132px, 168px"
+            className="h-11 w-auto md:h-14"
+          />
         </Link>
 
         <nav className="hidden items-center gap-7 text-sm font-medium text-[var(--ink-soft)] md:flex">
@@ -27,6 +36,9 @@ export default function SiteHeader({ companyName }: { companyName: string }) {
           </Link>
           <Link href="/#services" className="hover:text-[var(--ink)]">
             청소 서비스
+          </Link>
+          <Link href="/consultation" className="hover:text-[var(--ink)]">
+            상담 접수
           </Link>
           <Link href="/#reviews" className="hover:text-[var(--ink)]">
             후기
@@ -69,6 +81,9 @@ export default function SiteHeader({ companyName }: { companyName: string }) {
           </Link>
           <Link href="/#services" className="rounded-lg px-3 py-2.5 hover:bg-[var(--sand-deep)]" onClick={() => setOpen(false)}>
             청소 서비스
+          </Link>
+          <Link href="/consultation" className="rounded-lg px-3 py-2.5 hover:bg-[var(--sand-deep)]" onClick={() => setOpen(false)}>
+            상담 접수
           </Link>
           <Link href="/#reviews" className="rounded-lg px-3 py-2.5 hover:bg-[var(--sand-deep)]" onClick={() => setOpen(false)}>
             후기

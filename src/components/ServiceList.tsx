@@ -11,7 +11,11 @@ export default function ServiceList() {
   return (
     <section id="services" className="scroll-mt-24 bg-[var(--sand)] py-20">
       <div className="mx-auto max-w-6xl px-5 md:px-8">
-        <SectionHeading eyebrow="청소 서비스" title="필요한 청소를 선택하세요" />
+        <SectionHeading
+          eyebrow="청소 서비스"
+          title="청소 서비스 구분"
+          desc="공간의 상태와 이용 상황에 따라 제공되는 청소 서비스의 구분을 안내드립니다."
+        />
 
         <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {SERVICE_TYPES.map((service) => (

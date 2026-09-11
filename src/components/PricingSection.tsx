@@ -12,7 +12,7 @@ import { SectionHeading } from "./ServiceList";
  *
  * - price_rules를 single source of truth로 사용한다 (가격 하드코딩 없음)
  * - VAT를 자동 합산하지 않는다. 섹션 하단에 공통 안내 문구만 1회 표시한다.
- * - 카드마다 "VAT 별도"를 반복 표기하지 않는다.
+ * - 카드마다 부가세 안내를 반복 표기하지 않는다.
  */
 export default async function PricingSection() {
   const rules = await listPriceRules();

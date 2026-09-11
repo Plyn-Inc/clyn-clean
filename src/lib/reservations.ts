@@ -85,6 +85,8 @@ export interface CreateReservationInput {
   hasSitePhotos?: boolean;
   depositorName: string;
   privacyAgreed?: boolean;
+  /** 반려동물 있음 — 상담 전환 판정 */
+  hasPet?: boolean;
   // --- 최소 고객정보: 작업지역 (행정구역 동 기준) ---
   areaSido?: string;
   areaSigungu?: string;
@@ -216,6 +218,9 @@ export async function createReservation(
         actualPyeong: input.actualPyeong ?? (input.areaPyeong ?? undefined),
         extraOptions: input.extraOptions,
         instantDiscountEligible: eligible,
+        // snapshot 금액도 서버가 예약일 기준으로 재계산한 값을 저장한다
+        desiredDate: input.desiredDate,
+        hasPet: input.hasPet,
       });
       estimatedTotal = q.estimatedTotal;
       estimatedBalance = q.estimatedBalance;
@@ -244,6 +249,8 @@ export async function createReservation(
     // 6. DB 저장 (snapshot 값이 위 계산과 일치)
     // priceConfirmedSnapshot: 40평 이상은 0(미확정), 그 외는 1(확정)
     let priceConfirmedSnap = 1;
+    let dateAdjApplied = false;
+    let dateAdjAmount = 0;
     try {
       const q2 = await calculateQuote({
         serviceType: input.serviceType,
@@ -254,6 +261,8 @@ export async function createReservation(
         instantDiscountEligible: false,
       });
       priceConfirmedSnap = q2.priceConfirmed ? 1 : 0;
+      dateAdjApplied = q2.dateAdjustmentApplied;
+      dateAdjAmount = q2.dateAdjustmentAmount;
     } catch {
       priceConfirmedSnap = 0;
     }
@@ -295,6 +304,9 @@ export async function createReservation(
       additionalChargeAgreed: input.additionalChargeAgreed ? 1 : 0,
       // 3종 동의가 모두 완료된 경우에만 동의서 버전/시각을 기록한다
       agreementVersion: allAgreed ? AGREEMENT_VERSION : null,
+      hasPet: input.hasPet ? 1 : 0,
+      dateAdjustmentApplied: dateAdjApplied ? 1 : 0,
+      dateAdjustmentAmount: dateAdjAmount,
     });
 
     // 예약 신청 단계에서는 payment를 생성하지 않는다.
@@ -527,6 +539,23 @@ export async function revealDepositAccount(
     }
     if (!reservation.agreement_version) {
       throw new DepositAccountError("동의서 버전이 기록되지 않았습니다.", "AGREEMENT_VERSION_MISSING");
+    }
+
+    // 2-0-1) 상담 전환 건 이중 차단 (요구사항 5)
+    //        예약 생성 시 이미 막지만, 데이터가 어떤 경로로 들어왔든
+    //        계좌 공개 직전에 서버가 다시 판정한다.
+    const gateQuote = await calculateQuote({
+      serviceType: reservation.service_type,
+      houseTypeKey: reservation.house_type_key ?? undefined,
+      actualPyeong: reservation.area_pyeong ?? undefined,
+      desiredDate: reservation.desired_date ?? undefined,
+      hasPet: reservation.has_pet === 1,
+    });
+    if (gateQuote.consultRequired) {
+      throw new DepositAccountError(
+        gateQuote.consultNotice ?? "상담 접수가 필요한 예약이라 계좌를 안내할 수 없습니다.",
+        "CONSULT_REQUIRED"
+      );
     }
 
     // 2-1) 동시 예약 방지 — 계좌 공개 직전에 슬롯 가용성을 다시 검증한다.
