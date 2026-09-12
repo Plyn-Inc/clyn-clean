@@ -12,7 +12,7 @@
  */
 import * as repo from "@/database/repositories/special-day-repository";
 import { withTransaction, getDatabaseBackend } from "@/database/connection";
-import { getSetting, setSetting } from "./settings";
+import { getSettings, setSetting } from "./settings";
 import { DATE_ADJUSTMENT_AMOUNT } from "./types";
 import { bookingMinDate, bookingMaxDate, BOOKING_WINDOW_DAYS } from "./booking-window";
 import { fetchHolidays, fetchLunarDay, fetchLunarMonth, isKasiConfigured, KasiUnavailableError } from "./kasi";
@@ -412,7 +412,13 @@ export async function checkCoverage(): Promise<CoverageReport> {
   const actual = await repo.countSpecialDaysInRange(from, to);
   const bySource = await repo.countBySourceInRange(from, to);
   const generatorRows = bySource.generator ?? 0;
-  const lastKasiSyncAt = (await getSetting("special_days_last_kasi_sync_at")) || "";
+  // 3개 key를 1회 batch SELECT로 조회한다 (순차 round-trip 제거)
+  const syncMeta = await getSettings([
+    "special_days_last_kasi_sync_at",
+    "special_days_synced_through",
+    "special_days_last_sync_at",
+  ]);
+  const lastKasiSyncAt = syncMeta.special_days_last_kasi_sync_at || "";
 
   const productionMode = !isGeneratorFallbackAllowed();
   const issues: string[] = [];
@@ -451,8 +457,8 @@ export async function checkCoverage(): Promise<CoverageReport> {
     bySource,
     hasGeneratorRows,
     stale,
-    syncedThrough: (await getSetting("special_days_synced_through")) || "",
-    lastSyncAt: (await getSetting("special_days_last_sync_at")) || "",
+    syncedThrough: syncMeta.special_days_synced_through || "",
+    lastSyncAt: syncMeta.special_days_last_sync_at || "",
     lastKasiSyncAt,
     issues,
   };

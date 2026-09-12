@@ -7,6 +7,19 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "아이디와 비밀번호를 입력해주세요." }, { status: 400 });
   }
 
+  // 관리자 계정 seed는 서버 부팅이 아니라 이 경로에서 lazy 수행한다.
+  // (부팅 경로에서 DB를 기다리면 홈페이지 TTFB가 DB 응답에 묶인다)
+  try {
+    const { ensureAdminSeeded } = await import("@/database");
+    await ensureAdminSeeded();
+  } catch (e) {
+    console.error("[admin] 계정 초기화 실패", e);
+    return NextResponse.json(
+      { error: "관리자 계정을 준비하지 못했습니다. 잠시 후 다시 시도해주세요." },
+      { status: 503 }
+    );
+  }
+
   const admin = await verifyAdminPassword(body.username, body.password);
   if (!admin) {
     return NextResponse.json({ error: "아이디 또는 비밀번호가 올바르지 않습니다." }, { status: 401 });

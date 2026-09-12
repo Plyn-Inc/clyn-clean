@@ -2930,11 +2930,31 @@ test('Production에서 generator 행은 고객에게 제공되지 않는다 (fai
   }
 });
 
-test('instrumentation은 부팅 시 전체 동기화를 실행하지 않는다', async () => {
-  const src = fs.readFileSync(path.join(process.cwd(), 'src/instrumentation.ts'), 'utf8');
-  assert.doesNotMatch(src, /syncSpecialDays\(/, '부팅 시 동기화를 실행하면 안 된다');
-  assert.match(src, /checkCoverage/, '커버리지 확인만 수행한다');
-  assert.match(src, /console\.warn/, '부족 시 경고만 남긴다');
+test('instrumentation은 Production 부팅에서 blocking DB I/O를 하지 않는다', async () => {
+  const raw = fs.readFileSync(path.join(process.cwd(), 'src/instrumentation.ts'), 'utf8');
+  // 주석은 제외하고 실제 코드 라인만 검사한다
+  const src = raw
+    .split('\n')
+    .filter((l) => {
+      const t = l.trim();
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
+    })
+    .join('\n');
+  // 부팅 경로에서 DB를 기다리면 홈페이지 TTFB가 DB 응답에 묶인다
+  assert.doesNotMatch(src, /syncSpecialDays\(/, '부팅 시 동기화 금지');
+  assert.doesNotMatch(src, /checkCoverage/, '부팅 시 special_days 조회 금지');
+  assert.doesNotMatch(src, /ensureDatabaseReady|ensureAdminSeeded|seedAdmin/, '부팅 시 admin seed 금지');
+  assert.doesNotMatch(src, /getSetting|getSettings|queryRow|queryRows/, '부팅 시 settings 조회 금지');
+  assert.doesNotMatch(src, /@\/database"/, '부팅 시 DB 모듈 import 금지');
+  // 환경변수 확인만 남는다
+  assert.match(src, /DATABASE_URL/);
+});
+
+test('admin seed는 로그인 경로에서 lazy 수행된다', async () => {
+  const dbIndex = fs.readFileSync(path.join(process.cwd(), 'src/database/index.ts'), 'utf8');
+  assert.match(dbIndex, /export function ensureAdminSeeded/);
+  const login = fs.readFileSync(path.join(process.cwd(), 'src/app/api/admin/login/route.ts'), 'utf8');
+  assert.match(login, /ensureAdminSeeded/);
 });
 
 test('cron 엔드포인트는 CRON_SECRET Bearer 인증을 요구한다', async () => {
@@ -3273,13 +3293,13 @@ test('캐시된 client를 쓰기 전에 liveness check를 수행한다', async (
 
 test('stale client는 폐기 후 재생성된다', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
-  assert.match(src, /async function discardClient/);
-  // best-effort end + global 제거
+  assert.match(src, /async function destroyClient/);
+  // global 제거 + socket 파괴(timeout: 0)
   assert.match(src, /global\.__cleaningReservationPg = undefined/);
-  assert.match(src, /client\.end/);
+  assert.match(src, /client\.end\(\{ timeout: 0 \}\)/);
   // liveness 실패 시 discard 후 재생성
   assert.match(src, /if \(await isAlive\(cached\)\)/);
-  assert.match(src, /await discardClient\(cached\)/);
+  assert.match(src, /await destroyClient\(cached, "stale-connection"\)/);
   // 새 client도 liveness 재확인
   assert.match(src, /if \(!\(await isAlive\(client\)\)\)/);
 });
@@ -3294,8 +3314,10 @@ test('healthy client는 재생성하지 않는다 (liveness 캐시)', async () =
 test('모든 쿼리에 상한 타임아웃이 적용되어 무한 대기하지 않는다', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
   assert.match(src, /QUERY_TIMEOUT_MS/);
-  assert.match(src, /function withTimeout/);
   assert.match(src, /DatabaseTimeoutError/);
+  // Promise.race만으로 끝내지 않고 실제 query를 cancel한다
+  assert.match(src, /handle\.cancel\(\)/);
+  assert.match(src, /CANCEL_GRACE_MS/);
   // 쿼리 함수들이 runPg를 경유한다
   for (const fn of ['queryRows', 'execute', 'executeReturningCount', 'insertReturningId']) {
     assert.match(src, new RegExp(`runPg\\("${fn}"`), `${fn}이 runPg를 경유해야 한다`);
@@ -3350,24 +3372,42 @@ test('connection 오류만 재시도 대상이고 SQL/business error는 재시�
   }
 });
 
-test('재시도는 최대 1회로 제한된다', async () => {
+test('timeout된 query는 자동 재시도하지 않는다 (write 중복 방지)', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
-  const runPg = src.slice(src.indexOf('async function runPg'), src.indexOf('async function runPg') + 1400);
-  // catch 안에서 재귀 호출하지 않고 단 한 번만 재실행한다
-  assert.doesNotMatch(runPg, /return runPg\(/, 'runPg를 재귀 호출하면 재시도가 무한해진다');
-  assert.match(runPg, /\(retry\)/);
-  const retryCount = (runPg.match(/withTimeout\(fn\(/g) ?? []).length;
-  assert.equal(retryCount, 3, '초기 1회 + 트랜잭션 1회 + 재시도 1회');
+  const runPg = src.slice(src.indexOf('async function runPg'), src.indexOf('async function runPg') + 1600);
+  // 재귀 호출 금지
+  assert.doesNotMatch(runPg, /return runPg\(/, 'runPg 재귀 호출 금지');
+  // 쿼리 실행은 단 한 번만 (연결 수립 재시도와 구분)
+  const execCount = (runPg.match(/execWithCancel\(/g) ?? []).length;
+  assert.equal(execCount, 2, '트랜잭션 경로 1 + 일반 경로 1 — 쿼리 재실행 없음');
+  // 재시도는 연결 수립 실패에만 허용된다
+  assert.match(runPg, /isRetriableConnectError/);
+});
+
+test('연결 수립 실패만 재시도 대상이다', async () => {
+  const conn = await import('../src/database/connection.ts');
+  assert.equal(conn.isRetriableConnectError(new conn.DatabaseConnectError('x')), true);
+  assert.equal(
+    conn.isRetriableConnectError(Object.assign(new Error('x'), { code: 'ECONNREFUSED' })),
+    true
+  );
+  // timeout은 실행 여부가 불확실하므로 재시도 금지
+  assert.equal(conn.isRetriableConnectError(new conn.DatabaseTimeoutError('x')), false);
+  assert.equal(
+    conn.isRetriableConnectError(Object.assign(new Error('x'), { code: 'ECONNRESET' })),
+    false,
+    '이미 전송됐을 수 있는 오류는 재시도하지 않는다'
+  );
 });
 
 test('transaction 내부에서는 connection을 교체하지 않는다', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
-  const runPg = src.slice(src.indexOf('async function runPg'), src.indexOf('async function runPg') + 1400);
-  // 트랜잭션이면 같은 client로 실행하고 즉시 반환한다 (discard/재생성 없음)
+  const runPg = src.slice(src.indexOf('async function runPg'), src.indexOf('async function runPg') + 1600);
+  // 트랜잭션이면 같은 client로 실행하고 즉시 반환한다 (교체/재시도 없음)
   assert.match(runPg, /const inTransaction = pgTransaction\.getStore\(\);/);
   assert.match(runPg, /if \(inTransaction\)/);
-  const txBranch = runPg.slice(runPg.indexOf('if (inTransaction)'), runPg.indexOf('const client = await getPostgresClient()'));
-  assert.doesNotMatch(txBranch, /discardClient/, '트랜잭션 중 client를 폐기하면 안 된다');
+  const txBranch = runPg.slice(runPg.indexOf('if (inTransaction)'), runPg.indexOf('let client: PostgresClient;'));
+  assert.doesNotMatch(txBranch, /destroyClient/, '트랜잭션 중 client를 폐기하면 안 된다');
   assert.doesNotMatch(txBranch, /getPostgresClient/, '트랜잭션 중 새 connection을 잡으면 안 된다');
 });
 
@@ -3425,4 +3465,327 @@ test('batch 조회가 기존 getSettings 계약과 동일한 결과를 준다', 
   const company = await settings.getCompanySettings();
   assert.equal(company.brandName, 'CLYN CLEAN CARE');
   assert.equal(company.legalCompanyNameEn, 'Plyn Inc.');
+});
+
+// ===========================================================================
+// [신규] orphan query 방지 — PendingQuery cancel / client destroy
+//
+// controllable PendingQuery mock으로 "Promise만 timeout되는 것이 아니라
+// underlying query cancel까지 호출됨"을 검증한다.
+// ===========================================================================
+
+/** 수동으로 settle/cancel을 제어할 수 있는 PendingQuery mock */
+function makePendingQuery() {
+  let resolveFn, rejectFn;
+  const inner = new Promise((res, rej) => { resolveFn = res; rejectFn = rej; });
+  const state = { executed: false, cancelled: false, settled: false };
+  const handle = Object.assign(inner, {
+    execute() { state.executed = true; return handle; },
+    cancel() { state.cancelled = true; },
+  });
+  return {
+    handle,
+    state,
+    resolve(v) { state.settled = true; resolveFn(v ?? []); },
+    reject(e) { state.settled = true; rejectFn(e); },
+  };
+}
+
+/** connection.ts의 PostgreSQL 경로를 mock client로 실행한다 */
+async function withMockPgClient(clientImpl, fn) {
+  const prevUrl = process.env.DATABASE_URL;
+  const prevGlobal = globalThis.__cleaningReservationPg;
+  const prevChecked = globalThis.__cleaningReservationPgCheckedAt;
+  try {
+    process.env.DATABASE_URL = 'postgresql://mock:mock@localhost:5432/mock';
+    globalThis.__cleaningReservationPg = clientImpl;
+    // liveness check를 건너뛰도록 최근 확인 시각을 세팅
+    globalThis.__cleaningReservationPgCheckedAt = Date.now();
+    return await fn();
+  } finally {
+    if (prevUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = prevUrl;
+    globalThis.__cleaningReservationPg = prevGlobal;
+    globalThis.__cleaningReservationPgCheckedAt = prevChecked;
+  }
+}
+
+test('timeout 시 PendingQuery.cancel()이 실제로 호출된다', async () => {
+  const conn = await import('../src/database/connection.ts');
+  const pending = makePendingQuery();
+  let endCalled = false;
+
+  const client = {
+    unsafe: () => pending.handle,
+    begin: async (f) => f(client),
+    end: async () => { endCalled = true; },
+  };
+
+  await withMockPgClient(client, async () => {
+    // 쿼리를 영원히 settle하지 않으면 timeout → cancel 호출
+    const p = conn.queryRows('SELECT 1 FROM settings WHERE key = ?', ['x']);
+    await assert.rejects(p, /timed out/);
+  });
+
+  assert.equal(pending.state.executed, true, '.execute()로 핸들을 보존해야 한다');
+  assert.equal(pending.state.cancelled, true, 'timeout 시 .cancel()을 호출해야 한다');
+  // cancel 후에도 settle되지 않았으므로 client가 destroy되어야 한다
+  assert.equal(endCalled, true, 'cancel 미settle 시 client를 destroy해야 한다');
+  assert.equal(globalThis.__cleaningReservationPg, undefined, 'global cache에서 제거되어야 한다');
+});
+
+test('cancel 후 query가 settle되면 client를 destroy하지 않는다', async () => {
+  const conn = await import('../src/database/connection.ts');
+  const pending = makePendingQuery();
+  let endCalled = false;
+
+  const client = {
+    unsafe: () => pending.handle,
+    begin: async (f) => f(client),
+    end: async () => { endCalled = true; },
+  };
+
+  await withMockPgClient(client, async () => {
+    const p = conn.queryRows('SELECT 1 FROM settings WHERE key = ?', ['x']);
+    // timeout 직후 cancel에 반응해 query가 실제로 종료되는 상황을 재현
+    setTimeout(() => pending.reject(Object.assign(new Error('canceling statement due to user request'), { code: '57014' })), 8100);
+    await assert.rejects(p, /timed out/);
+  });
+
+  assert.equal(pending.state.cancelled, true);
+  assert.equal(endCalled, false, 'settle됐으면 client를 폐기하지 않는다');
+});
+
+test('destroy된 client는 global cache에서 제거되어 재사용되지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  const destroy = src.slice(src.indexOf('async function destroyClient'), src.indexOf('async function destroyClient') + 700);
+  assert.match(destroy, /global\.__cleaningReservationPg = undefined/);
+  assert.match(destroy, /global\.__cleaningReservationPgCheckedAt = undefined/);
+  // best-effort close가 아니라 socket 파괴
+  assert.match(destroy, /timeout: 0/);
+});
+
+test('write query는 timeout 후 자동 재실행되지 않는다', async () => {
+  const conn = await import('../src/database/connection.ts');
+  let unsafeCalls = 0;
+  const pendings = [];
+
+  const client = {
+    unsafe: () => { unsafeCalls++; const p = makePendingQuery(); pendings.push(p); return p.handle; },
+    begin: async (f) => f(client),
+    end: async () => {},
+  };
+
+  await withMockPgClient(client, async () => {
+    await assert.rejects(
+      conn.execute('INSERT INTO reservations (reservation_code) VALUES (?)', ['X']),
+      /timed out/
+    );
+  });
+
+  assert.equal(unsafeCalls, 1, 'timeout된 write를 재실행하면 중복 예약이 생긴다');
+  assert.equal(pendings[0].state.cancelled, true);
+});
+
+test('transaction 내부 timeout은 cancel 후 throw하여 rollback되게 한다', async () => {
+  const conn = await import('../src/database/connection.ts');
+  const pending = makePendingQuery();
+  let beginCalls = 0;
+  let unsafeCalls = 0;
+
+  const client = {
+    unsafe: () => { unsafeCalls++; return pending.handle; },
+    begin: async (f) => { beginCalls++; return f(client); },
+    end: async () => {},
+  };
+
+  await withMockPgClient(client, async () => {
+    await assert.rejects(
+      conn.withTransaction(async () => {
+        await conn.queryRows('SELECT 1 FROM settings WHERE key = ?', ['x']);
+      }),
+      /timed out/,
+      'transaction 실패를 숨기지 않는다'
+    );
+  });
+
+  assert.equal(beginCalls, 1);
+  assert.equal(unsafeCalls, 1, 'transaction 중 다른 client로 재실행하면 안 된다');
+  assert.equal(pending.state.cancelled, true, 'transaction 내부에서도 cancel한다');
+});
+
+test('Promise.race만으로 timeout을 끝내지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  // timeout 경로에 cancel + settle 확인 + destroy가 모두 있어야 한다
+  const exec = src.slice(src.indexOf('async function execWithCancel'), src.indexOf('async function execWithCancel') + 2200);
+  assert.match(exec, /handle\.cancel\(\)/);
+  assert.match(exec, /CANCEL_GRACE_MS/);
+  assert.match(exec, /if \(!settled\)/);
+  assert.match(exec, /destroyClient\(client, "cancel-not-settled"\)/);
+});
+
+test('DB timing log가 있고 SQL/PII/접속정보를 남기지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /query:timeout/);
+  assert.match(src, /client:recycle/);
+  // 로그 함수가 SQL/파라미터/URL을 인자로 받지 않는다
+  assert.doesNotMatch(src, /console\.(log|warn|error)\([^)]*\bsql\b/, 'SQL을 로그하면 안 된다');
+  assert.doesNotMatch(src, /console\.(log|warn|error)\([^)]*params/, '파라미터를 로그하면 안 된다');
+  assert.doesNotMatch(src, /console\.(log|warn|error)\([^)]*postgresUrl/, '접속정보를 로그하면 안 된다');
+  assert.doesNotMatch(src, /DATABASE_URL[^)]*console/, '접속정보를 로그하면 안 된다');
+});
+
+// --- 홈페이지 first render DB 비의존 ---
+
+test('홈페이지 first render는 DB를 await하지 않는다', async () => {
+  const page = fs.readFileSync(path.join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+  // 최상위 컴포넌트가 async가 아니어야 한다
+  assert.match(page, /export default function Home\(\)/, 'Home은 동기 컴포넌트여야 한다');
+  assert.doesNotMatch(page, /export default async function Home/);
+  // 회사정보는 코드 상수로 즉시 렌더링
+  assert.match(page, /fallbackCompanySettings\(\)/);
+  // DB 기반 섹션은 Suspense로 분리
+  assert.match(page, /<Suspense/);
+  assert.match(page, /ContactSectionAsync/);
+});
+
+test('ReviewsPreview / BlogPreview DB 실패가 홈페이지를 막지 않는다', async () => {
+  for (const f of ['src/components/ReviewsPreview.tsx', 'src/components/BlogPreview.tsx']) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.match(src, /try \{/, `${f}는 DB 실패를 흡수해야 한다`);
+    assert.match(src, /catch/, `${f}는 DB 실패를 흡수해야 한다`);
+  }
+  const page = fs.readFileSync(path.join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+  // 두 섹션 모두 Suspense 경계 안에 있어야 한다
+  assert.match(page, /<Suspense fallback=\{<SectionPlaceholder \/>\}>\s*<ReviewsPreview \/>/);
+  assert.match(page, /<Suspense fallback=\{<SectionPlaceholder \/>\}>\s*<BlogPreview \/>/);
+});
+
+test('special_days 미적용은 fallback으로 숨기지 않는다', async () => {
+  const store = fs.readFileSync(path.join(process.cwd(), 'src/lib/special-days-store.ts'), 'utf8');
+  // 조회 실패를 일반일로 처리하는 silent catch가 없어야 한다
+  assert.match(store, /SpecialDayNotSyncedError/);
+  assert.doesNotMatch(store, /catch\s*\{\s*return\s*\{[^}]*isHoliday:\s*false/, '일반일 fallback 금지');
+  // Production generator fallback 금지 유지
+  assert.match(store, /isGeneratorFallbackAllowed/);
+});
+
+// ===========================================================================
+// [신규] RootLayout / generateMetadata DB blocking 제거
+//
+// layout.tsx는 모든 페이지의 first HTML critical path다.
+// 여기서 DB를 await하면 DB 장애 시 shell조차 내려가지 못한다.
+// ===========================================================================
+
+/** 주석을 제외한 실제 코드 라인만 남긴다 */
+function codeLinesOf(filePath) {
+  return fs
+    .readFileSync(path.join(process.cwd(), filePath), 'utf8')
+    .split('\n')
+    .filter((l) => {
+      const t = l.trim();
+      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
+    })
+    .join('\n');
+}
+
+test('layout.tsx에 DB 조회 호출이 0건이다', async () => {
+  const code = codeLinesOf('src/app/layout.tsx');
+  assert.doesNotMatch(code, /getSetting\b/, 'getSetting 호출 금지');
+  assert.doesNotMatch(code, /getSettings\(/, 'getSettings 호출 금지');
+  assert.doesNotMatch(code, /getCompanySettings\b/, 'getCompanySettings 호출 금지');
+  assert.doesNotMatch(code, /getCompanySettingsSafe\b/, 'getCompanySettingsSafe 호출 금지');
+  assert.doesNotMatch(code, /getCompanyOrDefault/, 'getCompanyOrDefault 제거');
+  // DB 모듈을 직접 import하지 않는다
+  assert.doesNotMatch(code, /@\/database/, 'DB 모듈 import 금지');
+  assert.doesNotMatch(code, /queryRow|queryRows|execute\(/, 'DB 쿼리 금지');
+});
+
+test('RootLayout은 DB를 await하지 않는 동기 컴포넌트다', async () => {
+  const code = codeLinesOf('src/app/layout.tsx');
+  assert.match(code, /export default function RootLayout/, 'sync component여야 한다');
+  assert.doesNotMatch(code, /export default async function RootLayout/);
+  // 브랜드 정보는 코드 상수로 즉시 사용
+  assert.match(code, /fallbackCompanySettings\(\)/);
+  // RootLayout 본문에 await이 없어야 한다
+  const body = code.slice(code.indexOf('export default function RootLayout'));
+  assert.doesNotMatch(body, /await /, 'RootLayout 본문에 await 금지');
+});
+
+test('generateMetadata 내부에 DB 접근이 0건이다', async () => {
+  const code = codeLinesOf('src/app/layout.tsx');
+  const start = code.indexOf('export function generateMetadata');
+  assert.notEqual(start, -1, 'generateMetadata는 동기 함수여야 한다');
+  const meta = code.slice(start, code.indexOf('export default function RootLayout'));
+  assert.doesNotMatch(meta, /await /, 'metadata 생성에 await 금지');
+  assert.doesNotMatch(meta, /getSetting/, 'site_title/site_description DB 조회 금지');
+  assert.doesNotMatch(meta, /site_title|site_description/, 'DB key 참조 금지');
+  // 코드 상수 사용
+  assert.match(meta, /SITE_SEO_FALLBACK/);
+});
+
+test('SEO 기본값 상수가 존재하고 브랜드와 일치한다', async () => {
+  const settings = await import('../src/lib/settings.ts');
+  assert.ok(settings.SITE_SEO_FALLBACK.title.length > 0);
+  assert.ok(settings.SITE_SEO_FALLBACK.description.length > 0);
+  assert.match(settings.SITE_SEO_FALLBACK.title, /CLYN CLEAN CARE/);
+});
+
+test('Header/Footer가 브랜드 fallback으로 정상 렌더링된다', async () => {
+  const settings = await import('../src/lib/settings.ts');
+  const company = settings.fallbackCompanySettings();
+
+  // Header에 전달되는 값
+  assert.equal(company.brandName, 'CLYN CLEAN CARE');
+  // Footer에 필요한 법적 정보가 모두 채워져 있어야 한다
+  assert.equal(company.legalCompanyName, '주식회사 플린');
+  assert.equal(company.legalCompanyNameEn, 'Plyn Inc.');
+  assert.equal(company.bizNumber, '792-81-04045');
+  assert.equal(company.phone, '070-4155-5403');
+  assert.match(company.mailOrderNumber, /2026-의정부흥선-0327/);
+  assert.match(company.address, /경원빌딘/);
+
+  // layout이 이 값을 Header/Footer에 넘긴다
+  const code = codeLinesOf('src/app/layout.tsx');
+  assert.match(code, /<SiteHeader companyName=\{company\.brandName\}/);
+  assert.match(code, /<SiteFooter company=\{company\}/);
+});
+
+test('홈페이지 shell critical path에 DB 접근이 없다', async () => {
+  // layout(모든 페이지 공통) + page 최상위 모두 DB 비의존이어야 한다
+  // layout은 파일 전체에 DB await가 없어야 한다
+  const layout = codeLinesOf('src/app/layout.tsx');
+  assert.doesNotMatch(layout, /await getCompanySettings/, 'layout: DB await 금지');
+
+  // page는 최상위 Home 컴포넌트 본문에만 DB await가 없으면 된다
+  // (Suspense child인 ContactSectionAsync 내부 await는 정상)
+  const page = codeLinesOf('src/app/page.tsx');
+  const homeStart = page.indexOf('export default function Home()');
+  const homeEnd = page.indexOf('function SectionPlaceholder');
+  const homeBody = page.slice(homeStart, homeEnd > homeStart ? homeEnd : undefined);
+  assert.doesNotMatch(homeBody, /await /, 'Home 최상위 본문에 await 금지');
+  // Home 최상위는 sync + 상수 사용
+  assert.match(page, /export default function Home\(\)/);
+  assert.match(page, /fallbackCompanySettings\(\)/);
+  // DB 기반 섹션만 Suspense child로 분리
+  assert.match(page, /<Suspense/);
+});
+
+test('layout.tsx의 force-dynamic이 제거되고 DB 페이지는 자체 선언을 유지한다', async () => {
+  const code = codeLinesOf('src/app/layout.tsx');
+  assert.doesNotMatch(code, /force-dynamic/, 'DB 조회가 없으므로 dynamic 강제 불필요');
+
+  // DB를 사용하는 페이지들은 각자 force-dynamic을 유지해야 한다
+  for (const f of [
+    'src/app/page.tsx',
+    'src/app/privacy/page.tsx',
+    'src/app/terms/page.tsx',
+    'src/app/refund/page.tsx',
+    'src/app/reviews/page.tsx',
+    'src/app/blog/page.tsx',
+    'src/app/contact/page.tsx',
+  ]) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.match(src, /force-dynamic/, `${f}는 자체 force-dynamic이 필요하다`);
+  }
 });

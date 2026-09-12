@@ -3,7 +3,13 @@ import { listReviews } from "@/lib/reviews";
 import { SectionHeading } from "./ServiceList";
 
 export default async function ReviewsPreview() {
-  const reviews = (await listReviews({ onlyPublished: true })).slice(0, 3);
+  // DB 실패가 홈페이지 전체를 막지 않도록 이 섹션에서만 흡수한다.
+  let reviews: Awaited<ReturnType<typeof listReviews>> = [];
+  try {
+    reviews = (await listReviews({ onlyPublished: true })).slice(0, 3);
+  } catch (e) {
+    console.error("[reviews] 조회 실패 — 섹션을 비우고 계속 렌더링합니다.", e);
+  }
 
   return (
     <section id="reviews" className="scroll-mt-24 bg-[var(--sand-deep)] py-20">

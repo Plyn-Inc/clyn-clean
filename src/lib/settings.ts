@@ -116,6 +116,19 @@ export const BRAND_FALLBACK = {
   mailOrderNumber: "제 2026-의정부흥선-0327 호",
 } as const;
 
+/**
+ * 사이트 SEO 기본값.
+ *
+ * RootLayout/generateMetadata는 first HTML critical path이므로
+ * DB를 기다리지 않고 이 상수를 사용한다.
+ * (관리자 SEO 설정의 실시간 반영보다 홈페이지 가용성·응답속도를 우선)
+ */
+export const SITE_SEO_FALLBACK = {
+  title: "CLYN CLEAN CARE | 입주청소 예약",
+  description:
+    "예약 가능 날짜를 바로 확인하고, 캘린더 또는 바로 예약하기로 간편하게 예약하세요.",
+} as const;
+
 /** DB 조회 실패 시 사용할 회사 기본정보 */
 export function fallbackCompanySettings(): CompanySettings {
   return {

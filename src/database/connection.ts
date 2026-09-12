@@ -92,8 +92,17 @@ function postgresUrl(): string {
   return value;
 }
 
+/**
+ * postgres-js PendingQuery — .execute()로 즉시 전송하고 .cancel()로 중단할 수 있다.
+ * (postgres-js 3.4.x)
+ */
+type PendingQuery = Promise<Record<string, unknown>[]> & {
+  execute: () => PendingQuery;
+  cancel: () => void;
+};
+
 type PostgresClient = {
-  unsafe: (query: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
+  unsafe: (query: string, params?: unknown[]) => PendingQuery;
   begin: <T>(fn: (sql: PostgresClient) => Promise<T>) => Promise<T>;
   end?: (options?: { timeout?: number }) => Promise<void>;
 };
@@ -101,21 +110,28 @@ type PostgresClient = {
 const pgTransaction = new AsyncLocalStorage<PostgresClient>();
 
 // ---------------------------------------------------------------------------
-// Vercel serverless stale connection 대응
+// Vercel serverless stale connection / orphan query 대응
 //
-// 문제: 인스턴스가 freeze/resume되면 global에 보존된 postgres-js client의
-//       소켓이 죽어 있는데도 재사용되어, Supavisor 쪽에서 ClientRead 상태로
-//       무한 대기(RSC 렌더 suspend)가 발생한다.
+// 문제 1: 인스턴스 freeze/resume 후 global에 보존된 client의 소켓이 죽어 있는데도
+//         재사용되어 Supavisor에서 ClientRead 무한 대기가 발생한다.
+// 문제 2: Promise.race만으로 timeout을 걸면 JS promise만 먼저 실패하고
+//         실제 postgres query는 DB에서 계속 실행되어 orphan으로 남는다.
 //
-// 대응: 캐시된 client를 쓰기 전에 짧은 liveness check(SELECT 1)를 수행하고,
-//       실패하면 client를 폐기 후 재생성한다. 실제 쿼리에도 상한 타임아웃을 둔다.
+// 대응:
+//   - 캐시된 client는 사용 전 짧은 liveness check(SELECT 1)로 확인
+//   - 모든 쿼리는 PendingQuery 핸들을 보존하고, timeout 시 .cancel()을 호출해
+//     실제 postgres query를 중단시킨다
+//   - cancel 후 grace period 안에 settle되지 않으면 client를 destroy하고
+//     global cache에서 제거해 다음 요청이 stale socket을 재사용하지 않게 한다
 // ---------------------------------------------------------------------------
 
 /** liveness check(SELECT 1) 타임아웃 */
 const LIVENESS_TIMEOUT_MS = 3000;
-/** 일반 쿼리 상한 타임아웃 — 무한 대기 방지 */
-const QUERY_TIMEOUT_MS = 15000;
-/** liveness 재확인 주기 — 매 쿼리마다 SELECT 1을 보내지 않는다 */
+/** 일반 쿼리 상한 타임아웃 */
+const QUERY_TIMEOUT_MS = 8000;
+/** cancel 요청 후 query가 settle되기를 기다리는 시간 */
+const CANCEL_GRACE_MS = 2000;
+/** liveness 재확인 주기 */
 const LIVENESS_CACHE_MS = 5000;
 
 declare global {
@@ -130,15 +146,28 @@ export class DatabaseTimeoutError extends Error {
   }
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new DatabaseTimeoutError(`${label} timed out after ${ms}ms`)),
-      ms
-    );
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+/** 연결 수립 자체가 실패한 경우 — query가 DB에 전달되지 않았다고 판단할 수 있다 */
+export class DatabaseConnectError extends Error {
+  code = "DB_CONNECT_FAILED";
+  constructor(message: string) {
+    super(message);
+    this.name = "DatabaseConnectError";
+  }
+}
+
+// --- 최소 timing log (SQL/파라미터/PII/접속정보는 로그하지 않는다) ---------
+function logOk(op: string, ms: number) {
+  if (ms >= 1000) console.warn(`[db] query:slow ${op} ${ms}ms`);
+}
+function logTimeout(op: string, ms: number) {
+  console.warn(`[db] query:timeout ${op} ${ms}ms`);
+}
+function logRecycle(reason: string) {
+  console.warn(`[db] client:recycle ${reason}`);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /**
@@ -147,7 +176,8 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
  */
 export function isConnectionError(e: unknown): boolean {
   if (e instanceof DatabaseTimeoutError) return true;
-  const err = e as { code?: string; message?: string; errno?: string } | null;
+  if (e instanceof DatabaseConnectError) return true;
+  const err = e as { code?: string; message?: string } | null;
   const code = String(err?.code ?? "");
   const msg = String(err?.message ?? "");
   const connCodes = [
@@ -157,6 +187,17 @@ export function isConnectionError(e: unknown): boolean {
   ];
   if (connCodes.includes(code)) return true;
   return /ECONNRESET|EPIPE|ETIMEDOUT|socket|connection (closed|ended|terminated|reset)|timed out/i.test(msg);
+}
+
+/**
+ * "query가 DB에 전달되지 않았다"고 판단 가능한 연결 실패인지.
+ * 이 경우에만 재시도를 허용한다. 실행 여부가 불확실한 timeout은 제외한다.
+ */
+export function isRetriableConnectError(e: unknown): boolean {
+  if (e instanceof DatabaseConnectError) return true;
+  const err = e as { code?: string; message?: string } | null;
+  const code = String(err?.code ?? "");
+  return ["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH", "CONNECT_TIMEOUT"].includes(code);
 }
 
 function createPostgresClient(postgres: (url: string, opts: unknown) => unknown): PostgresClient {
@@ -173,25 +214,103 @@ function createPostgresClient(postgres: (url: string, opts: unknown) => unknown)
   }) as unknown as PostgresClient;
 }
 
-/** 죽은 client를 best-effort로 정리한다 */
-async function discardClient(client: PostgresClient | undefined): Promise<void> {
+/**
+ * client를 destroy하고 global cache에서 제거한다.
+ * timeout: 0 → pending query를 즉시 reject하고 소켓을 파괴한다.
+ */
+async function destroyClient(client: PostgresClient | undefined, reason: string): Promise<void> {
   global.__cleaningReservationPg = undefined;
   global.__cleaningReservationPgCheckedAt = undefined;
+  logRecycle(reason);
   if (!client?.end) return;
   try {
-    await withTimeout(client.end({ timeout: 1 }), 2000, "client.end");
+    await Promise.race([client.end({ timeout: 0 }), sleep(2000)]);
   } catch {
     // 이미 끊어진 소켓이면 무시한다
   }
 }
 
+/**
+ * 쿼리를 실행하고, timeout 시 실제 postgres query를 cancel한다.
+ *
+ * Promise.race만 쓰지 않는다. timeout이 나면
+ *   1) PendingQuery.cancel()로 DB 쪽 실행을 중단 요청
+ *   2) grace period 동안 실제 settle 여부를 확인
+ *   3) settle되지 않으면 client를 destroy (orphan query 방지)
+ *
+ * cancel은 별도 protocol connection을 쓰므로 성공이 보장되지 않는다.
+ * 따라서 cancel 호출만으로 종료됐다고 가정하지 않고 반드시 settle을 확인한다.
+ */
+async function execWithCancel(
+  client: PostgresClient,
+  op: string,
+  build: (c: PostgresClient) => PendingQuery
+): Promise<Record<string, unknown>[]> {
+  const started = Date.now();
+  // .execute()로 즉시 전송하고 핸들을 보존한다 (cancel 대상)
+  const handle = build(client).execute();
+
+  let settled = false;
+  const tracked = handle.then(
+    (v) => { settled = true; return v; },
+    (e) => { settled = true; throw e; }
+  );
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new DatabaseTimeoutError(`${op} timed out after ${QUERY_TIMEOUT_MS}ms`)),
+      QUERY_TIMEOUT_MS
+    );
+  });
+
+  try {
+    const rows = await Promise.race([tracked, timeout]);
+    logOk(op, Date.now() - started);
+    return rows;
+  } catch (e) {
+    if (!(e instanceof DatabaseTimeoutError)) throw e;
+
+    logTimeout(op, QUERY_TIMEOUT_MS);
+    // 1) 실제 postgres query 중단 요청
+    try { handle.cancel(); } catch { /* cancel 자체 실패는 무시 */ }
+
+    // 2) grace period 동안 실제 settle 확인
+    await Promise.race([tracked.catch(() => undefined), sleep(CANCEL_GRACE_MS)]);
+
+    // 3) settle되지 않았으면 orphan query가 남는다 → client destroy
+    if (!settled) {
+      await destroyClient(client, "cancel-not-settled");
+    }
+    throw e;
+  } finally {
+    if (timer) clearTimeout(timer);
+    // 핸들이 나중에 reject되어도 unhandled rejection이 되지 않게 한다
+    void tracked.catch(() => undefined);
+  }
+}
+
 /** 짧은 liveness check */
 async function isAlive(client: PostgresClient): Promise<boolean> {
+  const handle = client.unsafe("SELECT 1").execute();
+  let settled = false;
+  const tracked = handle.then(
+    (v) => { settled = true; return v; },
+    (e) => { settled = true; throw e; }
+  );
   try {
-    await withTimeout(client.unsafe("SELECT 1"), LIVENESS_TIMEOUT_MS, "liveness check");
+    await Promise.race([
+      tracked,
+      sleep(LIVENESS_TIMEOUT_MS).then(() => { throw new DatabaseTimeoutError("liveness timeout"); }),
+    ]);
     return true;
   } catch {
+    if (!settled) {
+      try { handle.cancel(); } catch { /* noop */ }
+    }
     return false;
+  } finally {
+    void tracked.catch(() => undefined);
   }
 }
 
@@ -208,8 +327,7 @@ async function getPostgresClient(): Promise<PostgresClient> {
       return cached;
     }
     // stale socket — 그대로 재사용하면 무한 대기가 발생한다
-    console.warn("[db] stale postgres client 감지 — 폐기 후 재생성합니다.");
-    await discardClient(cached);
+    await destroyClient(cached, "stale-connection");
   }
 
   const mod = await import("postgres");
@@ -217,8 +335,9 @@ async function getPostgresClient(): Promise<PostgresClient> {
   const client = createPostgresClient(postgres);
 
   if (!(await isAlive(client))) {
-    await discardClient(client);
-    throw new DatabaseTimeoutError("데이터베이스 연결을 확인하지 못했습니다.");
+    await destroyClient(client, "new-client-unreachable");
+    // 연결 수립 실패 — query가 DB에 전달되지 않았다
+    throw new DatabaseConnectError("데이터베이스에 연결하지 못했습니다.");
   }
 
   global.__cleaningReservationPg = client;
@@ -229,33 +348,35 @@ async function getPostgresClient(): Promise<PostgresClient> {
 /**
  * PostgreSQL 쿼리 실행 공통 경로.
  *
- * - 트랜잭션 내부에서는 같은 client를 유지하고 재시도하지 않는다.
- * - 트랜잭션 밖에서는 connection 계열 오류에 한해 최대 1회 client recycle + retry.
- * - 모든 쿼리에 상한 타임아웃을 적용해 무한 대기를 막는다.
+ * - 트랜잭션 내부: 같은 client를 유지하고 재시도하지 않는다.
+ *   timeout 시 cancel 후 에러를 던져 상위 transaction이 rollback되게 한다.
+ * - 트랜잭션 밖: 연결 수립 실패(query 미전달 확정)에만 최대 1회 재시도.
+ *   timeout된 query는 실행 여부가 불확실하므로 재시도하지 않는다
+ *   (중복 예약/중복 상담 생성 방지).
  */
-async function runPg<T>(
-  label: string,
-  fn: (client: PostgresClient) => Promise<T>
-): Promise<T> {
+async function runPg(
+  op: string,
+  build: (c: PostgresClient) => PendingQuery
+): Promise<Record<string, unknown>[]> {
   const inTransaction = pgTransaction.getStore();
   if (inTransaction) {
     // 트랜잭션은 connection 교체 없이 같은 client를 유지한다.
-    return withTimeout(fn(inTransaction), QUERY_TIMEOUT_MS, label);
+    // timeout이면 cancel 후 throw → 상위 begin()이 rollback한다.
+    return execWithCancel(inTransaction, op, build);
   }
 
-  const client = await getPostgresClient();
+  let client: PostgresClient;
   try {
-    return await withTimeout(fn(client), QUERY_TIMEOUT_MS, label);
+    client = await getPostgresClient();
   } catch (e) {
-    // SQL/constraint/business error는 재시도하지 않는다
-    if (!isConnectionError(e)) throw e;
-
-    console.warn(`[db] ${label} connection 오류 — client를 재생성하고 1회 재시도합니다.`);
-    await discardClient(client);
-    const fresh = await getPostgresClient();
-    // 재시도는 최대 1회. 다시 실패하면 그대로 던진다.
-    return withTimeout(fn(fresh), QUERY_TIMEOUT_MS, `${label} (retry)`);
+    // 연결 수립 실패는 query가 전달되지 않았음이 확정이므로 1회만 재시도한다
+    if (!isRetriableConnectError(e)) throw e;
+    await destroyClient(global.__cleaningReservationPg as PostgresClient | undefined, "connect-retry");
+    client = await getPostgresClient();
   }
+
+  // timeout된 query는 자동 재시도하지 않는다 (write 중복 방지).
+  return execWithCancel(client, op, build);
 }
 
 /**
@@ -283,9 +404,8 @@ export async function queryRows<T>(sql: string, params: unknown[] = []): Promise
   if (getDatabaseBackend() === "sqlite") {
     return getDb().prepare(sql).all(...(params as import("node:sqlite").SQLInputValue[])) as T[];
   }
-  return runPg("queryRows", async (client) =>
-    (await client.unsafe(toPostgresSql(sql), params)).map((row) => normalizePostgresRow(row) as T)
-  );
+  const rows = await runPg("queryRows", (client) => client.unsafe(toPostgresSql(sql), params));
+  return rows.map((row) => normalizePostgresRow(row) as T);
 }
 
 export async function queryRow<T>(sql: string, params: unknown[] = []): Promise<T | undefined> {

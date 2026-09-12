@@ -1,4 +1,5 @@
 export const dynamic = "force-dynamic";
+import { Suspense } from "react";
 import HeroBanner from "@/components/HeroBanner";
 import BookingSection from "@/components/booking/BookingSection";
 import ServiceList from "@/components/ServiceList";
@@ -10,13 +11,19 @@ import DetailCleaningFocus from "@/components/DetailCleaningFocus";
 import ReviewsPreview from "@/components/ReviewsPreview";
 import BlogPreview from "@/components/BlogPreview";
 import ContactSection from "@/components/ContactSection";
-import { getCompanySettingsSafe } from "@/lib/settings";
+import { fallbackCompanySettings, getCompanySettingsSafe } from "@/lib/settings";
 import { SectionHeading } from "@/components/ServiceList";
 
-export default async function Home() {
-  // DB 조회가 실패해도 브랜드 기본값으로 홈페이지를 렌더링한다.
-  // 예약 등 DB 의존 기능의 오류는 각 섹션에서 별도로 표시된다.
-  const company = await getCompanySettingsSafe();
+/**
+ * 홈페이지 first render는 DB를 기다리지 않는다.
+ *
+ * 회사정보는 코드 상수(BRAND_FALLBACK)로 즉시 렌더링하고,
+ * DB 기반 콘텐츠(후기/블로그/문의처)는 Suspense 경계 안의 async child로 분리한다.
+ * DB가 느리거나 unavailable이어도 홈페이지 shell은 즉시 응답한다.
+ */
+export default function Home() {
+  // DB 접근 없이 즉시 사용 가능한 브랜드 기본정보
+  const company = fallbackCompanySettings();
 
   return (
     <>
@@ -40,10 +47,31 @@ export default async function Home() {
       <WorkScopeSection />
       <CleaningPortfolio />
       <DetailCleaningFocus />
-      <ReviewsPreview />
-      <BlogPreview />
+      {/* DB 기반 콘텐츠는 shell 렌더를 막지 않도록 Suspense로 분리한다 */}
+      <Suspense fallback={<SectionPlaceholder />}>
+        <ReviewsPreview />
+      </Suspense>
+      <Suspense fallback={<SectionPlaceholder />}>
+        <BlogPreview />
+      </Suspense>
       <CtaBanner />
-      <ContactSection company={company} />
+      <Suspense fallback={<SectionPlaceholder />}>
+        <ContactSectionAsync />
+      </Suspense>
     </>
   );
+}
+
+/** DB 기반 섹션 로딩 중 자리표시 — 레이아웃 이동을 줄인다 */
+function SectionPlaceholder() {
+  return <div className="py-16" aria-hidden />;
+}
+
+/**
+ * 문의 섹션은 DB 설정(전화/카카오)을 쓰므로 async child로 분리한다.
+ * 조회 실패 시 브랜드 기본값으로 렌더링한다.
+ */
+async function ContactSectionAsync() {
+  const company = await getCompanySettingsSafe();
+  return <ContactSection company={company} />;
 }
