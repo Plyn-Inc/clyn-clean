@@ -3002,3 +3002,248 @@ test('staging smoke 스크립트가 인증키를 저장하지 않는다', async 
   // 실제 키처럼 보이는 긴 문자열이 하드코딩되면 안 된다
   assert.doesNotMatch(src, /serviceKey=[A-Za-z0-9%+/=]{20,}/);
 });
+
+// ===========================================================================
+// [신규] E2E 수정 — 캘린더 에러 상태 / N+1 제거 / 오류 메시지 / 사이청소 label
+// ===========================================================================
+
+test('캘린더는 데이터가 없을 때 예약완료로 fallback하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
+  // 데이터 없음 → 예약완료 로 대체하는 구문이 없어야 한다
+  assert.doesNotMatch(
+    src,
+    /if \(!day\) return \{ publicStatus: "예약완료"/,
+    'API 실패/데이터 없음을 예약완료로 표시하면 안 된다'
+  );
+  assert.match(src, /if \(!day\) return null/, '데이터 없으면 null을 반환해야 한다');
+  // loading / success / error 상태 분리
+  assert.match(src, /"loading" \| "success" \| "error"/);
+  // 에러 문구와 재시도 버튼
+  assert.match(src, /예약 일정을 불러오지 못했습니다/);
+  assert.match(src, /다시 불러오기/);
+});
+
+test('캘린더는 HTTP 오류/비정상 응답을 에러 상태로 처리한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
+  // HTTP 오류를 정상 응답처럼 파싱하지 않는다
+  assert.match(src, /if \(!r\.ok\) throw new Error/);
+  // days 배열이 아니면 오류
+  assert.match(src, /Array\.isArray\(data\.days\)/);
+  // catch에서 예약완료가 아니라 error 상태로 전환
+  assert.match(src, /setStatus\("error"\)/);
+  // catch 블록 자체에 예약완료 대체가 없어야 한다
+  const catchBlock = src.slice(src.indexOf('.catch('), src.indexOf('.catch(') + 300);
+  // 주석은 제외하고 실제 코드 라인만 검사한다
+  const catchCode = catchBlock
+    .split('\n')
+    .filter((l) => !l.trim().startsWith('//'))
+    .join('\n');
+  assert.doesNotMatch(catchCode, /예약완료/, 'catch에서 예약완료로 표시하면 안 된다');
+  assert.match(catchCode, /setStatus\("error"\)/);
+});
+
+test('재시도 버튼이 캘린더를 재호출한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
+  assert.match(src, /reloadToken/);
+  assert.match(src, /setReloadToken\(\(t\) => t \+ 1\)/);
+  // effect 의존성에 reloadToken이 포함되어야 재호출된다
+  assert.match(src, /\}, \[cursor, reloadToken\]\)/);
+});
+
+test('정상 API에서 실제 마감 슬롯은 예약완료로 표시된다', async () => {
+  const calendarRoute = await import('../src/app/api/calendar/route.ts');
+  const date = '2027-07-05';
+  // capacity 1에 confirmed 예약 1건 → 마감
+  await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
+  const { reservation } = await createReservationWithDepositAccount({
+    customerPhone: '010-9800-0001', desiredDate: date, timeSlot: 'morning',
+  });
+  await reservations.confirmPayment(reservation.id, '관리자', null);
+
+  const res = await calendarRoute.GET({ url: `http://localhost/api/calendar?start=${date}&end=${date}` });
+  const body = await res.json();
+  const day = body.days.find((d) => d.date === date);
+  assert.equal(day.morning.publicStatus, '예약완료');
+  assert.equal(day.morning.selectable, false);
+});
+
+test('월간 캘린더 조회는 날짜 수에 비례해 count 쿼리를 반복하지 않는다', async () => {
+  const repo = await import('../src/database/repositories/calendar-repository.ts');
+  // 범위 aggregate 함수가 존재해야 한다
+  assert.equal(typeof repo.aggregateActiveReservationsInRange, 'function');
+  assert.equal(typeof repo.aggregateConfirmedReservationsInRange, 'function');
+
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/calendar.ts'), 'utf8');
+  // 월 조회 경로에서 날짜별 count 호출이 없어야 한다
+  const rangeFn = src.slice(src.indexOf('export async function getSlotCalendarRange'));
+  assert.doesNotMatch(rangeFn, /countActiveReservationsOnSlot\(/, '월 조회에서 날짜별 count 반복 금지');
+  assert.match(rangeFn, /aggregateActiveReservationsInRange/);
+
+  const apiSrc = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
+  assert.doesNotMatch(apiSrc, /hasConfirmedReservationOnSlot/, 'confirmed도 배치 집계를 써야 한다');
+  assert.match(apiSrc, /aggregateConfirmedReservationsInRange/);
+});
+
+test('월 aggregate 결과가 기존 공개 계약과 동일하다', async () => {
+  const calendarRoute = await import('../src/app/api/calendar/route.ts');
+  const start = '2027-07-10';
+  const end = '2027-07-12';
+  for (const d of [start, '2027-07-11', end]) {
+    await calendar.setCalendarDay(d, 'available', 1, null, 'morning');
+    await calendar.setCalendarDay(d, 'available', 1, null, 'afternoon');
+  }
+  const res = await calendarRoute.GET({ url: `http://localhost/api/calendar?start=${start}&end=${end}` });
+  const body = await res.json();
+  assert.equal(body.days.length, 3);
+  for (const day of body.days) {
+    for (const slot of [day.morning, day.afternoon]) {
+      assert.ok(['예약가능', '예약진행 중', '예약완료'].includes(slot.publicStatus));
+      assert.equal(typeof slot.selectable, 'boolean');
+      assert.equal(typeof slot.consultRequired, 'boolean');
+    }
+    // 특수일 메타 유지
+    assert.equal(typeof day.isSonEomneunDay, 'boolean');
+    assert.equal(typeof day.isHoliday, 'boolean');
+  }
+  // 수량 비노출 유지
+  assert.doesNotMatch(JSON.stringify(body), /remaining|bookedCount|capacity/);
+});
+
+test('capacity 0 / 마감 / 가능 상태가 월 조회에서도 정확하다', async () => {
+  const calendarRoute = await import('../src/app/api/calendar/route.ts');
+  await calendar.setCalendarDay('2027-07-20', 'available', 0, null, 'morning');   // capacity 0
+  await calendar.setCalendarDay('2027-07-21', 'available', 2, null, 'morning');   // 여유
+  await calendar.setCalendarDay('2027-07-22', 'off', 1, null, 'morning');         // 관리자 마감
+
+  const res = await calendarRoute.GET({ url: 'http://localhost/api/calendar?start=2027-07-20&end=2027-07-22' });
+  const body = await res.json();
+  const get = (d) => body.days.find((x) => x.date === d).morning;
+
+  assert.equal(get('2027-07-20').selectable, false, 'capacity 0은 선택 불가');
+  assert.equal(get('2027-07-21').selectable, true, '여유 있으면 선택 가능');
+  assert.equal(get('2027-07-21').publicStatus, '예약가능');
+  assert.equal(get('2027-07-22').selectable, false, '관리자 마감은 선택 불가');
+});
+
+// --- 오류 메시지 분기 ---
+
+test('서버 JSON 오류를 네트워크 오류로 표현하지 않는다', async () => {
+  const em = await import('../src/lib/error-messages.ts');
+  const cases = [
+    [400, { code: 'OUT_OF_BOOKING_WINDOW' }, /예약 가능한 날짜 범위/],
+    [400, { code: 'SPECIAL_DAY_NOT_SYNCED' }, /예약 정보를 준비 중/],
+    [400, { code: 'SPECIAL_DAY_UNAVAILABLE' }, /예약 정보를 준비 중/],
+    [409, { code: 'SLOT_UNAVAILABLE' }, /예약이 마감/],
+    [409, { code: 'SLOT_TAKEN' }, /예약이 마감/],
+    [409, { code: 'DATE_FULLY_BOOKED' }, /예약이 마감/],
+    [400, { error: '연락처 형식이 올바르지 않습니다.' }, /연락처 형식/],
+    [500, { error: 'internal' }, /예약 처리 중 오류/],
+    [500, null, /예약 처리 중 오류/],
+  ];
+  for (const [status, body, re] of cases) {
+    const msg = em.messageFromServerError(status, body);
+    assert.match(msg, re, `${status} ${JSON.stringify(body)}`);
+    assert.doesNotMatch(msg, /네트워크/, '서버 응답을 네트워크 오류로 표현하면 안 된다');
+  }
+});
+
+test('fetch 실패만 네트워크 오류로 처리한다', async () => {
+  const em = await import('../src/lib/error-messages.ts');
+  const restore = stubFetch(async () => { throw new TypeError('Failed to fetch'); });
+  try {
+    const out = await em.callApi('/api/test');
+    assert.equal(out.kind, 'networkError');
+    assert.match(out.message, /네트워크 연결에 문제/);
+  } finally { restore(); }
+});
+
+test('callApi가 HTTP 상태별로 결과를 구분한다', async () => {
+  const em = await import('../src/lib/error-messages.ts');
+  // 200
+  let restore = stubFetch(async () => jsonResponse({ ok: true }, 200));
+  try {
+    const out = await em.callApi('/api/test');
+    assert.equal(out.kind, 'success');
+  } finally { restore(); }
+
+  // 409 CONSULT_REQUIRED — 본문을 그대로 전달해 상담 흐름을 유지한다
+  restore = stubFetch(async () => jsonResponse({ code: 'CONSULT_REQUIRED', requestCode: 'CS-1', notice: '상담' }, 409));
+  try {
+    const out = await em.callApi('/api/test');
+    assert.equal(out.kind, 'serverError');
+    assert.equal(out.status, 409);
+    assert.equal(out.body.code, 'CONSULT_REQUIRED');
+  } finally { restore(); }
+});
+
+test('고객 폼이 서버 오류를 네트워크 오류로 뭉뚱그리지 않는다', async () => {
+  const forms = [
+    'src/components/booking/BookingForm.tsx',
+    'src/app/consultation/ConsultationForm.tsx',
+    'src/app/reservation/ReservationLookup.tsx',
+  ];
+  for (const f of forms) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.doesNotMatch(src, /setError\("네트워크 오류가 발생했습니다\."\)/, `${f}에 뭉뚱그린 문구 잔존`);
+    assert.match(src, /callApi/, `${f}가 callApi를 사용해야 한다`);
+  }
+});
+
+test('BookingForm이 CONSULT_REQUIRED 흐름을 유지한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  assert.match(src, /CONSULT_REQUIRED/);
+  assert.match(src, /kind: "consultation"/);
+});
+
+// --- 사이청소 label ---
+
+test('고객 UI에 "당일 이사 사이청소" label이 적용된다', async () => {
+  const types = await import('../src/lib/types.ts');
+  assert.equal(types.serviceLabel('사이청소'), '당일 이사 사이청소');
+  assert.equal(types.serviceLabel('입주청소'), '입주청소');
+  assert.match(types.SERVICE_TYPE_SHORT_DESC['사이청소'], /퇴거와 새 입주 사이/);
+
+  for (const f of [
+    'src/components/ServiceList.tsx',
+    'src/components/booking/BookingForm.tsx',
+    'src/app/consultation/ConsultationForm.tsx',
+  ]) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.match(src, /serviceLabel/, `${f}가 고객 label을 사용해야 한다`);
+  }
+
+  const list = fs.readFileSync(path.join(process.cwd(), 'src/components/ServiceList.tsx'), 'utf8');
+  assert.match(list, /같은 날 들어오는 경우/, '설명 문구가 있어야 한다');
+});
+
+test('사이청소 시간 입력 라벨이 이해하기 쉽게 표시된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  assert.match(src, /기존 거주자 퇴거 완료 예정시간/);
+  assert.match(src, /새 입주자 입주 예정시간/);
+});
+
+test('내부 service key "사이청소"는 변경되지 않는다', async () => {
+  const types = await import('../src/lib/types.ts');
+  assert.ok(types.SERVICE_TYPES.includes('사이청소'), 'enum key 유지');
+
+  // 가격 계산 contract 유지
+  const q = await pricing.calculateQuote({ serviceType: '사이청소', houseTypeKey: '24평' });
+  assert.equal(q.serviceType, '사이청소');
+  assert.equal(q.multiplier, 1.5);
+
+  // 예약 저장도 내부 key 유지
+  const { reservation } = await createReservationWithDepositAccount({
+    serviceType: '사이청소', houseTypeKey: '24평',
+    customerPhone: '010-9800-0002', desiredDate: '2027-07-25',
+  });
+  assert.equal(reservation.service_type, '사이청소');
+});
+
+// --- Production 정책 보존 ---
+
+test('postgres pool max:1과 prepare:false가 유지된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /max: 1,/);
+  assert.match(src, /prepare: false,/);
+  assert.doesNotMatch(src, /max: [2-9]/, 'pool을 늘려 성능 문제를 덮으면 안 된다');
+});

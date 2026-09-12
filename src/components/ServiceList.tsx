@@ -1,8 +1,8 @@
-import { SERVICE_TYPES } from "@/lib/types";
+import { SERVICE_TYPES, serviceLabel } from "@/lib/types";
 
 const SERVICE_DESCRIPTIONS: Record<string, string> = {
   "입주청소": "새로운 공간에 입주하기 전 집 전체를 꼼꼼하게 관리하는 기본 청소 서비스입니다.",
-  "사이청소": "기존 거주자의 퇴거 후 새로운 입주 전까지 제한된 시간 안에 진행하는 청소 서비스입니다.",
+  "사이청소": "기존 거주자가 나간 뒤 새 입주자가 같은 날 들어오는 경우, 퇴거와 입주 사이 시간에 진행하는 청소입니다.",
   "거주청소": "현재 생활 중인 공간의 생활오염을 집중 관리하는 청소 서비스입니다.",
   "집정리": "옷·생활용품·주방·팬트리 등 생활공간을 인원·시간 기준으로 정리하는 서비스입니다.",
 };
@@ -23,7 +23,7 @@ export default function ServiceList() {
               key={service}
               className="rounded-2xl border border-[var(--line)] bg-white p-6 transition hover:border-[var(--mint)] hover:shadow-sm"
             >
-              <p className="font-display text-base font-bold">{service}</p>
+              <p className="font-display text-base font-bold">{serviceLabel(service)}</p>
               <p className="mt-2 text-sm leading-relaxed text-[var(--ink-soft)]">
                 {SERVICE_DESCRIPTIONS[service] || ""}
               </p>

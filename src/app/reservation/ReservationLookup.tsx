@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { RESERVATION_STATUS_LABEL, PAYMENT_STATUS_LABEL, EXTRA_OPTIONS } from "@/lib/types";
+import { callApi } from "@/lib/error-messages";
 import type { Reservation, Payment, ReservationStatus, PaymentStatus } from "@/lib/types";
 
 export default function ReservationLookup() {
@@ -36,20 +37,16 @@ export default function ReservationLookup() {
     setReservation(null);
     setPayment(null);
 
-    try {
-      const res = await fetch(
+    {
+      const outcome = await callApi<{ reservation: Reservation; payment: Payment | null }>(
         `/api/reservations/lookup?code=${encodeURIComponent(c)}&phone=${encodeURIComponent(p)}`
       );
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "예약 정보를 찾을 수 없습니다.");
+      if (outcome.kind === "success") {
+        setReservation(outcome.data.reservation);
+        setPayment(outcome.data.payment);
       } else {
-        setReservation(data.reservation);
-        setPayment(data.payment);
+        setError(outcome.message);
       }
-    } catch {
-      setError("네트워크 오류가 발생했습니다.");
-    } finally {
       setLoading(false);
     }
   }

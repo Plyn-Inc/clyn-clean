@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSlotCalendarRange } from "@/lib/calendar";
 import { releaseExpiredDepositReservations } from "@/lib/reservations";
-import { hasConfirmedReservationOnSlot } from "@/database/repositories/calendar-repository";
+import { aggregateConfirmedReservationsInRange } from "@/database/repositories/calendar-repository";
 import { toPublicSlotStatus } from "@/lib/types";
 import { getSpecialDayRange } from "@/lib/special-days-store";
 import { bookingMinDate, bookingMaxDate } from "@/lib/booking-window";
@@ -39,17 +39,20 @@ export async function GET(req: NextRequest) {
     console.error("[calendar] 입금기한 만료 처리 실패", e);
   }
 
-  const days = await getSlotCalendarRange(clampedStart, clampedEnd);
-  // 특수일은 DB 캐시에서 한 번에 읽는다 (KASI 실시간 호출 없음)
-  const specialMap = await getSpecialDayRange(clampedStart, clampedEnd);
+  // 범위 조회 3종을 한 번씩만 수행한다 (날짜 수에 비례하는 쿼리 없음)
+  const [days, specialMap, confirmedMap] = await Promise.all([
+    getSlotCalendarRange(clampedStart, clampedEnd),
+    getSpecialDayRange(clampedStart, clampedEnd),
+    aggregateConfirmedReservationsInRange(clampedStart, clampedEnd),
+  ]);
 
   // 내부 수치(capacity/remaining/bookedCount)를 제거하고 공개상태만 노출한다.
-  const publicDays = await Promise.all(
-    days.map(async (day) => {
-      const [morningConfirmed, afternoonConfirmed] = await Promise.all([
-        hasConfirmedReservationOnSlot(day.date, "morning"),
-        hasConfirmedReservationOnSlot(day.date, "afternoon"),
-      ]);
+  const confirmedOn = (date: string, slot: "morning" | "afternoon") =>
+    (confirmedMap.get(`${date}|${slot}`) ?? 0) + (confirmedMap.get(`${date}|all_day`) ?? 0) > 0;
+
+  const publicDays = days.map((day) => {
+      const morningConfirmed = confirmedOn(day.date, "morning");
+      const afternoonConfirmed = confirmedOn(day.date, "afternoon");
       // 특수일 메타 — 시각적 구분용. 가격 가산 사유는 포함하지 않는다.
       // 토/일은 서버가 날짜로 직접 계산하므로 캐시가 없어도 정확하다.
       const wd = new Date(`${day.date}T00:00:00Z`).getUTCDay();
@@ -83,8 +86,7 @@ export async function GET(req: NextRequest) {
           consultRequired: day.afternoon.effectiveStatus === "consult_required",
         },
       };
-    })
-  );
+  });
 
   return NextResponse.json({
     days: publicDays,

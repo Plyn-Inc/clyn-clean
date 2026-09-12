@@ -126,3 +126,60 @@ export async function hasConfirmedReservationOnSlot(
   );
   return Number(row?.c ?? 0) > 0;
 }
+
+/**
+ * 범위 내 슬롯별 활성 예약 수를 한 번에 집계한다 (N+1 제거).
+ *
+ * 날짜마다 countActiveReservationsOnSlot을 반복 호출하지 않고
+ * GROUP BY로 한 번에 가져온다. 월 조회 query 수가 날짜 수에 비례하지 않는다.
+ *
+ * 입금기한이 지난 미입금 예약은 제외한다 (countActiveReservationsOnSlot와 동일 규칙).
+ */
+export async function aggregateActiveReservationsInRange(
+  startDate: string,
+  endDate: string
+): Promise<Map<string, number>> {
+  const rows = await queryRows<{ desired_date: string; time_slot: string; c: number }>(
+    `SELECT rs.desired_date, rs.time_slot, COUNT(*) as c
+       FROM reservations rs
+      WHERE rs.desired_date >= ? AND rs.desired_date <= ?
+        AND rs.reservation_status IN ('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')
+        AND NOT (
+          rs.reservation_status IN ('awaiting_deposit','approved_awaiting_deposit')
+          AND EXISTS (
+            SELECT 1 FROM payments p
+             WHERE p.reservation_id = rs.id
+               AND p.payment_status = 'pending'
+               AND p.payment_due_date IS NOT NULL
+               AND p.payment_due_date < datetime('now')
+          )
+        )
+      GROUP BY rs.desired_date, rs.time_slot`,
+    [startDate, endDate]
+  );
+  // key: "YYYY-MM-DD|time_slot"
+  const map = new Map<string, number>();
+  for (const r of rows) map.set(`${r.desired_date}|${r.time_slot}`, Number(r.c));
+  return map;
+}
+
+/**
+ * 범위 내 입금확인 완료(confirmed/completed) 예약을 슬롯별로 집계한다.
+ * 공개상태 "예약완료" 판정용. 날짜마다 반복 조회하지 않는다.
+ */
+export async function aggregateConfirmedReservationsInRange(
+  startDate: string,
+  endDate: string
+): Promise<Map<string, number>> {
+  const rows = await queryRows<{ desired_date: string; time_slot: string; c: number }>(
+    `SELECT rs.desired_date, rs.time_slot, COUNT(*) as c
+       FROM reservations rs
+      WHERE rs.desired_date >= ? AND rs.desired_date <= ?
+        AND rs.reservation_status IN ('confirmed','completed')
+      GROUP BY rs.desired_date, rs.time_slot`,
+    [startDate, endDate]
+  );
+  const map = new Map<string, number>();
+  for (const r of rows) map.set(`${r.desired_date}|${r.time_slot}`, Number(r.c));
+  return map;
+}

@@ -45,6 +45,9 @@ const SHORT_LABEL: Record<PublicSlotStatus, string> = {
   "예약완료": "완료",
 };
 
+/** 서버 데이터가 없는 슬롯 — 예약완료가 아니라 "정보 없음"으로 구분한다 */
+const SLOT_UNKNOWN = "bg-white text-[#C7CDD6] border border-dashed border-[var(--line)] cursor-not-allowed";
+
 const SLOT_SELECTED = "ring-2 ring-[var(--navy)] ring-offset-1";
 
 export default function ReservationCalendar({
@@ -66,25 +69,36 @@ export default function ReservationCalendar({
     return { year: now.getFullYear(), month: now.getMonth() };
   });
   const [days, setDays] = useState<Record<string, PublicDay>>({});
-  const [loading, setLoading] = useState(true);
+  // loading / success / error 를 명확히 분리한다.
+  // 에러 상태에서 빈 데이터를 정상 캘린더처럼 렌더링하지 않는다.
+  const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
+  const [reloadToken, setReloadToken] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
     const { start, end } = getMonthRangeKST(cursor.year, cursor.month + 1);
     fetch(`/api/calendar?start=${start}&end=${end}`)
-      .then((r) => r.json())
-      .then((data: { days?: PublicDay[] }) => {
+      .then(async (r) => {
+        // HTTP 오류를 정상 응답처럼 처리하지 않는다
+        if (!r.ok) throw new Error(`calendar API ${r.status}`);
+        const data = (await r.json()) as { days?: PublicDay[] };
+        if (!Array.isArray(data.days)) throw new Error("calendar API: days 배열 없음");
+        return data.days;
+      })
+      .then((list) => {
         if (cancelled) return;
         const map: Record<string, PublicDay> = {};
-        for (const d of data.days ?? []) map[d.date] = d;
+        for (const d of list) map[d.date] = d;
         setDays(map);
-        setLoading(false);
+        setStatus("success");
       })
       .catch(() => {
-        if (!cancelled) setLoading(false);
+        // fetch 실패 / HTTP 오류 / JSON 파싱 실패 / 비정상 응답
+        // → 절대로 "예약완료"로 표시하지 않고 에러 상태로 전환한다
+        if (!cancelled) { setDays({}); setStatus("error"); }
       });
     return () => { cancelled = true; };
-  }, [cursor]);
+  }, [cursor, reloadToken]);
 
   const monthLabel = `${cursor.year}년 ${cursor.month + 1}월`;
   const firstDay = new Date(cursor.year, cursor.month, 1);
@@ -101,20 +115,28 @@ export default function ReservationCalendar({
     const next = cursorIndex + delta;
     // 예약 가능 기간을 벗어난 월로는 이동할 수 없다
     if (next < minIndex || next > maxIndex) return;
-    setLoading(true);
+    setStatus("loading");
     setCursor((c) => {
       const d = new Date(c.year, c.month + delta, 1);
       return { year: d.getFullYear(), month: d.getMonth() };
     });
   }
 
-  function getSlot(dateStr: string, slot: "morning" | "afternoon"): PublicSlot {
+  /**
+   * 서버가 내려준 슬롯 정보를 반환한다.
+   *
+   * 데이터가 없으면 null을 반환한다. 절대로 "예약완료"로 대체하지 않는다.
+   * (API 실패·미동기화·날짜 누락을 예약완료로 표시하면 고객이 예약 가능한 날을
+   *  마감된 것으로 오인한다)
+   */
+  function getSlot(dateStr: string, slot: "morning" | "afternoon"): PublicSlot | null {
     const day = days[dateStr];
-    if (!day) return { publicStatus: "예약완료", selectable: false, consultRequired: false };
+    if (!day) return null;
     return slot === "morning" ? day.morning : day.afternoon;
   }
 
-  function handleSlotClick(dateStr: string, slot: "morning" | "afternoon", view: PublicSlot) {
+  function handleSlotClick(dateStr: string, slot: "morning" | "afternoon", view: PublicSlot | null) {
+    if (!view) return;
     if (view.consultRequired) { onSelectConsultDate(dateStr); return; }
     if (!view.selectable) return;
     onSelectSlot({ date: dateStr, timeSlot: slot });
@@ -152,8 +174,23 @@ export default function ReservationCalendar({
         ))}
       </div>
 
-      {loading ? (
+      {status === "loading" ? (
         <div className="py-16 text-center text-sm text-[var(--ink-soft)]">불러오는 중...</div>
+      ) : status === "error" ? (
+        <div className="py-14 text-center" role="alert">
+          <p className="text-sm leading-relaxed text-[var(--ink-soft)]">
+            예약 일정을 불러오지 못했습니다.
+            <br />
+            잠시 후 다시 시도해주세요.
+          </p>
+          <button
+            type="button"
+            onClick={() => { setStatus("loading"); setReloadToken((t) => t + 1); }}
+            className="mt-5 min-h-[44px] rounded-full border border-[var(--navy)] px-6 text-sm font-semibold text-[var(--navy)] transition hover:bg-[var(--navy)] hover:text-white"
+          >
+            다시 불러오기
+          </button>
+        </div>
       ) : (
         <div className="grid grid-cols-7 gap-1">
           {Array.from({ length: leadingBlanks }).map((_, i) => (
@@ -206,27 +243,27 @@ export default function ReservationCalendar({
 
                 <button
                   type="button"
-                  disabled={!morning.selectable && !morning.consultRequired}
+                  disabled={!morning || (!morning.selectable && !morning.consultRequired)}
                   onClick={() => handleSlotClick(dateStr, "morning", morning)}
-                  aria-label={`${dateStr} 오전 ${morning.publicStatus}`}
-                  className={`mb-0.5 min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${SLOT_STYLE[morning.publicStatus]} ${isSelMorning ? SLOT_SELECTED : ""}`}
+                  aria-label={`${dateStr} 오전 ${morning?.publicStatus ?? "정보 없음"}`}
+                  className={`mb-0.5 min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${morning ? SLOT_STYLE[morning.publicStatus] : SLOT_UNKNOWN} ${isSelMorning ? SLOT_SELECTED : ""}`}
                 >
                   오전
                   <span className="block text-[9px] opacity-80">
-                    {morning.consultRequired ? "상담" : SHORT_LABEL[morning.publicStatus]}
+                    {!morning ? "-" : morning.consultRequired ? "상담" : SHORT_LABEL[morning.publicStatus]}
                   </span>
                 </button>
 
                 <button
                   type="button"
-                  disabled={!afternoon.selectable && !afternoon.consultRequired}
+                  disabled={!afternoon || (!afternoon.selectable && !afternoon.consultRequired)}
                   onClick={() => handleSlotClick(dateStr, "afternoon", afternoon)}
-                  aria-label={`${dateStr} 오후 ${afternoon.publicStatus}`}
-                  className={`min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${SLOT_STYLE[afternoon.publicStatus]} ${isSelAfternoon ? SLOT_SELECTED : ""}`}
+                  aria-label={`${dateStr} 오후 ${afternoon?.publicStatus ?? "정보 없음"}`}
+                  className={`min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${afternoon ? SLOT_STYLE[afternoon.publicStatus] : SLOT_UNKNOWN} ${isSelAfternoon ? SLOT_SELECTED : ""}`}
                 >
                   오후
                   <span className="block text-[9px] opacity-80">
-                    {afternoon.consultRequired ? "상담" : SHORT_LABEL[afternoon.publicStatus]}
+                    {!afternoon ? "-" : afternoon.consultRequired ? "상담" : SHORT_LABEL[afternoon.publicStatus]}
                   </span>
                 </button>
               </div>

@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { SERVICE_TYPES, HOUSE_TYPES_FIXED, HOUSE_SIZES_APARTMENT } from "@/lib/types";
+import { SERVICE_TYPES, HOUSE_TYPES_FIXED, HOUSE_SIZES_APARTMENT, serviceLabel } from "@/lib/types";
 import WorkAreaInput, { type WorkAreaValue } from "@/components/booking/WorkAreaInput";
 import { bookingMinDate, bookingMaxDate } from "@/lib/booking-window";
+import { callApi } from "@/lib/error-messages";
 
 const HOUSE_KEYS: string[] = [
   ...HOUSE_TYPES_FIXED,
@@ -43,8 +44,8 @@ export default function ConsultationForm() {
     if (!agreed) return setError("개인정보 수집·이용에 동의해주세요.");
     setError(null);
     setSubmitting(true);
-    try {
-      const res = await fetch("/api/consultations", {
+    {
+      const outcome = await callApi<{ requestCode: string }>("/api/consultations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -65,15 +66,8 @@ export default function ConsultationForm() {
           privacyAgreed: agreed,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "상담 접수 중 오류가 발생했습니다.");
-        return;
-      }
-      setDoneCode(data.requestCode);
-    } catch {
-      setError("네트워크 오류가 발생했습니다.");
-    } finally {
+      if (outcome.kind !== "success") { setError(outcome.message); setSubmitting(false); return; }
+      setDoneCode(outcome.data.requestCode);
       setSubmitting(false);
     }
   }
@@ -123,7 +117,7 @@ export default function ConsultationForm() {
                     : "border-[var(--line)] text-[var(--ink-soft)]"
                 }`}
               >
-                {s}
+                {serviceLabel(s)}
               </button>
             ))}
           </div>

@@ -11,6 +11,7 @@ import {
   OCCUPANCY_STATUS_LABEL,
   VAT_NOTICE,
   EXTRA_SERVICE_NOTICE,
+  serviceLabel,
 } from "@/lib/types";
 import type { OccupancyStatus } from "@/lib/types";
 import type { SelectedSlot } from "./ReservationCalendar";
@@ -18,6 +19,7 @@ import AgreementSection, { type AgreementState } from "./AgreementSection";
 import WorkAreaInput, { type WorkAreaValue } from "./WorkAreaInput";
 import DepositAccountPanel, { type DepositAccountInfo } from "./DepositAccountPanel";
 import { bookingMaxDate, isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
+import { callApi } from "@/lib/error-messages";
 
 /**
  * 단계형 예약 폼.
@@ -207,7 +209,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
     if (s === 3) {
       if (serviceType === "사이청소") {
         if (!moveOutTime) return "기존 거주자 퇴거 완료 예정시간을 입력해주세요.";
-        if (!moveInTime) return "신규 거주자 입주 예정시간을 입력해주세요.";
+        if (!moveInTime) return "새 입주자 입주 예정시간을 입력해주세요.";
       }
       return null;
     }
@@ -278,8 +280,8 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
     }
     setSubmitting(true);
     setError(null);
-    try {
-      const res = await fetch("/api/consultations", {
+    {
+      const outcome = await callApi<{ requestCode: string; notice: string }>("/api/consultations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -299,12 +301,8 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
           privacyAgreed: consultPrivacyAgreed,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) { setError(data.error ?? "상담 접수 중 오류가 발생했습니다."); return; }
-      setResult({ kind: "consultation", code: data.requestCode, notice: data.notice });
-    } catch {
-      setError("네트워크 오류가 발생했습니다.");
-    } finally {
+      if (outcome.kind !== "success") { setError(outcome.message); setSubmitting(false); return; }
+      setResult({ kind: "consultation", code: outcome.data.requestCode, notice: outcome.data.notice });
       setSubmitting(false);
     }
   }
@@ -312,14 +310,14 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
   async function submitReservation() {
     setSubmitting(true);
     setError(null);
-    try {
+    {
       const meta: Record<string, unknown> = {};
       const pet = buildPetMeta();
       if (pet) meta.pet = pet;
       if (serviceType === "사이청소") { meta.moveOutTime = moveOutTime; meta.moveInTime = moveInTime; }
       if (serviceType === "집정리") { meta.jipjeongriPackage = jipjeongriPackage; meta.jipjeongriSpaces = jipjeongriSpaces; }
 
-      const res = await fetch("/api/reservations", {
+      const outcome = await callApi<{ reservation: { reservation_code: string } }>("/api/reservations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -345,28 +343,33 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
           petMeta: buildPetMeta(),
         }),
       });
-      const data = await res.json();
 
-      // 서버가 상담 전환으로 판정한 경우
-      if (res.status === 409 && data.code === "CONSULT_REQUIRED") {
-        setResult({ kind: "consultation", code: data.requestCode ?? "-", notice: data.notice ?? data.error });
+      // 서버가 상담 전환으로 판정한 경우 — 기존 흐름 유지
+      if (
+        outcome.kind === "serverError" &&
+        outcome.status === 409 &&
+        outcome.body?.code === "CONSULT_REQUIRED"
+      ) {
+        const b = outcome.body as { requestCode?: string; notice?: string; error?: string };
+        setResult({
+          kind: "consultation",
+          code: b.requestCode ?? "-",
+          notice: b.notice ?? b.error ?? "",
+        });
+        setSubmitting(false);
         return;
       }
-      if (!res.ok) { setError(data.error ?? "예약 처리 중 오류가 발생했습니다."); return; }
+      if (outcome.kind !== "success") { setError(outcome.message); setSubmitting(false); return; }
 
       // 계좌정보는 별도 엔드포인트에서만 받는다
-      const code = data.reservation.reservation_code;
-      const acc = await fetch(`/api/reservations/${code}/deposit-account`, {
+      const code = outcome.data.reservation.reservation_code;
+      const acc = await callApi<DepositAccountInfo>(`/api/reservations/${code}/deposit-account`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ phone: customerPhone }),
       });
-      const accData = await acc.json();
-      if (!acc.ok) { setError(accData.error ?? "예약금 계좌 안내 중 오류가 발생했습니다."); return; }
-      setResult({ kind: "deposit", info: accData });
-    } catch {
-      setError("네트워크 오류가 발생했습니다.");
-    } finally {
+      if (acc.kind !== "success") { setError(acc.message); setSubmitting(false); return; }
+      setResult({ kind: "deposit", info: acc.data });
       setSubmitting(false);
     }
   }
@@ -426,7 +429,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
                   onClick={() => { setServiceType(s); setHouseTypeKey(""); setIsApartment(false); }}
                   className={`min-h-[48px] rounded-xl border text-sm font-medium transition ${
                     serviceType === s ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
-                  {s}
+                  {serviceLabel(s)}
                 </button>
               ))}
             </div>
@@ -552,16 +555,22 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
           )}
 
           {serviceType === "사이청소" && (
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-3">
+              <div className="rounded-xl bg-[var(--mint-soft)] p-4 text-xs leading-relaxed text-[var(--mint)]">
+                기존 거주자가 나간 뒤 새 입주자가 같은 날 들어오는 경우, 퇴거와 입주 사이 시간에
+                진행하는 청소입니다. 작업 가능 시간을 확인하기 위해 두 시각을 입력해주세요.
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="mb-1.5 block text-sm font-semibold">퇴거 완료 예정시간</label>
+                <label className="mb-1.5 block text-sm font-semibold">기존 거주자 퇴거 완료 예정시간</label>
                 <input type="datetime-local" value={moveOutTime} onChange={(e) => setMoveOutTime(e.target.value)}
                   className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
               </div>
               <div>
-                <label className="mb-1.5 block text-sm font-semibold">입주 예정시간</label>
+                <label className="mb-1.5 block text-sm font-semibold">새 입주자 입주 예정시간</label>
                 <input type="datetime-local" value={moveInTime} onChange={(e) => setMoveInTime(e.target.value)}
                   className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
+              </div>
               </div>
             </div>
           )}
@@ -756,7 +765,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
           </div>
 
           <dl className="space-y-1.5 rounded-2xl border border-[var(--line)] p-5 text-sm">
-            <SummaryRow label="청소 종류" value={serviceType} />
+            <SummaryRow label="청소 종류" value={serviceLabel(serviceType)} />
             {serviceType !== "집정리" && <SummaryRow label="주택유형" value={resolvedKey === "40평" ? "40평 이상" : resolvedKey} />}
             <SummaryRow label="희망 날짜" value={desiredDate} />
             <SummaryRow label="시간대" value={timeSlot === "morning" ? "오전" : "오후"} />

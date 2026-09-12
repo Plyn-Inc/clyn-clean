@@ -76,12 +76,74 @@ export async function getDaySlotView(date: string): Promise<DaySlotView> {
   return { date, allDay, morning, afternoon };
 }
 
+/**
+ * 월 단위 캘린더 조회.
+ *
+ * N+1 제거: 날짜마다 count 쿼리를 반복하지 않고 범위 aggregate를 사용한다.
+ * 쿼리 수는 날짜 개수와 무관하게 고정이다.
+ *   1) calendar_days 범위 조회 1회
+ *   2) 활성 예약 슬롯별 집계 1회
+ *   3) 기본 capacity(settings) 1회
+ * 이후 메모리에서 날짜별 결과를 조립한다.
+ */
 export async function getSlotCalendarRange(startDate: string, endDate: string): Promise<DaySlotView[]> {
-  const rows = await calendarRepo.findRange(startDate, endDate);
+  const [rows, activeCounts, defaultCap] = await Promise.all([
+    calendarRepo.findRange(startDate, endDate),
+    calendarRepo.aggregateActiveReservationsInRange(startDate, endDate),
+    defaultCapacity(),
+  ]);
+
   const byDate = new Map<string, calendarRepo.CalendarDayRow[]>();
   for (const r of rows) {
     if (!byDate.has(r.date)) byDate.set(r.date, []);
     byDate.get(r.date)!.push(r);
+  }
+
+  /** 해당 슬롯의 활성 예약 수 (all_day 예약은 오전·오후 양쪽에 포함된다) */
+  function bookedOn(date: string, timeSlot: "morning" | "afternoon" | "all_day"): number {
+    const allDay = activeCounts.get(`${date}|all_day`) ?? 0;
+    if (timeSlot === "all_day") {
+      return (
+        allDay +
+        (activeCounts.get(`${date}|morning`) ?? 0) +
+        (activeCounts.get(`${date}|afternoon`) ?? 0)
+      );
+    }
+    return (activeCounts.get(`${date}|${timeSlot}`) ?? 0) + allDay;
+  }
+
+  function buildSlot(
+    date: string,
+    timeSlot: "morning" | "afternoon",
+    slotRow: calendarRepo.CalendarDayRow | undefined,
+    allDayRow: calendarRepo.CalendarDayRow | undefined
+  ): CalendarDayView {
+    const capacity = slotRow?.capacity ?? defaultCap;
+    const adminStatus: CalendarStatus = allDayRow?.status ?? slotRow?.status ?? "available";
+    const bookedCount = bookedOn(date, timeSlot);
+    const remaining = Math.max(capacity - bookedCount, 0);
+    let effectiveStatus: CalendarStatus = adminStatus;
+    if (adminStatus === "available" && remaining <= 0) effectiveStatus = "closed";
+    return {
+      date,
+      timeSlot,
+      status: adminStatus,
+      capacity,
+      bookedCount,
+      remaining,
+      memo: slotRow?.memo ?? allDayRow?.memo ?? null,
+      effectiveStatus,
+    };
+  }
+
+  function buildAllDay(date: string, row: calendarRepo.CalendarDayRow): CalendarDayView {
+    const capacity = row.capacity ?? defaultCap;
+    const status: CalendarStatus = row.status ?? "available";
+    const bookedCount = bookedOn(date, "all_day");
+    const remaining = Math.max(capacity - bookedCount, 0);
+    let effectiveStatus: CalendarStatus = status;
+    if (status === "available" && remaining <= 0) effectiveStatus = "closed";
+    return { date, timeSlot: "all_day", status, capacity, bookedCount, remaining, memo: row.memo ?? null, effectiveStatus };
   }
 
   const result: DaySlotView[] = [];
@@ -93,12 +155,12 @@ export async function getSlotCalendarRange(startDate: string, endDate: string): 
     const allDayRow = dateRows.find((r) => r.time_slot === "all_day");
     const morningRow = dateRows.find((r) => r.time_slot === "morning");
     const afternoonRow = dateRows.find((r) => r.time_slot === "afternoon");
-    const [allDay, morning, afternoon] = await Promise.all([
-      allDayRow ? toAllDayView(iso, allDayRow) : Promise.resolve(null),
-      toSlotView(iso, "morning", morningRow, allDayRow),
-      toSlotView(iso, "afternoon", afternoonRow, allDayRow),
-    ]);
-    result.push({ date: iso, allDay, morning, afternoon });
+    result.push({
+      date: iso,
+      allDay: allDayRow ? buildAllDay(iso, allDayRow) : null,
+      morning: buildSlot(iso, "morning", morningRow, allDayRow),
+      afternoon: buildSlot(iso, "afternoon", afternoonRow, allDayRow),
+    });
   }
   return result;
 }

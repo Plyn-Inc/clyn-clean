@@ -310,6 +310,29 @@ export interface Post {
 // 실제 적용 값은 price_rules.deposit_amount(관리자 수정 가능)를 우선하며,
 // 이 상수는 최초 seed 및 fallback 기준값이다.
 // ---------------------------------------------------------------------------
+/**
+ * 고객에게 보여줄 서비스 label.
+ *
+ * 내부 service_type key("사이청소")는 DB/API/price_rules에서 그대로 유지한다.
+ * 고객 노출 문자열만 이 맵을 통해 변환한다 (migration 영향 없음).
+ */
+export const SERVICE_TYPE_LABEL: Record<string, string> = {
+  "입주청소": "입주청소",
+  "사이청소": "당일 이사 사이청소",
+  "거주청소": "거주청소",
+  "집정리": "집정리",
+};
+
+/** 고객 label 조회 (미등록 key는 원본 그대로) */
+export function serviceLabel(serviceType: string): string {
+  return SERVICE_TYPE_LABEL[serviceType] ?? serviceType;
+}
+
+/** 서비스별 고객 설명 (짧은 버전) */
+export const SERVICE_TYPE_SHORT_DESC: Record<string, string> = {
+  "사이청소": "퇴거와 새 입주 사이 시간에 진행하는 당일 청소",
+};
+
 export const DEFAULT_DEPOSIT_BY_HOUSE_TYPE: Record<string, number> = {
   "원룸": 60000,
   "원룸 복층": 60000,
