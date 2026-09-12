@@ -95,17 +95,72 @@ function postgresUrl(): string {
 type PostgresClient = {
   unsafe: (query: string, params?: unknown[]) => Promise<Record<string, unknown>[]>;
   begin: <T>(fn: (sql: PostgresClient) => Promise<T>) => Promise<T>;
+  end?: (options?: { timeout?: number }) => Promise<void>;
 };
 
 const pgTransaction = new AsyncLocalStorage<PostgresClient>();
 
-async function getPostgresClient(): Promise<PostgresClient> {
-  if (global.__cleaningReservationPg) {
-    return global.__cleaningReservationPg as PostgresClient;
+// ---------------------------------------------------------------------------
+// Vercel serverless stale connection 대응
+//
+// 문제: 인스턴스가 freeze/resume되면 global에 보존된 postgres-js client의
+//       소켓이 죽어 있는데도 재사용되어, Supavisor 쪽에서 ClientRead 상태로
+//       무한 대기(RSC 렌더 suspend)가 발생한다.
+//
+// 대응: 캐시된 client를 쓰기 전에 짧은 liveness check(SELECT 1)를 수행하고,
+//       실패하면 client를 폐기 후 재생성한다. 실제 쿼리에도 상한 타임아웃을 둔다.
+// ---------------------------------------------------------------------------
+
+/** liveness check(SELECT 1) 타임아웃 */
+const LIVENESS_TIMEOUT_MS = 3000;
+/** 일반 쿼리 상한 타임아웃 — 무한 대기 방지 */
+const QUERY_TIMEOUT_MS = 15000;
+/** liveness 재확인 주기 — 매 쿼리마다 SELECT 1을 보내지 않는다 */
+const LIVENESS_CACHE_MS = 5000;
+
+declare global {
+  var __cleaningReservationPgCheckedAt: number | undefined;
+}
+
+export class DatabaseTimeoutError extends Error {
+  code = "DB_TIMEOUT";
+  constructor(message: string) {
+    super(message);
+    this.name = "DatabaseTimeoutError";
   }
-  const mod = await import("postgres");
-  const postgres = mod.default;
-  const client = postgres(postgresUrl(), {
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new DatabaseTimeoutError(`${label} timed out after ${ms}ms`)),
+      ms
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/**
+ * connection 계열 오류인지 판정한다.
+ * SQL validation / constraint / business error는 재시도 대상이 아니다.
+ */
+export function isConnectionError(e: unknown): boolean {
+  if (e instanceof DatabaseTimeoutError) return true;
+  const err = e as { code?: string; message?: string; errno?: string } | null;
+  const code = String(err?.code ?? "");
+  const msg = String(err?.message ?? "");
+  const connCodes = [
+    "ECONNRESET", "ECONNREFUSED", "EPIPE", "ETIMEDOUT", "ENOTFOUND", "EHOSTUNREACH",
+    "CONNECTION_CLOSED", "CONNECTION_ENDED", "CONNECTION_DESTROYED", "CONNECT_TIMEOUT",
+    "08000", "08003", "08006", "08001", "08004", "57P01", "57P02", "57P03",
+  ];
+  if (connCodes.includes(code)) return true;
+  return /ECONNRESET|EPIPE|ETIMEDOUT|socket|connection (closed|ended|terminated|reset)|timed out/i.test(msg);
+}
+
+function createPostgresClient(postgres: (url: string, opts: unknown) => unknown): PostgresClient {
+  return postgres(postgresUrl(), {
     // Vercel serverless에서는 인스턴스마다 별도 pool이 생기므로
     // 인스턴스당 1개 연결만 유지해 Supabase 연결 수 고갈을 방지한다.
     max: 1,
@@ -113,9 +168,94 @@ async function getPostgresClient(): Promise<PostgresClient> {
     connect_timeout: 10,
     // Supabase transaction pooler는 prepared statement를 지원하지 않는다
     prepare: false,
+    // Supabase는 TLS를 요구한다
+    ssl: "require",
   }) as unknown as PostgresClient;
+}
+
+/** 죽은 client를 best-effort로 정리한다 */
+async function discardClient(client: PostgresClient | undefined): Promise<void> {
+  global.__cleaningReservationPg = undefined;
+  global.__cleaningReservationPgCheckedAt = undefined;
+  if (!client?.end) return;
+  try {
+    await withTimeout(client.end({ timeout: 1 }), 2000, "client.end");
+  } catch {
+    // 이미 끊어진 소켓이면 무시한다
+  }
+}
+
+/** 짧은 liveness check */
+async function isAlive(client: PostgresClient): Promise<boolean> {
+  try {
+    await withTimeout(client.unsafe("SELECT 1"), LIVENESS_TIMEOUT_MS, "liveness check");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function getPostgresClient(): Promise<PostgresClient> {
+  const cached = global.__cleaningReservationPg as PostgresClient | undefined;
+
+  if (cached) {
+    // 최근에 확인했으면 매번 SELECT 1을 보내지 않는다
+    const checkedAt = global.__cleaningReservationPgCheckedAt ?? 0;
+    if (Date.now() - checkedAt < LIVENESS_CACHE_MS) return cached;
+
+    if (await isAlive(cached)) {
+      global.__cleaningReservationPgCheckedAt = Date.now();
+      return cached;
+    }
+    // stale socket — 그대로 재사용하면 무한 대기가 발생한다
+    console.warn("[db] stale postgres client 감지 — 폐기 후 재생성합니다.");
+    await discardClient(cached);
+  }
+
+  const mod = await import("postgres");
+  const postgres = mod.default as unknown as (url: string, opts: unknown) => unknown;
+  const client = createPostgresClient(postgres);
+
+  if (!(await isAlive(client))) {
+    await discardClient(client);
+    throw new DatabaseTimeoutError("데이터베이스 연결을 확인하지 못했습니다.");
+  }
+
   global.__cleaningReservationPg = client;
+  global.__cleaningReservationPgCheckedAt = Date.now();
   return client;
+}
+
+/**
+ * PostgreSQL 쿼리 실행 공통 경로.
+ *
+ * - 트랜잭션 내부에서는 같은 client를 유지하고 재시도하지 않는다.
+ * - 트랜잭션 밖에서는 connection 계열 오류에 한해 최대 1회 client recycle + retry.
+ * - 모든 쿼리에 상한 타임아웃을 적용해 무한 대기를 막는다.
+ */
+async function runPg<T>(
+  label: string,
+  fn: (client: PostgresClient) => Promise<T>
+): Promise<T> {
+  const inTransaction = pgTransaction.getStore();
+  if (inTransaction) {
+    // 트랜잭션은 connection 교체 없이 같은 client를 유지한다.
+    return withTimeout(fn(inTransaction), QUERY_TIMEOUT_MS, label);
+  }
+
+  const client = await getPostgresClient();
+  try {
+    return await withTimeout(fn(client), QUERY_TIMEOUT_MS, label);
+  } catch (e) {
+    // SQL/constraint/business error는 재시도하지 않는다
+    if (!isConnectionError(e)) throw e;
+
+    console.warn(`[db] ${label} connection 오류 — client를 재생성하고 1회 재시도합니다.`);
+    await discardClient(client);
+    const fresh = await getPostgresClient();
+    // 재시도는 최대 1회. 다시 실패하면 그대로 던진다.
+    return withTimeout(fn(fresh), QUERY_TIMEOUT_MS, `${label} (retry)`);
+  }
 }
 
 /**
@@ -143,8 +283,9 @@ export async function queryRows<T>(sql: string, params: unknown[] = []): Promise
   if (getDatabaseBackend() === "sqlite") {
     return getDb().prepare(sql).all(...(params as import("node:sqlite").SQLInputValue[])) as T[];
   }
-  const client = pgTransaction.getStore() ?? await getPostgresClient();
-  return (await client.unsafe(toPostgresSql(sql), params)).map((row) => normalizePostgresRow(row) as T);
+  return runPg("queryRows", async (client) =>
+    (await client.unsafe(toPostgresSql(sql), params)).map((row) => normalizePostgresRow(row) as T)
+  );
 }
 
 export async function queryRow<T>(sql: string, params: unknown[] = []): Promise<T | undefined> {
@@ -157,8 +298,7 @@ export async function execute(sql: string, params: unknown[] = []): Promise<void
     getDb().prepare(sql).run(...(params as import("node:sqlite").SQLInputValue[]));
     return;
   }
-  const client = pgTransaction.getStore() ?? await getPostgresClient();
-  await client.unsafe(toPostgresSql(sql), params);
+  await runPg("execute", (client) => client.unsafe(toPostgresSql(sql), params));
 }
 
 /**
@@ -175,8 +315,9 @@ export async function executeReturningCount(sql: string, params: unknown[] = [])
     const result = getDb().prepare(sql).run(...(params as import("node:sqlite").SQLInputValue[]));
     return Number(result.changes ?? 0);
   }
-  const client = pgTransaction.getStore() ?? await getPostgresClient();
-  const result = await client.unsafe(toPostgresSql(sql), params);
+  const result = await runPg("executeReturningCount", (client) =>
+    client.unsafe(toPostgresSql(sql), params)
+  );
   // postgres.js는 결과 배열에 count 속성으로 영향 행 수를 제공한다
   return Number((result as unknown as { count?: number }).count ?? 0);
 }
@@ -186,8 +327,9 @@ export async function insertReturningId(sql: string, params: unknown[] = []): Pr
     const result = getDb().prepare(sql).run(...(params as import("node:sqlite").SQLInputValue[]));
     return Number(result.lastInsertRowid);
   }
-  const client = pgTransaction.getStore() ?? await getPostgresClient();
-  const rows = await client.unsafe(`${toPostgresSql(sql)} RETURNING id`, params);
+  const rows = await runPg("insertReturningId", (client) =>
+    client.unsafe(`${toPostgresSql(sql)} RETURNING id`, params)
+  );
   const id = rows[0]?.id;
   if (typeof id !== "number" && typeof id !== "bigint" && typeof id !== "string") {
     throw new Error("INSERT did not return an id.");

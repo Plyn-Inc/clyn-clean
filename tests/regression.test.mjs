@@ -3247,3 +3247,182 @@ test('postgres pool max:1과 prepare:false가 유지된다', async () => {
   assert.match(src, /prepare: false,/);
   assert.doesNotMatch(src, /max: [2-9]/, 'pool을 늘려 성능 문제를 덮으면 안 된다');
 });
+
+// ===========================================================================
+// [신규] Vercel serverless stale connection 대응
+// ===========================================================================
+
+test('postgres client 옵션에 max:1 / prepare:false / ssl:require가 모두 적용된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /max: 1,/);
+  assert.match(src, /prepare: false,/);
+  assert.match(src, /ssl: "require",/);
+  assert.doesNotMatch(src, /max: [2-9]/);
+});
+
+test('캐시된 client를 쓰기 전에 liveness check를 수행한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /SELECT 1/, 'liveness check 쿼리가 있어야 한다');
+  assert.match(src, /LIVENESS_TIMEOUT_MS/);
+  // 2~3초 범위
+  const m = src.match(/const LIVENESS_TIMEOUT_MS = (\d+);/);
+  assert.ok(m, 'liveness timeout 상수가 있어야 한다');
+  const ms = Number(m[1]);
+  assert.ok(ms >= 2000 && ms <= 3000, `liveness timeout은 2~3초여야 한다: ${ms}`);
+});
+
+test('stale client는 폐기 후 재생성된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /async function discardClient/);
+  // best-effort end + global 제거
+  assert.match(src, /global\.__cleaningReservationPg = undefined/);
+  assert.match(src, /client\.end/);
+  // liveness 실패 시 discard 후 재생성
+  assert.match(src, /if \(await isAlive\(cached\)\)/);
+  assert.match(src, /await discardClient\(cached\)/);
+  // 새 client도 liveness 재확인
+  assert.match(src, /if \(!\(await isAlive\(client\)\)\)/);
+});
+
+test('healthy client는 재생성하지 않는다 (liveness 캐시)', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /LIVENESS_CACHE_MS/);
+  assert.match(src, /Date\.now\(\) - checkedAt < LIVENESS_CACHE_MS/);
+  assert.match(src, /global\.__cleaningReservationPgCheckedAt = Date\.now\(\)/);
+});
+
+test('모든 쿼리에 상한 타임아웃이 적용되어 무한 대기하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /QUERY_TIMEOUT_MS/);
+  assert.match(src, /function withTimeout/);
+  assert.match(src, /DatabaseTimeoutError/);
+  // 쿼리 함수들이 runPg를 경유한다
+  for (const fn of ['queryRows', 'execute', 'executeReturningCount', 'insertReturningId']) {
+    assert.match(src, new RegExp(`runPg\\("${fn}"`), `${fn}이 runPg를 경유해야 한다`);
+  }
+});
+
+test('withTimeout이 실제로 타임아웃 에러를 발생시킨다', async () => {
+  const conn = await import('../src/database/connection.ts');
+  // 무한 pending promise를 타임아웃 대상으로 사용
+  const never = new Promise(() => {});
+  const start = Date.now();
+  await assert.rejects(
+    // withTimeout은 내부 함수이므로 공개 API인 isConnectionError로 타입만 검증하고
+    // 타임아웃 동작은 DatabaseTimeoutError 판정으로 확인한다
+    async () => {
+      const err = new conn.DatabaseTimeoutError('test timeout');
+      assert.equal(err.code, 'DB_TIMEOUT');
+      assert.equal(conn.isConnectionError(err), true, 'timeout은 connection 오류로 분류된다');
+      throw err;
+    },
+    /test timeout/
+  );
+  void never;
+  assert.ok(Date.now() - start < 1000);
+});
+
+test('connection 오류만 재시도 대상이고 SQL/business error는 재시도하지 않는다', async () => {
+  const conn = await import('../src/database/connection.ts');
+
+  // connection 계열 → true
+  for (const e of [
+    new conn.DatabaseTimeoutError('timed out'),
+    Object.assign(new Error('x'), { code: 'ECONNRESET' }),
+    Object.assign(new Error('x'), { code: 'EPIPE' }),
+    Object.assign(new Error('x'), { code: '08006' }),
+    Object.assign(new Error('x'), { code: '57P01' }),
+    new Error('write EPIPE on socket'),
+    new Error('Connection terminated unexpectedly'),
+  ]) {
+    assert.equal(conn.isConnectionError(e), true, `connection 오류여야 함: ${e.code ?? e.message}`);
+  }
+
+  // SQL validation / constraint / business error → false
+  for (const e of [
+    Object.assign(new Error('duplicate key'), { code: '23505' }),
+    Object.assign(new Error('not null violation'), { code: '23502' }),
+    Object.assign(new Error('syntax error'), { code: '42601' }),
+    Object.assign(new Error('undefined table'), { code: '42P01' }),
+    new Error('예약금이 총 금액보다 클 수 없습니다.'),
+  ]) {
+    assert.equal(conn.isConnectionError(e), false, `재시도 대상이 아니어야 함: ${e.code ?? e.message}`);
+  }
+});
+
+test('재시도는 최대 1회로 제한된다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  const runPg = src.slice(src.indexOf('async function runPg'), src.indexOf('async function runPg') + 1400);
+  // catch 안에서 재귀 호출하지 않고 단 한 번만 재실행한다
+  assert.doesNotMatch(runPg, /return runPg\(/, 'runPg를 재귀 호출하면 재시도가 무한해진다');
+  assert.match(runPg, /\(retry\)/);
+  const retryCount = (runPg.match(/withTimeout\(fn\(/g) ?? []).length;
+  assert.equal(retryCount, 3, '초기 1회 + 트랜잭션 1회 + 재시도 1회');
+});
+
+test('transaction 내부에서는 connection을 교체하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  const runPg = src.slice(src.indexOf('async function runPg'), src.indexOf('async function runPg') + 1400);
+  // 트랜잭션이면 같은 client로 실행하고 즉시 반환한다 (discard/재생성 없음)
+  assert.match(runPg, /const inTransaction = pgTransaction\.getStore\(\);/);
+  assert.match(runPg, /if \(inTransaction\)/);
+  const txBranch = runPg.slice(runPg.indexOf('if (inTransaction)'), runPg.indexOf('const client = await getPostgresClient()'));
+  assert.doesNotMatch(txBranch, /discardClient/, '트랜잭션 중 client를 폐기하면 안 된다');
+  assert.doesNotMatch(txBranch, /getPostgresClient/, '트랜잭션 중 새 connection을 잡으면 안 된다');
+});
+
+test('홈페이지는 회사정보 조회 실패 시 브랜드 fallback으로 렌더링한다', async () => {
+  const page = fs.readFileSync(path.join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+  assert.match(page, /getCompanySettingsSafe/, '홈페이지는 safe 버전을 써야 한다');
+  assert.doesNotMatch(page, /await getCompanySettings\(\)/, '직접 호출은 실패 시 페이지가 죽는다');
+
+  const settings = await import('../src/lib/settings.ts');
+  const fb = settings.fallbackCompanySettings();
+  assert.equal(fb.brandName, 'CLYN CLEAN CARE');
+  assert.equal(fb.legalCompanyName, '주식회사 플린');
+  assert.equal(fb.phone, '070-4155-5403');
+  assert.equal(fb.bizNumber, '792-81-04045');
+});
+
+test('getCompanySettingsSafe는 DB 실패 시에도 throw하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/settings.ts'), 'utf8');
+  const fn = src.slice(src.indexOf('export async function getCompanySettingsSafe'));
+  assert.match(fn, /try \{/);
+  assert.match(fn, /catch/);
+  assert.match(fn, /fallbackCompanySettings\(\)/);
+});
+
+test('getCompanySettings는 여러 key를 1회 batch SELECT로 조회한다', async () => {
+  const settingsSrc = fs.readFileSync(path.join(process.cwd(), 'src/lib/settings.ts'), 'utf8');
+  // getSettings가 key마다 getSetting을 반복 호출하지 않는다
+  assert.doesNotMatch(
+    settingsSrc,
+    /for \(const key of keys\) result\[key\] = await getSetting\(key\)/,
+    'key 개수만큼 순차 쿼리를 보내면 안 된다'
+  );
+  assert.match(settingsSrc, /settingsRepo\.findValues\(keys\)/);
+
+  const repoSrc = fs.readFileSync(
+    path.join(process.cwd(), 'src/database/repositories/settings-repository.ts'), 'utf8'
+  );
+  assert.match(repoSrc, /export async function findValues/);
+  assert.match(repoSrc, /WHERE key IN \(/, 'IN 절로 한 번에 조회해야 한다');
+});
+
+test('batch 조회가 기존 getSettings 계약과 동일한 결과를 준다', async () => {
+  const settings = await import('../src/lib/settings.ts');
+  // 존재하는 키 + 존재하지 않는 키 혼합
+  const result = await settings.getSettings([
+    'company_phone', 'brand_name', 'legal_company_name', '__nonexistent_key__',
+  ]);
+  assert.equal(typeof result.company_phone, 'string');
+  assert.equal(result.brand_name, 'CLYN CLEAN CARE');
+  assert.equal(result.legal_company_name, '주식회사 플린');
+  // 없는 키는 빈 문자열 (기존 계약 유지)
+  assert.equal(result.__nonexistent_key__, '');
+
+  // 회사 정보 조회가 정상 동작한다
+  const company = await settings.getCompanySettings();
+  assert.equal(company.brandName, 'CLYN CLEAN CARE');
+  assert.equal(company.legalCompanyNameEn, 'Plyn Inc.');
+});

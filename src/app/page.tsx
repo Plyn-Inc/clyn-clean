@@ -10,11 +10,13 @@ import DetailCleaningFocus from "@/components/DetailCleaningFocus";
 import ReviewsPreview from "@/components/ReviewsPreview";
 import BlogPreview from "@/components/BlogPreview";
 import ContactSection from "@/components/ContactSection";
-import { getCompanySettings } from "@/lib/settings";
+import { getCompanySettingsSafe } from "@/lib/settings";
 import { SectionHeading } from "@/components/ServiceList";
 
 export default async function Home() {
-  const company = await getCompanySettings();
+  // DB 조회가 실패해도 브랜드 기본값으로 홈페이지를 렌더링한다.
+  // 예약 등 DB 의존 기능의 오류는 각 섹션에서 별도로 표시된다.
+  const company = await getCompanySettingsSafe();
 
   return (
     <>

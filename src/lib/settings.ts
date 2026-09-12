@@ -4,9 +4,14 @@ export async function getSetting(key: string): Promise<string> {
   return (await settingsRepo.findValue(key)) ?? "";
 }
 
+/**
+ * 여러 설정 key를 1회 SELECT로 조회한다.
+ * key 개수만큼 순차 round-trip을 만들지 않는다.
+ */
 export async function getSettings(keys: string[]): Promise<Record<string, string>> {
+  const found = await settingsRepo.findValues(keys);
   const result: Record<string, string> = {};
-  for (const key of keys) result[key] = await getSetting(key);
+  for (const key of keys) result[key] = found[key] ?? "";
   return result;
 }
 
@@ -110,6 +115,37 @@ export const BRAND_FALLBACK = {
   bizNumber: "792-81-04045",
   mailOrderNumber: "제 2026-의정부흥선-0327 호",
 } as const;
+
+/** DB 조회 실패 시 사용할 회사 기본정보 */
+export function fallbackCompanySettings(): CompanySettings {
+  return {
+    name: BRAND_FALLBACK.brandName,
+    phone: BRAND_FALLBACK.phone,
+    kakaoUrl: "",
+    address: BRAND_FALLBACK.address,
+    bizNumber: BRAND_FALLBACK.bizNumber,
+    brandName: BRAND_FALLBACK.brandName,
+    legalCompanyName: BRAND_FALLBACK.legalCompanyName,
+    legalCompanyNameEn: BRAND_FALLBACK.legalCompanyNameEn,
+    mailOrderNumber: BRAND_FALLBACK.mailOrderNumber,
+  };
+}
+
+/**
+ * 회사 정보 조회 — DB 실패 시에도 페이지가 렌더링되도록 fallback을 반환한다.
+ *
+ * 회사 기본정보는 브랜드 상수로 대체 가능하므로, 조회 실패 때문에
+ * 홈페이지 전체가 빈 화면/500이 되면 안 된다.
+ * 예약 등 DB가 꼭 필요한 기능의 오류는 해당 기능에서 별도로 표시한다.
+ */
+export async function getCompanySettingsSafe(): Promise<CompanySettings> {
+  try {
+    return await getCompanySettings();
+  } catch (e) {
+    console.error("[settings] 회사 정보 조회 실패 — 브랜드 기본값으로 렌더링합니다.", e);
+    return fallbackCompanySettings();
+  }
+}
 
 export async function getCompanySettings(): Promise<CompanySettings> {
   const s = await getSettings([
