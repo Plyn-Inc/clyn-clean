@@ -94,18 +94,44 @@ export async function getSpecialDay(dateStr: string): Promise<SpecialDayInfo> {
   return toInfo(dateStr, row);
 }
 
-/** 범위 조회 — 캐시에 있는 날짜만 Map으로 반환 (캘린더 렌더링용) */
+/**
+ * 범위 조회 — 고객 캘린더 표시용.
+ *
+ * DB 캐시(KASI/manual)가 있으면 그 값을 우선한다. 아직 동기화되지 않은 날짜는
+ * 현재 예약기간을 커버하는 정적 보조데이터로 시각 정보만 채운다. 이 fallback은
+ * 달력의 공휴일/손없는날 표시를 위한 것이며, 가격 확정(getSpecialDay)은 계속
+ * Production fail-closed 정책을 유지한다.
+ */
 export async function getSpecialDayRange(
   start: string,
   end: string
 ): Promise<Map<string, SpecialDayInfo>> {
   const rows = await repo.findSpecialDaysInRange(start, end);
   const allowGenerator = isGeneratorFallbackAllowed();
-  return new Map(
+  const out = new Map<string, SpecialDayInfo>(
     rows
       .filter((r) => allowGenerator || r.source !== "generator")
       .map((r) => [r.date, toInfo(r.date, r)])
   );
+
+  for (let cur = start; cur <= end; cur = addDays(cur, 1)) {
+    if (out.has(cur) || !staticYearSupported(cur)) continue;
+    const meta = staticMeta(cur);
+    const wd = weekdayOf(cur);
+    out.set(cur, {
+      date: cur,
+      isWeekend: meta.isWeekend,
+      isSaturday: wd === 6,
+      isSunday: wd === 0,
+      isHoliday: meta.isHoliday,
+      holidayName: meta.holidayName,
+      isSonEomneunDay: meta.isSonEomneunDay,
+      customerBadge: meta.customerBadge,
+      source: "generator",
+    });
+  }
+
+  return out;
 }
 
 /**

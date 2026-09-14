@@ -2635,19 +2635,37 @@ test('캘린더 API는 예약 가능 범위를 벗어난 start/end를 제한한�
   assert.ok(dates[dates.length - 1] <= bw.bookingMaxDate(), '예약 최대일 이후는 반환하지 않는다');
 });
 
-test('캐시가 없는 날짜는 캘린더에서 선택할 수 없다', async () => {
+test('캘린더 표시용 특별일 범위는 DB 누락 시 정적 보조데이터를 사용한다', async () => {
+  const store = fs.readFileSync(path.join(process.cwd(), 'src/lib/special-days-store.ts'), 'utf8');
+  const rangeFn = store.slice(store.indexOf('export async function getSpecialDayRange'), store.indexOf('/**\n * 날짜 조건 가격 보정액'));
+  assert.match(rangeFn, /staticYearSupported/);
+  assert.match(rangeFn, /staticMeta/);
+  assert.match(rangeFn, /source:\s*"generator"/);
+
+  const route = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
+  assert.match(route, /specialDaySynced:\s*!!special && special\.source !== "generator"/);
+});
+
+test('특수일 캐시가 없어도 빈 슬롯은 예약가능으로 열어둔다', async () => {
   const calendarRoute = await import('../src/app/api/calendar/route.ts');
-  const bw = await import('../src/lib/booking-window.ts');
-  const start = bw.bookingMinDate();
-  const res = await calendarRoute.GET({
-    url: `http://localhost/api/calendar?start=${start}&end=${start}`,
-  });
-  const body = await res.json();
-  const day = body.days[0];
-  assert.equal(day.specialDaySynced, true, '동기화된 날짜여야 한다');
-  // specialDaySynced가 false면 selectable도 false여야 한다
-  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
-  assert.match(src, /selectable: !!special &&/);
+  const date = '2027-06-10';
+  db.prepare('DELETE FROM special_days WHERE date=?').run(date);
+  try {
+    await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
+    await calendar.setCalendarDay(date, 'available', 1, null, 'afternoon');
+    const res = await calendarRoute.GET({
+      url: `http://localhost/api/calendar?start=${date}&end=${date}`,
+    });
+    const body = await res.json();
+    const day = body.days.find((d) => d.date === date);
+    assert.equal(day.specialDaySynced, false, '특수일 캐시 누락 상태여야 한다');
+    assert.equal(day.morning.publicStatus, '예약가능');
+    assert.equal(day.morning.selectable, true, '빈 오전 슬롯은 선택 가능해야 한다');
+    assert.equal(day.afternoon.publicStatus, '예약가능');
+    assert.equal(day.afternoon.selectable, true, '빈 오후 슬롯은 선택 가능해야 한다');
+  } finally {
+    await specialDayStore.syncSpecialDays({ from: date, days: 1, force: true });
+  }
 });
 
 test('상담접수도 예약 가능 기간을 서버에서 검증한다', async () => {
@@ -3043,6 +3061,12 @@ test('캘린더는 데이터가 없을 때 예약완료로 fallback하지 않는
   assert.match(src, /다시 불러오기/);
 });
 
+test('고객 캘린더는 화면에 표시한 월과 같은 월을 API에서 조회한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
+  assert.match(src, /getMonthRangeKST\(cursor\.year, cursor\.month\)/);
+  assert.doesNotMatch(src, /getMonthRangeKST\(cursor\.year, cursor\.month \+ 1\)/);
+});
+
 test('캘린더는 HTTP 오류/비정상 응답을 에러 상태로 처리한다', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
   // HTTP 오류를 정상 응답처럼 파싱하지 않는다
@@ -3234,6 +3258,32 @@ test('고객 UI에는 내부 key와 동일하게 "사이청소" label이 적용�
 
   const list = fs.readFileSync(path.join(process.cwd(), 'src/components/ServiceList.tsx'), 'utf8');
   assert.match(list, /같은 날 들어오는 경우/, '설명 문구가 있어야 한다');
+});
+
+test('고객 캘린더는 날짜 숫자와 손없는날 점만으로 특별일을 표시하고 상태 범례 3개만 둔다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
+
+  // 일요일/공휴일은 빨간 숫자, 토요일은 파란 숫자다.
+  assert.match(src, /day\?\.isHoliday \|\| day\?\.isSunday/);
+  assert.match(src, /day\?\.isSaturday/);
+  assert.match(src, /text-\[var\(--rose\)\]/);
+  assert.match(src, /text-\[var\(--mint\)\]/);
+
+  // 손없는날은 텍스트 배지가 아니라 날짜 숫자 위 파란 점만 사용한다.
+  assert.match(src, /day\?\.isSonEomneunDay/);
+  assert.match(src, /aria-label="손없는날"/);
+  assert.match(src, /bg-\[var\(--mint\)\]/);
+  assert.doesNotMatch(src, /title=\{day\.badge\}/);
+
+  // 예약가능은 파란색, 진행/완료는 서로 다른 회색 계열이다.
+  assert.match(src, /"예약가능": "bg-\[var\(--navy\)\] text-white/);
+  assert.match(src, /"예약진행 중": "bg-\[#F3F4F6\]/);
+  assert.match(src, /"예약완료": "bg-\[#E5E7EB\]/);
+
+  // 하단 범례는 예약 상태 3개만 남긴다.
+  assert.doesNotMatch(src, /> 일요일 · 공휴일/);
+  assert.doesNotMatch(src, /> 토요일/);
+  assert.doesNotMatch(src, /> 손없는날/);
 });
 
 test('상담 문의 영역은 전화와 카카오톡만 노출하고 문자 문의는 제거한다', async () => {
