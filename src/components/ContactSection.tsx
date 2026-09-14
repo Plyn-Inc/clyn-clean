@@ -2,7 +2,6 @@ import type { CompanySettings } from "@/lib/settings";
 
 export default function ContactSection({ company }: { company: CompanySettings }) {
   const telHref = company.phone ? `tel:${company.phone.replace(/-/g, "")}` : undefined;
-  const smsHref = company.phone ? `sms:${company.phone.replace(/-/g, "")}` : undefined;
 
   return (
     <section id="contact" className="scroll-mt-24 bg-[var(--navy)] py-20">
@@ -15,18 +14,12 @@ export default function ContactSection({ company }: { company: CompanySettings }
           예약하지 않고 상담이 필요한 경우, 아래 방법으로 편하게 문의해주세요.
         </p>
 
-        <div className="mt-10 grid gap-4 sm:grid-cols-3">
+        <div className="mt-10 grid gap-4 sm:grid-cols-2">
           <ContactButton
             label="전화 문의"
             sub={company.phone || "전화번호 등록 예정"}
             href={telHref}
             icon="📞"
-          />
-          <ContactButton
-            label="문자 문의"
-            sub={company.phone || "전화번호 등록 예정"}
-            href={smsHref}
-            icon="💬"
           />
           <ContactButton
             label="카카오톡 문의"

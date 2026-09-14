@@ -3217,9 +3217,9 @@ test('BookingForm이 CONSULT_REQUIRED 흐름을 유지한다', async () => {
 
 // --- 사이청소 label ---
 
-test('고객 UI에 "당일 이사 사이청소" label이 적용된다', async () => {
+test('고객 UI에는 내부 key와 동일하게 "사이청소" label이 적용된다', async () => {
   const types = await import('../src/lib/types.ts');
-  assert.equal(types.serviceLabel('사이청소'), '당일 이사 사이청소');
+  assert.equal(types.serviceLabel('사이청소'), '사이청소');
   assert.equal(types.serviceLabel('입주청소'), '입주청소');
   assert.match(types.SERVICE_TYPE_SHORT_DESC['사이청소'], /퇴거와 새 입주 사이/);
 
@@ -3234,6 +3234,15 @@ test('고객 UI에 "당일 이사 사이청소" label이 적용된다', async ()
 
   const list = fs.readFileSync(path.join(process.cwd(), 'src/components/ServiceList.tsx'), 'utf8');
   assert.match(list, /같은 날 들어오는 경우/, '설명 문구가 있어야 한다');
+});
+
+test('상담 문의 영역은 전화와 카카오톡만 노출하고 문자 문의는 제거한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/ContactSection.tsx'), 'utf8');
+  assert.match(src, /label="전화 문의"/);
+  assert.match(src, /label="카카오톡 문의"/);
+  assert.doesNotMatch(src, /label="문자 문의"/);
+  assert.doesNotMatch(src, /sms:/);
+  assert.match(src, /sm:grid-cols-2/);
 });
 
 test('사이청소 시간 입력 라벨이 이해하기 쉽게 표시된다', async () => {
