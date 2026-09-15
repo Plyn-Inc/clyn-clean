@@ -7,7 +7,7 @@ const read = (p) => fs.readFileSync(p, 'utf8');
 test('예약 폼은 서비스/날짜/고객정보/확인·동의 4단계만 사용한다', () => {
   const src = read('src/components/booking/BookingForm.tsx');
   assert.match(src, /type Step = 1 \| 2 \| 3 \| 4;/);
-  assert.match(src, /const STEP_LABELS = \["서비스", "날짜", "고객정보", "확인·동의"\]/);
+  assert.match(src, /const STEP_LABELS = \["지역·서비스", "날짜", "고객정보", "확인·동의"\]/);
   assert.doesNotMatch(src, /"현장정보"/);
   assert.doesNotMatch(src, /step === 5/);
   assert.doesNotMatch(src, /step === 6/);
@@ -16,9 +16,11 @@ test('예약 폼은 서비스/날짜/고객정보/확인·동의 4단계만 사�
 test('사이청소는 고객 UI에서 오전/오후가 아니라 all_day와 퇴거/입주 시간을 사용한다', () => {
   const src = read('src/components/booking/BookingForm.tsx');
   assert.match(src, /serviceType === "사이청소"[^]*setTimeSlot\("all_day"\)/);
-  assert.match(src, /serviceType === "사이청소" \? \([^]*type="time"[^]*\) : \([^]*\["morning", "afternoon"\] as const/);
-  assert.match(src, /type="time"[^]*value=\{moveOutTime\}/);
-  assert.match(src, /type="time"[^]*value=\{moveInTime\}/);
+  assert.match(src, /serviceType === "사이청소" \? \([^]*퇴거 완료 예정시간[^]*TIME_OPTIONS[^]*새 입주 예정시간[^]*TIME_OPTIONS/);
+  assert.doesNotMatch(src, /type="time"/);
+  assert.match(src, /const TIME_OPTIONS = createHalfHourOptions\(\)/);
+  assert.match(src, /value=\{moveOutTime\}[^]*TIME_OPTIONS\.map/);
+  assert.match(src, /value=\{moveInTime\}[^]*TIME_OPTIONS\.map/);
   assert.match(src, /moveOutTime:\s*serviceType === "사이청소"/);
   assert.match(src, /moveInTime:\s*serviceType === "사이청소"/);
 });
@@ -159,4 +161,31 @@ test('사이청소 선택 시 좌측 캘린더도 오전/오후 대신 날짜 �
 test('사이청소 날짜 선택은 기존 all_day 보호 예약이 있는 날을 재개방 여부와 무관하게 다시 선택하지 않는다', () => {
   const calendar = read('src/components/booking/ReservationCalendar.tsx');
   assert.match(calendar, /const dateSelectable = Boolean\(!day\?\.allDayBlocked && morning\?\.selectable && afternoon\?\.selectable\)/);
+});
+
+
+test('1단계 맨 앞에서 지역을 먼저 선택하고 지역 확인 전에는 가격 조회를 시작하지 않는다', () => {
+  const src = read('src/components/booking/BookingForm.tsx');
+  const step1 = src.match(/\{step === 1 && \([\s\S]*?\n      \)\}/)?.[0] ?? src;
+  assert.match(src, /const STEP_LABELS = \["지역·서비스", "날짜", "고객정보", "확인·동의"\]/);
+  assert.match(step1, /<RegionSelect/);
+  assert.match(step1, /청소 종류/);
+  assert.ok(step1.indexOf('<RegionSelect') < step1.indexOf('청소 종류'), '지역 선택 UI가 서비스 선택보다 먼저여야 한다');
+  assert.match(src, /const regionReadyForPricing =/);
+  assert.match(src, /if \(!regionReadyForPricing \|\| !hasProduct \|\| !desiredDate\)/);
+});
+
+test('고객정보 단계에서는 지역을 다시 요구하지 않고 상세주소만 받는다', () => {
+  const src = read('src/components/booking/BookingForm.tsx');
+  const step3 = src.match(/\{step === 3 && \([\s\S]*?\n      \)\}/)?.[0] ?? '';
+  assert.doesNotMatch(step3, /<RegionSelect/);
+  assert.match(step3, /상세 주소/);
+});
+
+test('기본가격은 공개 가격표를 한 번 캐시해 즉시 표시하고 날짜 선택 후에만 최종 quote를 갱신한다', () => {
+  const src = read('src/components/booking/BookingForm.tsx');
+  assert.match(src, /fetch\("\/api\/pricing"\)/);
+  assert.match(src, /const \[priceCatalog, setPriceCatalog\]/);
+  assert.match(src, /const baseCatalogQuote:\s*Quote \| null =/);
+  assert.match(src, /desiredDate \? \(quote \?\? baseCatalogQuote\) : baseCatalogQuote/);
 });

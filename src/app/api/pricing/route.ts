@@ -1,45 +1,27 @@
 import { NextResponse } from "next/server";
 import { listPriceRules } from "@/lib/pricing";
-import {
-  HOUSE_TYPES_FIXED,
-  HOUSE_SIZES_APARTMENT,
-  HOUSE_TYPE_STRUCTURE,
-  VAT_NOTICE,
-} from "@/lib/types";
+import { VAT_NOTICE } from "@/lib/types";
 
 /**
- * 홈페이지 공개 가격표 API.
- *
- * price_rules를 single source of truth로 사용한다 (가격 하드코딩 금지).
- * VAT는 자동 합산하지 않고, 공통 안내 문구만 함께 내려보낸다.
+ * 고객 예약폼에서 한 번만 받아 캐시하는 공개 가격표.
+ * 서비스별 독립 price_rules row를 그대로 사용하며 비활성 상품은 노출하지 않는다.
  */
 export async function GET() {
   const rules = await listPriceRules();
-  const byNote = new Map(
-    rules
-      .filter((r) => r.service_type === "입주청소" && r.is_active === 1)
-      .map((r) => [r.note ?? "", r])
-  );
-
-  // 표시 순서: 고정 주택형 → 아파트 평형
-  const orderedKeys: string[] = [
-    ...HOUSE_TYPES_FIXED,
-    ...HOUSE_SIZES_APARTMENT.map((n) => `${n}평`),
-  ];
-
-  const items = orderedKeys
-    .map((key) => {
-      const rule = byNote.get(key);
-      if (!rule || rule.base_price <= 0) return null;
+  const items = rules
+    .filter((r) => r.is_active === 1 && (r.product_key ?? r.note) && r.base_price > 0)
+    .map((r) => {
+      const productKey = r.product_key ?? r.note ?? "";
       return {
-        houseTypeKey: key,
-        // 40평은 "40평 이상"으로 표시한다
-        label: key === "40평" ? "40평 이상" : key,
-        basePrice: rule.base_price,
-        structure: HOUSE_TYPE_STRUCTURE[key] ?? "",
+        serviceType: r.service_type,
+        productKey,
+        // 기존 공개 응답과의 호환을 위해 유지
+        houseTypeKey: productKey,
+        label: productKey === "40평" ? "40평 이상" : productKey,
+        basePrice: Number(r.base_price),
+        depositAmount: Number(r.deposit_amount ?? 0),
       };
-    })
-    .filter((v): v is NonNullable<typeof v> => v !== null);
+    });
 
   return NextResponse.json({ items, vatNotice: VAT_NOTICE });
 }

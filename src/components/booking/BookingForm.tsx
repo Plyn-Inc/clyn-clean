@@ -42,13 +42,33 @@ interface Quote {
   optionBreakdown: { key: string; label: string; price: number; isConsult: boolean }[];
 }
 
+interface PriceCatalogItem {
+  serviceType: string;
+  productKey: string;
+  basePrice: number;
+  depositAmount: number;
+}
+
+function createHalfHourOptions() {
+  return Array.from({ length: 48 }, (_, index) => {
+    const hour = Math.floor(index / 2);
+    const minute = index % 2 === 0 ? "00" : "30";
+    const value = `${String(hour).padStart(2, "0")}:${minute}`;
+    const period = hour < 12 ? "오전" : "오후";
+    const displayHour = hour % 12 === 0 ? 12 : hour % 12;
+    return { value, label: `${period} ${displayHour}:${minute}` };
+  });
+}
+
+const TIME_OPTIONS = createHalfHourOptions();
+
 type Step = 1 | 2 | 3 | 4;
 type BookingTimeSlot = "" | "morning" | "afternoon" | "all_day";
 type Result =
   | { kind: "deposit"; info: DepositAccountInfo }
   | { kind: "consultation"; code: string; notice: string };
 
-const STEP_LABELS = ["서비스", "날짜", "고객정보", "확인·동의"];
+const STEP_LABELS = ["지역·서비스", "날짜", "고객정보", "확인·동의"];
 
 interface BookingFormProps {
   selectedSlot: SelectedSlot | null;
@@ -62,7 +82,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
 
-  // 1단계 — 서비스
+  // 1단계 — 지역 + 서비스
   const [serviceType, setServiceType] = useState<ServiceType>(SERVICE_TYPES[0]);
   const [houseTypeKey, setHouseTypeKey] = useState("");
   const [isApartment, setIsApartment] = useState(false);
@@ -79,15 +99,17 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [today, setToday] = useState("");
   const maxDate = bookingMaxDate();
 
+  // 1단계 — 지역
+  const [region, setRegion] = useState<RegionValue>(EMPTY_REGION);
+  const [regionMasterImported, setRegionMasterImported] = useState<boolean | null>(null);
+  const [manualAreaText, setManualAreaText] = useState("");
+
   // 3단계 — 고객정보 + 기존 현장정보 통합
   const [occupancyStatus, setOccupancyStatus] = useState<OccupancyStatus>("before_move_in");
   const [extraNotes, setExtraNotes] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
-  const [region, setRegion] = useState<RegionValue>(EMPTY_REGION);
-  const [regionMasterImported, setRegionMasterImported] = useState<boolean | null>(null);
-  const [manualAreaText, setManualAreaText] = useState("");
   const [address, setAddress] = useState("");
 
   // 4단계 — 확인/동의
@@ -102,6 +124,8 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [quote, setQuote] = useState<Quote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState(false);
+  const [priceCatalog, setPriceCatalog] = useState<PriceCatalogItem[]>([]);
+  const [priceCatalogLoading, setPriceCatalogLoading] = useState(true);
 
   const resolvedKey = isApartment
     ? apartmentSize === 40 ? "40평" : `${apartmentSize}평`
@@ -109,7 +133,24 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const entryRoute = selectedSlot || selectedDate ? "calendar" : "direct";
   const is40Plus = resolvedKey === "40평";
   const regionConsultRequired = region.serviceAvailable === false || regionMasterImported === false;
-  const consultRequired = quote?.consultRequired === true || regionConsultRequired;
+  const regionReadyForPricing = regionMasterImported === true && Boolean(region.sidoCode) && Boolean(region.sigunguCode || region.dongCode) && region.serviceAvailable !== false;
+  const productKeyForPricing = serviceType === "집정리" ? jipjeongriPackage : resolvedKey;
+  const catalogItem = priceCatalog.find((item) => item.serviceType === serviceType && item.productKey === productKeyForPricing);
+  const baseCatalogQuote: Quote | null = catalogItem ? {
+    basePrice: catalogItem.basePrice,
+    estimatedTotal: catalogItem.basePrice,
+    depositAmount: catalogItem.depositAmount,
+    estimatedBalance: Math.max(catalogItem.basePrice - catalogItem.depositAmount, 0),
+    priceConfirmed: resolvedKey !== "40평",
+    notice: VAT_NOTICE,
+    consultRequired: resolvedKey === "40평",
+    consultNotice: resolvedKey === "40평" ? "40평 이상은 상담 후 최종 견적을 안내드립니다." : null,
+    isStartingPrice: resolvedKey === "40평",
+    displayPriceLabel: `${catalogItem.basePrice.toLocaleString("ko-KR")}원${resolvedKey === "40평" ? "부터" : ""}`,
+    optionBreakdown: [],
+  } : null;
+  const displayQuote = desiredDate ? (quote ?? baseCatalogQuote) : baseCatalogQuote;
+  const consultRequired = quote?.consultRequired === true || baseCatalogQuote?.consultRequired === true || regionConsultRequired;
 
   useEffect(() => {
     if (serviceType === "사이청소") {
@@ -125,6 +166,22 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
 
   useEffect(() => {
     let cancelled = false;
+    fetch("/api/pricing")
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error("pricing fetch failed")))
+      .then((d) => {
+        if (!cancelled) setPriceCatalog(Array.isArray(d.items) ? d.items : []);
+      })
+      .catch(() => {
+        if (!cancelled) setPriceCatalog([]);
+      })
+      .finally(() => {
+        if (!cancelled) setPriceCatalogLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
     fetch("/api/reservations")
       .then((r) => r.json())
       .then((d) => { if (!cancelled) setToday(d.today ?? ""); })
@@ -136,7 +193,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   // 이전 요청은 abort하여 서비스/평형을 빠르게 바꿀 때 오래된 응답이 덮어쓰지 않게 한다.
   useEffect(() => {
     const hasProduct = serviceType === "집정리" || !!resolvedKey;
-    if (!hasProduct) {
+    if (!regionReadyForPricing || !hasProduct || !desiredDate) {
       void Promise.resolve().then(() => {
         setQuote(null);
         setQuoteError(false);
@@ -184,7 +241,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     });
 
     return () => controller.abort();
-  }, [serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot]);
+  }, [regionReadyForPricing, serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot]);
 
   function toggle(list: string[], v: string) {
     return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
@@ -213,12 +270,22 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
 
   function validateStep(s: Step): string | null {
     if (s === 1) {
+      if (regionMasterImported === null) return "지역 정보를 확인 중입니다. 잠시만 기다려주세요.";
+      if (regionMasterImported === false) {
+        if (!manualAreaText.trim()) return "상담을 위해 희망 작업지역을 입력해주세요.";
+      } else {
+        if (!region.sidoCode) return "시/도를 선택해주세요.";
+        if (!region.sigunguCode && !region.dongCode) return "지역을 선택해주세요.";
+        if (region.sigunguCode && !region.dongCode) return "읍/면/동을 선택해주세요.";
+      }
       if (serviceType !== "집정리") {
         if (!resolvedKey) return "주택유형을 선택해주세요.";
         if (is40Plus && !actualPyeong) return "공급면적을 입력해주세요.";
       }
-      if (quoteLoading) return "가격 정보를 확인 중입니다. 잠시만 기다려주세요.";
-      if (!quote) return "가격 정보를 불러온 후 진행해주세요.";
+      if (!regionConsultRequired) {
+        if (priceCatalogLoading) return "가격 정보를 준비 중입니다. 잠시만 기다려주세요.";
+        if (!baseCatalogQuote) return "가격 정보를 확인할 수 없습니다. 다른 상품을 선택해주세요.";
+      }
       return null;
     }
 
@@ -245,13 +312,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     if (s === 3) {
       if (!customerName.trim()) return "예약자명을 입력해주세요.";
       if (!customerPhone.trim()) return "연락처를 입력해주세요.";
-      if (regionMasterImported === false) {
-        if (!manualAreaText.trim()) return "상담을 위해 희망 작업지역을 입력해주세요.";
-        return null;
-      }
-      if (!region.sidoCode) return "시/도를 선택해주세요.";
-      if (!region.sigunguCode && !region.dongCode) return "지역을 선택해주세요.";
-      if (region.sigunguCode && !region.dongCode) return "읍/면/동을 선택해주세요.";
       return null;
     }
 
@@ -454,6 +514,28 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
       {step === 1 && (
         <div className="space-y-5">
           <div>
+            <RegionSelect
+              value={region}
+              onChange={setRegion}
+              onImportedChange={setRegionMasterImported}
+            />
+          </div>
+          {regionMasterImported === false && (
+            <div className="space-y-3 rounded-xl border border-[#E8C89B] bg-[#FFF7EA] p-4 text-sm leading-relaxed text-[var(--ink-soft)]">
+              <div>
+                <p className="font-semibold text-[var(--ink)]">현재는 상담 접수로 전환됩니다.</p>
+                <p className="mt-1">행정구역 데이터가 준비되기 전에는 직접 예약을 열지 않습니다. 희망 지역을 남겨주시면 담당자가 확인합니다.</p>
+              </div>
+              <Field
+                label="희망 작업지역"
+                required
+                value={manualAreaText}
+                onChange={setManualAreaText}
+                placeholder="예: 서울 강남구 역삼동"
+              />
+            </div>
+          )}
+          <div>
             <label className="mb-2 block text-sm font-semibold">청소 종류</label>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {SERVICE_TYPES.map((s) => (
@@ -540,19 +622,19 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
             </>
           )}
 
-          {(resolvedKey || serviceType === "집정리") && (
+          {regionReadyForPricing && (resolvedKey || serviceType === "집정리") && (
             <div className="rounded-2xl border-2 border-[var(--mint)] bg-[var(--mint-soft)] p-5">
-              {quoteLoading ? (
-                <p className="text-sm text-[var(--ink-soft)]">가격을 불러오는 중...</p>
-              ) : quote ? (
+              {priceCatalogLoading ? (
+                <p className="text-sm text-[var(--ink-soft)]">가격 정보를 준비 중...</p>
+              ) : displayQuote ? (
                 <>
                   <p className="text-xs font-semibold text-[var(--mint)]">
                     {serviceLabel(serviceType)} · {resolvedKey === "40평" ? "40평 이상" : resolvedKey || "집정리"}
                   </p>
-                  <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">{quote.displayPriceLabel}</p>
+                  <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">{displayQuote.displayPriceLabel}</p>
                   <p className="mt-2 text-xs text-[var(--ink-soft)]">{VAT_NOTICE}</p>
-                  {quote.consultRequired && quote.consultNotice ? (
-                    <p className="mt-2 text-xs leading-relaxed text-[var(--amber)]">{quote.consultNotice}</p>
+                  {displayQuote.consultRequired && displayQuote.consultNotice ? (
+                    <p className="mt-2 text-xs leading-relaxed text-[var(--amber)]">{displayQuote.consultNotice}</p>
                   ) : (
                     <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">날짜를 선택하면 최종 예약금액이 확정됩니다.</p>
                   )}
@@ -585,13 +667,19 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
                   <label className="mb-1.5 block text-sm font-semibold">퇴거 완료 예정시간 <span className="text-xs text-[var(--rose)]">*필수</span></label>
-                  <input type="time" value={moveOutTime} onChange={(e) => setMoveOutTime(e.target.value)}
-                    className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
+                  <select value={moveOutTime} onChange={(e) => setMoveOutTime(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none">
+                    <option value="">시간 선택</option>
+                    {TIME_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
                 </div>
                 <div>
                   <label className="mb-1.5 block text-sm font-semibold">새 입주 예정시간 <span className="text-xs text-[var(--rose)]">*필수</span></label>
-                  <input type="time" value={moveInTime} onChange={(e) => setMoveInTime(e.target.value)}
-                    className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
+                  <select value={moveInTime} onChange={(e) => setMoveInTime(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none">
+                    <option value="">시간 선택</option>
+                    {TIME_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
                 </div>
               </div>
             </div>
@@ -608,6 +696,10 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
                 ))}
               </div>
             </div>
+          )}
+
+          {desiredDate && quoteLoading && regionReadyForPricing && (
+            <div className="rounded-2xl border border-[var(--line)] bg-white p-5 text-sm text-[var(--ink-soft)]">최종 예약금액 계산 중...</div>
           )}
 
           {desiredDate && quote && !quote.consultRequired && (
@@ -628,28 +720,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         <div className="grid gap-5 md:grid-cols-2">
           <Field label="예약자명" required value={customerName} onChange={setCustomerName} />
           <Field label="연락처" required value={customerPhone} onChange={setCustomerPhone} placeholder="010-0000-0000" />
-          <div className="md:col-span-2">
-            <RegionSelect
-              value={region}
-              onChange={setRegion}
-              onImportedChange={setRegionMasterImported}
-            />
-          </div>
-          {regionMasterImported === false && (
-            <div className="md:col-span-2 space-y-3 rounded-xl border border-[#E8C89B] bg-[#FFF7EA] p-4 text-sm leading-relaxed text-[var(--ink-soft)]">
-              <div>
-                <p className="font-semibold text-[var(--ink)]">현재는 상담 접수로 전환됩니다.</p>
-                <p className="mt-1">행정구역 데이터가 준비되기 전에는 직접 예약을 열지 않습니다. 이 4단계 안에서 상담 접수까지 완료할 수 있습니다.</p>
-              </div>
-              <Field
-                label="희망 작업지역"
-                required
-                value={manualAreaText}
-                onChange={setManualAreaText}
-                placeholder="예: 서울 강남구 역삼동"
-              />
-            </div>
-          )}
           <div className="md:col-span-2"><Field label="상세 주소 (선택)" value={address} onChange={setAddress} /></div>
           <div className="md:col-span-2"><Field label="이메일 (선택)" value={customerEmail} onChange={setCustomerEmail} type="email" /></div>
 
