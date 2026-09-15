@@ -41,10 +41,14 @@ export default function RegionSelect({
   value,
   onChange,
   onImportedChange,
+  manualValue = "",
+  onManualChange,
 }: {
   value: RegionValue;
   onChange: (next: RegionValue) => void;
   onImportedChange?: (imported: boolean) => void;
+  manualValue?: string;
+  onManualChange?: (value: string) => void;
 }) {
   const [sidoList, setSidoList] = useState<AreaOption[]>([]);
   const [midList, setMidList] = useState<AreaOption[]>([]);
@@ -140,10 +144,20 @@ export default function RegionSelect({
 
   if (imported === false) {
     return (
-      <div className="rounded-xl bg-[#FBE9D3] p-4 text-sm leading-relaxed text-[var(--amber)]">
-        <p className="font-semibold">지역 선택을 준비 중입니다.</p>
-        <p className="mt-1">
-          잠시 후 다시 시도하시거나, 상담 접수를 남겨주시면 담당자가 확인 후 연락드립니다.
+      <div>
+        <label className="mb-1.5 block text-sm font-semibold">
+          작업 지역 <span className="text-xs text-[var(--rose)]">*필수</span>
+        </label>
+        <input
+          type="text"
+          value={manualValue}
+          onChange={(e) => onManualChange?.(e.target.value)}
+          placeholder="예: 서울 강남구 역삼동"
+          autoComplete="street-address"
+          className="min-h-[44px] w-full rounded-lg border border-[var(--line)] px-3.5 text-sm focus:border-[var(--mint)] focus:outline-none"
+        />
+        <p className="mt-1.5 text-xs text-[var(--ink-soft)]">
+          지역을 먼저 입력해주세요. 서비스 가능 여부는 상담 접수 시 우선 확인합니다.
         </p>
       </div>
     );

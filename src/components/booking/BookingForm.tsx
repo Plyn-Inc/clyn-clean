@@ -133,6 +133,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const entryRoute = selectedSlot || selectedDate ? "calendar" : "direct";
   const is40Plus = resolvedKey === "40평";
   const regionConsultRequired = region.serviceAvailable === false || regionMasterImported === false;
+  const showRegionConsultNotice = region.serviceAvailable === false || (regionMasterImported === false && Boolean(manualAreaText.trim()));
   const regionReadyForPricing = regionMasterImported === true && Boolean(region.sidoCode) && Boolean(region.sigunguCode || region.dongCode) && region.serviceAvailable !== false;
   const productKeyForPricing = serviceType === "집정리" ? jipjeongriPackage : resolvedKey;
   const catalogItem = priceCatalog.find((item) => item.serviceType === serviceType && item.productKey === productKeyForPricing);
@@ -503,10 +504,10 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         })}
       </ol>
 
-      {consultRequired && (quote?.consultNotice || regionConsultRequired) && (
+      {consultRequired && (quote?.consultNotice || showRegionConsultNotice) && (
         <div className="mb-5 rounded-xl bg-[#FBE9D3] p-4 text-sm leading-relaxed text-[var(--amber)]">
-          {regionConsultRequired
-            ? "선택하신 지역은 직접 예약이 어려워 상담 접수로 진행됩니다."
+          {showRegionConsultNotice
+            ? "입력하신 지역은 서비스 가능 여부 확인이 필요해 상담 접수로 진행됩니다."
             : quote?.consultNotice}
         </div>
       )}
@@ -518,23 +519,10 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               value={region}
               onChange={setRegion}
               onImportedChange={setRegionMasterImported}
+              manualValue={manualAreaText}
+              onManualChange={setManualAreaText}
             />
           </div>
-          {regionMasterImported === false && (
-            <div className="space-y-3 rounded-xl border border-[#E8C89B] bg-[#FFF7EA] p-4 text-sm leading-relaxed text-[var(--ink-soft)]">
-              <div>
-                <p className="font-semibold text-[var(--ink)]">현재는 상담 접수로 전환됩니다.</p>
-                <p className="mt-1">행정구역 데이터가 준비되기 전에는 직접 예약을 열지 않습니다. 희망 지역을 남겨주시면 담당자가 확인합니다.</p>
-              </div>
-              <Field
-                label="희망 작업지역"
-                required
-                value={manualAreaText}
-                onChange={setManualAreaText}
-                placeholder="예: 서울 강남구 역삼동"
-              />
-            </div>
-          )}
           <div>
             <label className="mb-2 block text-sm font-semibold">청소 종류</label>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
