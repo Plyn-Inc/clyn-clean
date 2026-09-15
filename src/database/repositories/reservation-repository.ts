@@ -173,7 +173,7 @@ export async function insertReservationBundlePostgres(
         ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
         ?, ?, ?,
         ?, ?, ?,
-        ?, CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
+        ?, CASE WHEN ?::text IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
         ?, ?, ?,
         ?, ?, ?,
         ?, ?,
