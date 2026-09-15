@@ -125,13 +125,20 @@ export interface CreateReservationResult {
 // 실제 할인 금액 계산은 calculateQuote()가 담당한다.
 // ---------------------------------------------------------------------------
 
+export function isInstantDiscountCandidate(
+  entryRoute: EntryRoute | undefined,
+  timeSlot: "morning" | "afternoon" | "all_day" | undefined
+): boolean {
+  return entryRoute === "calendar" && (timeSlot === "morning" || timeSlot === "afternoon");
+}
+
 export async function computeInstantDiscountEligible(
   entryRoute: EntryRoute,
   desiredDate: string,
   timeSlot: "morning" | "afternoon" | "all_day"
 ): Promise<boolean> {
-  if (entryRoute !== "calendar" || timeSlot === "all_day") return false;
-  const slotStatus = await getSlotEffectiveStatus(desiredDate, timeSlot);
+  if (!isInstantDiscountCandidate(entryRoute, timeSlot)) return false;
+  const slotStatus = await getSlotEffectiveStatus(desiredDate, timeSlot as "morning" | "afternoon");
   return slotStatus === "available";
 }
 
@@ -256,9 +263,10 @@ export async function createReservation(
 
     // 4. API 계층에서 계산한 값이 있으면 그대로 재사용한다.
     // 공개 submit 경로에서는 transaction 안에서 견적/설정 DB 조회를 반복하지 않는다.
-    const eligible = input.instantDiscountEligible ?? await computeInstantDiscountEligible(
+    // 공개 예약 API는 후보값을 전달한다. 실제 슬롯 가용성은 바로 위에서
+    // transaction lock 하에 검증되므로 성공한 예약의 할인 자격은 여기서 확정된다.
+    const eligible = input.instantDiscountEligible ?? isInstantDiscountCandidate(
       input.entryRoute,
-      input.desiredDate,
       input.timeSlot
     );
 
@@ -375,10 +383,8 @@ export async function createReservation(
   const reservation = await reservationRepo.findReservationById(reservationId);
   if (!reservation) throw new Error("예약 생성 결과를 찾을 수 없습니다.");
 
-  // 승인 전이므로 payment는 아직 존재하지 않는다 (null).
-  const payment = await reservationRepo.findPaymentByReservationId(reservationId);
-
-  return { reservation, payment: payment ?? null };
+  // 승인 전이므로 payment는 아직 존재하지 않는다. 불필요한 DB 재조회를 하지 않는다.
+  return { reservation, payment: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -589,19 +595,12 @@ export async function revealDepositAccount(
       throw new DepositAccountError("동의서 버전이 기록되지 않았습니다.", "AGREEMENT_VERSION_MISSING");
     }
 
-    // 2-0-1) 상담 전환 건 이중 차단 (요구사항 5)
-    //        예약 생성 시 이미 막지만, 데이터가 어떤 경로로 들어왔든
-    //        계좌 공개 직전에 서버가 다시 판정한다.
-    const gateQuote = await calculateQuote({
-      serviceType: reservation.service_type,
-      houseTypeKey: reservation.house_type_key ?? undefined,
-      actualPyeong: reservation.area_pyeong ?? undefined,
-      desiredDate: reservation.desired_date ?? undefined,
-      hasPet: reservation.has_pet === 1,
-    });
-    if (gateQuote.consultRequired) {
+    // 2-0-1) 상담 전환 건 이중 차단.
+    // 예약 생성 시 서버가 확정해 저장한 snapshot을 사용한다. 계좌 공개 시 가격표/특수일을
+    // 다시 조회하면 같은 예약에 대해 불필요한 DB 왕복과 가격 변경 race가 생긴다.
+    if (reservation.price_confirmed_snapshot !== 1) {
       throw new DepositAccountError(
-        gateQuote.consultNotice ?? "상담 접수가 필요한 예약이라 계좌를 안내할 수 없습니다.",
+        "상담 또는 별도 견적이 필요한 예약이라 계좌를 안내할 수 없습니다.",
         "CONSULT_REQUIRED"
       );
     }

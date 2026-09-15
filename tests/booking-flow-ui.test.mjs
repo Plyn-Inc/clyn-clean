@@ -114,8 +114,9 @@ test('행정구역 master 미임포트 시 자유입력이나 상담 우회 없�
 
 test('예약 API도 행정구역 master 미임포트 상태의 직접예약을 거부한다', () => {
   const api = read('src/app/api/reservations/route.ts');
-  assert.match(api, /const areaMasterCount = await countAreas\(\)/);
-  assert.match(api, /areaMasterCount === 0[^]*REGION_MASTER_NOT_READY/);
+  assert.match(api, /getReservationAreaStatus/);
+  assert.match(api, /!areaStatus\.masterReady[^]*REGION_MASTER_NOT_READY/);
+  assert.doesNotMatch(api, /countAreas/);
   assert.doesNotMatch(api, /미임포트 상태에서 모든 예약을 막으면 서비스가 중단되므로 통과시킨다/);
 });
 

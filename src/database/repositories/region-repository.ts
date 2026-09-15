@@ -206,6 +206,34 @@ export async function isServiceArea(sigunguCode: string): Promise<boolean> {
   return row?.is_enabled === 1;
 }
 
+/**
+ * 고객 직접예약 제출용 서비스지역 상태.
+ *
+ * 행정구역 master 준비 여부와 선택 시/군/구의 활성 여부를 한 번의 DB 왕복으로
+ * 확인한다. master가 비어 있는 상태와 단순 서비스지역 OFF를 구분하면서도
+ * countAreas() + isServiceArea() 두 번 조회하지 않는다.
+ */
+export async function getReservationAreaStatus(sigunguCode: string): Promise<{
+  masterReady: boolean;
+  serviceEnabled: boolean;
+}> {
+  const row = await queryRow<{ master_ready: number; service_enabled: number }>(
+    `SELECT
+       CASE WHEN EXISTS (
+         SELECT 1 FROM administrative_areas WHERE is_current = 1 LIMIT 1
+       ) THEN 1 ELSE 0 END AS master_ready,
+       CASE WHEN EXISTS (
+         SELECT 1 FROM service_areas
+          WHERE sigungu_code = ? AND is_enabled = 1
+       ) THEN 1 ELSE 0 END AS service_enabled`,
+    [sigunguCode]
+  );
+  return {
+    masterReady: Number(row?.master_ready ?? 0) === 1,
+    serviceEnabled: Number(row?.service_enabled ?? 0) === 1,
+  };
+}
+
 /** 활성 서비스 지역 코드 집합 */
 export async function enabledServiceAreaCodes(): Promise<Set<string>> {
   const rows = await queryRows<{ sigungu_code: string }>(

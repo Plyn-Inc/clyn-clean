@@ -132,5 +132,6 @@ test('직접예약 API는 구조화된 지역 코드를 필수로 받아 서비�
   assert.match(api, /areaSidoCode: z\.string\(\)\.trim\(\)\.min\(1/);
   assert.match(api, /areaSigunguCode: z\.string\(\)\.trim\(\)\.min\(1/);
   assert.match(api, /areaDongCode: z\.string\(\)\.trim\(\)\.min\(1/);
-  assert.match(api, /if \(!\(await isServiceArea\(data\.areaSigunguCode\)\)\)/);
+  assert.match(api, /getReservationAreaStatus/);
+  assert.match(api, /!areaStatus\.serviceEnabled/);
 });

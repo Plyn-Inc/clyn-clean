@@ -792,7 +792,19 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               <SummaryRow label="시간대" value={timeSlot === "morning" ? "오전" : "오후"} />
             )}
             <SummaryRow label="예약자" value={customerName} />
-            <SummaryRow label="작업 장소" value={[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} />
+            <SummaryRow
+              label="작업 장소"
+              value={`${[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} ${address.trim()}`.trim()}
+            />
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => { setError(null); setStep(1); }}
+                className="min-h-[40px] rounded-full border border-[var(--line)] px-4 text-xs font-semibold text-[var(--navy)]"
+              >
+                주소 수정
+              </button>
+            </div>
             {serviceType !== "사이청소" && serviceType !== "집정리" && (
               <SummaryRow label="입주 상태" value={OCCUPANCY_STATUS_LABEL[occupancyStatus]} />
             )}

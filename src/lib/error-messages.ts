@@ -27,6 +27,8 @@ const CODE_MESSAGES: Record<string, string> = {
   VALIDATION_ERROR: "입력한 예약 정보를 다시 확인해주세요.",
   PRICE_CHANGED: "예약금액이 변경되었습니다. 최신 금액을 다시 확인해주세요.",
   DB_TIMEOUT: "예약 서버 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.",
+  DB_UNAVAILABLE: "예약 서버 연결이 원활하지 않습니다. 잠시 후 다시 시도해주세요.",
+  RESERVATION_CREATE_FAILED: "예약 저장 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요.",
 };
 
 export interface ServerErrorBody {

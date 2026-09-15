@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
-import { DatabaseTimeoutError } from "@/database/connection";
+import { DatabaseTimeoutError, isConnectionError } from "@/database/connection";
 import { z } from "zod";
 import {
   createReservation,
-  computeInstantDiscountEligible,
+  isInstantDiscountCandidate,
   ReservationNotReadyError,
   DateFullyBookedError,
   DateNotAvailableError,
@@ -215,8 +215,9 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 서버에서 할인 자격 직접 계산
-  const eligible = await computeInstantDiscountEligible(data.entryRoute, data.desiredDate, data.timeSlot);
+  // 캘린더 선택 여부만 할인 후보로 잡고 실제 슬롯 가용성은 createReservation의
+  // transaction lock 안에서 한 번만 검증한다. 여기서 캘린더 DB를 중복 조회하지 않는다.
+  const eligible = isInstantDiscountCandidate(data.entryRoute, data.timeSlot);
 
   // 공개 예약 API는 클라이언트 견적값 유무와 관계없이 서버에서 항상 견적 가능 상태를 확인합니다.
   let serverQuote: Awaited<ReturnType<typeof calculateQuote>>;
@@ -271,18 +272,29 @@ export async function POST(req: NextRequest) {
   // ── 서비스 가능지역 검증 ────────────────────────────────────────────────
   // 공식 행정구역 master가 준비되기 전에는 직접 예약을 열지 않는다(B안).
   // 클라이언트 우회 요청도 서버에서 동일하게 차단한다.
-  const { countAreas, isServiceArea } = await import("@/database/repositories/region-repository");
-  const areaMasterCount = await countAreas();
-  if (areaMasterCount === 0) {
+  const { getReservationAreaStatus } = await import("@/database/repositories/region-repository");
+  let areaStatus: { masterReady: boolean; serviceEnabled: boolean };
+  try {
+    areaStatus = await getReservationAreaStatus(data.areaSigunguCode);
+  } catch (e) {
+    if (e instanceof DatabaseTimeoutError || isConnectionError(e)) {
+      return NextResponse.json(
+        { error: "예약 서버 연결이 지연되고 있습니다. 잠시 후 다시 시도해주세요.", code: e instanceof DatabaseTimeoutError ? "DB_TIMEOUT" : "DB_UNAVAILABLE" },
+        { status: 503 }
+      );
+    }
+    throw e;
+  }
+  if (!areaStatus.masterReady) {
     return NextResponse.json(
       {
-        error: "행정구역 데이터가 준비되지 않아 직접 예약을 진행할 수 없습니다. 상담 접수로 진행해주세요.",
+        error: "행정구역 데이터가 준비되지 않아 직접 예약을 진행할 수 없습니다. 잠시 후 다시 시도해주세요.",
         code: "REGION_MASTER_NOT_READY",
       },
-      { status: 409 }
+      { status: 503 }
     );
   }
-  if (!(await isServiceArea(data.areaSigunguCode))) {
+  if (!areaStatus.serviceEnabled) {
     return NextResponse.json(
       {
         error:
@@ -382,8 +394,14 @@ export async function POST(req: NextRequest) {
         { status: 503 }
       );
     }
-    console.error(e);
-    return NextResponse.json({ error: "예약 처리 중 오류가 발생했습니다." }, { status: 500 });
+    if (isConnectionError(e)) {
+      return NextResponse.json(
+        { error: "예약 서버에 연결하지 못했습니다. 잠시 후 다시 시도해주세요.", code: "DB_UNAVAILABLE" },
+        { status: 503 }
+      );
+    }
+    console.error("[reservations] create failed", e);
+    return NextResponse.json({ error: "예약 처리 중 오류가 발생했습니다.", code: "RESERVATION_CREATE_FAILED" }, { status: 500 });
   }
 }
 

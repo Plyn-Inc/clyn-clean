@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { DatabaseTimeoutError, isConnectionError } from "@/database/connection";
 import { z } from "zod";
 import { calculateQuote, getOptionPrices } from "@/lib/pricing";
-import { computeInstantDiscountEligible } from "@/lib/reservations";
+import { isInstantDiscountCandidate } from "@/lib/reservations";
 import { SpecialDayNotSyncedError } from "@/lib/special-days-store";
 import { isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
 import {
@@ -80,29 +81,23 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const activeOptionKeys = new Set((await getOptionPrices()).map((o) => o.option_key));
-  const inactiveSelected = (extraOptions ?? []).find((key) => !activeOptionKeys.has(key));
-  if (inactiveSelected) {
-    return NextResponse.json(
-      { error: "현재 선택할 수 없는 추가 서비스 옵션이 포함되어 있습니다. 옵션을 다시 선택해주세요." },
-      { status: 400 }
-    );
-  }
-
-  let eligible = false;
-  if (
-    entryRoute === "calendar" &&
-    desiredDate &&
-    (timeSlot === "morning" || timeSlot === "afternoon")
-  ) {
-    try {
-      eligible = await computeInstantDiscountEligible("calendar", desiredDate, timeSlot);
-    } catch {
-      eligible = false;
-    }
-  }
+  // 견적 표시 단계에서는 캘린더를 다시 조회하지 않는다. 캘린더에서 선택된 슬롯은
+  // 할인 후보로 표시하고, 최종 예약 transaction에서 실제 가용성을 다시 검증한다.
+  const eligible = isInstantDiscountCandidate(entryRoute, timeSlot);
 
   try {
+    // 현재 고객 UI는 추가옵션을 보내지 않는다. 옵션이 실제 전달된 경우에만 DB를 조회한다.
+    if ((extraOptions?.length ?? 0) > 0) {
+      const activeOptionKeys = new Set((await getOptionPrices()).map((o) => o.option_key));
+      const inactiveSelected = (extraOptions ?? []).find((key) => !activeOptionKeys.has(key));
+      if (inactiveSelected) {
+        return NextResponse.json(
+          { error: "현재 선택할 수 없는 추가 서비스 옵션이 포함되어 있습니다. 옵션을 다시 선택해주세요." },
+          { status: 400 }
+        );
+      }
+    }
+
     const quote = await calculateQuote({
       serviceType,
       houseTypeKey,
@@ -137,7 +132,19 @@ export async function POST(req: NextRequest) {
     if (e instanceof SpecialDayNotSyncedError) {
       return NextResponse.json({ error: e.message, code: e.code }, { status: 400 });
     }
-    console.error(e);
+    if (e instanceof DatabaseTimeoutError) {
+      return NextResponse.json(
+        { error: "견적 서버 응답이 지연되고 있습니다. 다시 시도해주세요.", code: "DB_TIMEOUT" },
+        { status: 503 }
+      );
+    }
+    if (isConnectionError(e)) {
+      return NextResponse.json(
+        { error: "견적 서버에 연결하지 못했습니다. 다시 시도해주세요.", code: "DB_UNAVAILABLE" },
+        { status: 503 }
+      );
+    }
+    console.error("[quote] calculation failed", e);
     return NextResponse.json({ error: "견적 계산 중 오류가 발생했습니다." }, { status: 500 });
   }
 }

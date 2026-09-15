@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
+import { DatabaseTimeoutError, isConnectionError } from "@/database/connection";
 import {
   getReservationByCode,
   revealDepositAccount,
-  releaseExpiredDepositReservations,
   DepositAccountError,
   DEPOSIT_DEADLINE_HOURS,
 } from "@/lib/reservations";
@@ -40,73 +40,80 @@ export async function POST(
     );
   }
 
-  // 입금기한이 지난 예약들을 먼저 정리한다 (별도 스케줄러 없이 lazy 처리)
-  await releaseExpiredDepositReservations();
-
-  const reservation = await getReservationByCode(code);
-  if (!reservation) {
-    return NextResponse.json({ error: "예약을 찾을 수 없습니다." }, { status: 404 });
-  }
-
-  // 본인 확인 — 예약번호만으로 계좌가 노출되지 않도록 연락처를 대조한다
-  if (normalizePhone(reservation.customer_phone) !== normalizePhone(phone)) {
-    return NextResponse.json({ error: "예약 정보가 일치하지 않습니다." }, { status: 403 });
-  }
-
   try {
+    const reservation = await getReservationByCode(code);
+    if (!reservation) {
+      return NextResponse.json({ error: "예약을 찾을 수 없습니다." }, { status: 404 });
+    }
+
+    // 본인 확인 — 예약번호만으로 계좌가 노출되지 않도록 연락처를 대조한다
+    if (normalizePhone(reservation.customer_phone) !== normalizePhone(phone)) {
+      return NextResponse.json({ error: "예약 정보가 일치하지 않습니다." }, { status: 403 });
+    }
+
     // 아직 계좌가 안내되지 않았다면 여기서 전체 검증 + payment 생성이 이뤄진다.
-    // 이미 안내된 예약이면 ALREADY_REVEALED가 발생하므로 기존 정보를 그대로 반환한다.
     if (!reservation.account_revealed_at) {
       await revealDepositAccount(reservation.id);
     }
+
+    const updated = await getReservationByCode(code);
+    const payment = updated ? await findPaymentByReservationId(updated.id) : undefined;
+    if (!updated || !payment) {
+      return NextResponse.json(
+        { error: "예약금 정보를 찾을 수 없습니다.", code: "DEPOSIT_INFO_NOT_FOUND" },
+        { status: 500 }
+      );
+    }
+
+    const bank = await getBankSettings();
+
+    return NextResponse.json({
+      reservationCode: updated.reservation_code,
+      customerName: updated.customer_name,
+      workArea: formatWorkArea({
+        sido: updated.area_sido ?? "",
+        sigungu: updated.area_sigungu ?? "",
+        dong: updated.area_dong ?? "",
+      }),
+      desiredDate: updated.desired_date,
+      timeSlot: updated.time_slot,
+      moveOutTime: updated.move_out_time,
+      moveInTime: updated.move_in_time,
+      totalAmount: updated.final_confirmed_total,
+      depositAmount: updated.deposit_amount_snapshot,
+      balanceAmount: updated.estimated_balance_snapshot,
+      vatNotice: VAT_NOTICE,
+      account: {
+        bankName: bank.bankName,
+        accountNumber: bank.accountNumber,
+        accountHolder: bank.accountHolder,
+      },
+      depositDeadline: payment.payment_due_date,
+      depositDeadlineHours: DEPOSIT_DEADLINE_HOURS,
+      accountRevealedAt: updated.account_revealed_at,
+    });
   } catch (e) {
     if (e instanceof DepositAccountError) {
       const status =
         e.code === "SLOT_TAKEN" || e.code === "SLOT_UNAVAILABLE" ? 409 : 400;
       return NextResponse.json({ error: e.message, code: e.code }, { status });
     }
-    console.error(e);
+    if (e instanceof DatabaseTimeoutError) {
+      return NextResponse.json(
+        { error: "예약금 안내 서버 응답이 지연되고 있습니다. 다시 시도해주세요.", code: "DB_TIMEOUT" },
+        { status: 503 }
+      );
+    }
+    if (isConnectionError(e)) {
+      return NextResponse.json(
+        { error: "예약금 안내 서버에 연결하지 못했습니다. 다시 시도해주세요.", code: "DB_UNAVAILABLE" },
+        { status: 503 }
+      );
+    }
+    console.error("[deposit-account] failed", e);
     return NextResponse.json(
-      { error: "예약금 계좌 안내 중 오류가 발생했습니다." },
+      { error: "예약금 계좌 안내 중 오류가 발생했습니다.", code: "DEPOSIT_ACCOUNT_FAILED" },
       { status: 500 }
     );
   }
-
-  const updated = await getReservationByCode(code);
-  const payment = updated ? await findPaymentByReservationId(updated.id) : undefined;
-  if (!updated || !payment) {
-    return NextResponse.json(
-      { error: "예약금 정보를 찾을 수 없습니다." },
-      { status: 500 }
-    );
-  }
-
-  const bank = await getBankSettings();
-
-  return NextResponse.json({
-    reservationCode: updated.reservation_code,
-    customerName: updated.customer_name,
-    workArea: formatWorkArea({
-      sido: updated.area_sido ?? "",
-      sigungu: updated.area_sigungu ?? "",
-      dong: updated.area_dong ?? "",
-    }),
-    desiredDate: updated.desired_date,
-    timeSlot: updated.time_slot,
-    moveOutTime: updated.move_out_time,
-    moveInTime: updated.move_in_time,
-    // 금액: 총 청소금액 = 예약 선금 + 현장 잔금 (VAT 자동 가산 없음)
-    totalAmount: updated.final_confirmed_total,
-    depositAmount: updated.deposit_amount_snapshot,
-    balanceAmount: updated.estimated_balance_snapshot,
-    vatNotice: VAT_NOTICE,
-    account: {
-      bankName: bank.bankName,
-      accountNumber: bank.accountNumber,
-      accountHolder: bank.accountHolder,
-    },
-    depositDeadline: payment.payment_due_date,
-    depositDeadlineHours: DEPOSIT_DEADLINE_HOURS,
-    accountRevealedAt: updated.account_revealed_at,
-  });
 }
