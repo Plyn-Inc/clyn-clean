@@ -12,6 +12,10 @@ export interface CalendarDayView {
   remaining: number;
   memo: string | null;
   effectiveStatus: CalendarStatus;
+  /** 사이청소(all_day) 예약이 이 날짜를 점유해 보호 중인지 */
+  blockedByAllDay?: boolean;
+  /** 관리자가 수동 재개방했는지 (실제 예약 점유가 우선) */
+  reopened?: boolean;
 }
 
 export interface DaySlotView {
@@ -38,10 +42,23 @@ async function toSlotView(
   const remaining = Math.max(capacity - bookedCount, 0);
   let effectiveStatus: CalendarStatus = adminStatus;
   if (adminStatus === "available" && remaining <= 0) effectiveStatus = "closed";
+
+  // 사이청소(all_day) 보호 — 범위 조회(getSlotCalendarRange)와 동일 규칙.
+  // 관리자가 재개방한 슬롯만 다시 열리며, 실제 예약 점유가 우선한다.
+  const [blockedSet, override] = await Promise.all([
+    calendarRepo.findAllDayBlockedDates(date, date),
+    calendarRepo.findReopenOverride(date, timeSlot),
+  ]);
+  const blockedByAllDay = blockedSet.has(date);
+  const reopened = override?.is_open === 1;
+  if (blockedByAllDay && !reopened) effectiveStatus = "closed";
+
   return {
     date,
     timeSlot,
     status: adminStatus,
+    blockedByAllDay,
+    reopened,
     capacity,
     bookedCount,
     remaining,
@@ -87,10 +104,14 @@ export async function getDaySlotView(date: string): Promise<DaySlotView> {
  * 이후 메모리에서 날짜별 결과를 조립한다.
  */
 export async function getSlotCalendarRange(startDate: string, endDate: string): Promise<DaySlotView[]> {
-  const [rows, activeCounts, defaultCap] = await Promise.all([
+  const [rows, activeCounts, defaultCap, allDayBlocked, reopenOverrides] = await Promise.all([
     calendarRepo.findRange(startDate, endDate),
     calendarRepo.aggregateActiveReservationsInRange(startDate, endDate),
     defaultCapacity(),
+    // 사이청소(all_day) 예약이 점유한 날짜 — 해당 날짜의 오전·오후를 보호한다
+    calendarRepo.findAllDayBlockedDates(startDate, endDate),
+    // 관리자가 수동 재개방한 슬롯 (실제 예약 점유가 override보다 우선)
+    calendarRepo.findReopenOverridesInRange(startDate, endDate),
   ]);
 
   const byDate = new Map<string, calendarRepo.CalendarDayRow[]>();
@@ -124,6 +145,18 @@ export async function getSlotCalendarRange(startDate: string, endDate: string): 
     const remaining = Math.max(capacity - bookedCount, 0);
     let effectiveStatus: CalendarStatus = adminStatus;
     if (adminStatus === "available" && remaining <= 0) effectiveStatus = "closed";
+
+    // ── 사이청소 all_day 보호 ────────────────────────────────────────────
+    // 사이청소는 종일 작업이므로 해당 날짜의 오전·오후를 기본적으로 막는다.
+    // 관리자가 수동 재개방(override)한 슬롯만 다시 열린다.
+    // 단, 실제 예약 점유(remaining <= 0)는 override보다 우선한다.
+    const blockedByAllDay = allDayBlocked.has(date);
+    const override = reopenOverrides.get(`${date}|${timeSlot}`);
+    const reopened = override?.is_open === 1;
+    if (blockedByAllDay && !reopened) {
+      effectiveStatus = "closed";
+    }
+
     return {
       date,
       timeSlot,
@@ -133,6 +166,8 @@ export async function getSlotCalendarRange(startDate: string, endDate: string): 
       remaining,
       memo: slotRow?.memo ?? allDayRow?.memo ?? null,
       effectiveStatus,
+      blockedByAllDay,
+      reopened,
     };
   }
 

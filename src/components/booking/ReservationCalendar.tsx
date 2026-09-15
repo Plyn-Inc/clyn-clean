@@ -25,6 +25,8 @@ interface PublicDay {
   isHoliday: boolean;
   isSonEomneunDay: boolean;
   badge: string | null;
+  /** 사이청소 예약이 점유해 오전·오후가 함께 막힌 날짜 */
+  allDayBlocked?: boolean;
   morning: PublicSlot;
   afternoon: PublicSlot;
 }
@@ -32,10 +34,17 @@ interface PublicDay {
 export type SelectedSlot = { date: string; timeSlot: "morning" | "afternoon" };
 
 /** 공개상태별 슬롯 스타일 — 수량 대신 상태 문구만 표시한다 */
+/**
+ * 슬롯 3색 상태.
+ *   예약가능    — 초록 계열
+ *   예약진행 중 — 노랑/주황 계열
+ *   예약완료    — 회색 계열
+ * 공휴일명·손없는날 텍스트는 슬롯에 표시하지 않는다.
+ */
 const SLOT_STYLE: Record<PublicSlotStatus, string> = {
-  "예약가능": "bg-[var(--navy)] text-white hover:bg-[var(--navy-deep)] cursor-pointer",
-  "예약진행 중": "bg-[#F3F4F6] text-[#667085] cursor-not-allowed",
-  "예약완료": "bg-[#E5E7EB] text-[#6B7280] cursor-not-allowed",
+  "예약가능": "bg-[#E3F5EE] text-[#1FA37A] hover:bg-[#1FA37A] hover:text-white cursor-pointer",
+  "예약진행 중": "bg-[#FBE9D3] text-[#C77C1E] cursor-not-allowed",
+  "예약완료": "bg-[#EEF0F3] text-[#9AA3AF] cursor-not-allowed",
 };
 
 /** 캘린더 칸에 들어갈 짧은 라벨 (수량 없음) */
@@ -76,7 +85,7 @@ export default function ReservationCalendar({
 
   useEffect(() => {
     let cancelled = false;
-    const { start, end } = getMonthRangeKST(cursor.year, cursor.month);
+    const { start, end } = getMonthRangeKST(cursor.year, cursor.month + 1);
     fetch(`/api/calendar?start=${start}&end=${end}`)
       .then(async (r) => {
         // HTTP 오류를 정상 응답처럼 처리하지 않는다
@@ -208,10 +217,11 @@ export default function ReservationCalendar({
             const isSelAfternoon = selectedSlot?.date === dateStr && selectedSlot.timeSlot === "afternoon";
             const day = days[dateStr];
             // 날짜 숫자 색으로 토/일/공휴일을 구분한다 (가격 문구 없음)
+            // 일요일·공휴일은 빨강, 토요일은 파랑. 나머지는 기본색.
             const dateColor = day?.isHoliday || day?.isSunday
-              ? "text-[var(--rose)]"
+              ? "text-[#D14343]"
               : day?.isSaturday
-                ? "text-[var(--mint)]"
+                ? "text-[#2E90D9]"
                 : "text-[var(--ink)]";
 
             if (isPast || isBeyondWindow) {
@@ -228,14 +238,20 @@ export default function ReservationCalendar({
 
             return (
               <div key={dateStr} className="rounded-lg p-1 text-center">
-                <div className="relative mb-1 pt-2">
-                  {day?.isSonEomneunDay ? (
+                <p className={`mb-0.5 text-xs font-medium ${dateColor}`}>{dateNum}</p>
+                {/*
+                  손없는날은 텍스트 대신 파란 점으로만 표시한다.
+                  공휴일은 날짜 숫자 색으로 구분하며 별도 라벨을 넣지 않는다.
+                  가격 가산과 연결한 문구는 노출하지 않는다.
+                */}
+                <div className="mb-1 flex h-[6px] items-center justify-center">
+                  {day?.isSonEomneunDay && (
                     <span
+                      className="inline-block h-1.5 w-1.5 rounded-full bg-[#2E90D9]"
+                      title="손없는날"
                       aria-label="손없는날"
-                      className="absolute left-1/2 top-0 h-1.5 w-1.5 -translate-x-1/2 rounded-full bg-[var(--mint)]"
                     />
-                  ) : null}
-                  <p className={`text-xs font-medium ${dateColor}`}>{dateNum}</p>
+                  )}
                 </div>
 
                 <button
@@ -269,11 +285,20 @@ export default function ReservationCalendar({
         </div>
       )}
 
-      {/* 범례 — 예약 상태 3종만 표시. 주말/공휴일/손없는날은 날짜 자체로 구분한다. */}
+      {/* 범례 — 3종 공개상태 */}
       <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2 border-t border-[var(--line)] pt-3 text-xs text-[var(--ink-soft)]">
-        <Legend color="bg-[var(--navy)]" label="예약가능" />
-        <Legend color="bg-[#F3F4F6]" label="예약진행 중" />
-        <Legend color="bg-[#E5E7EB]" label="예약완료" />
+        <Legend color="bg-[#E3F5EE]" label="예약가능" />
+        <Legend color="bg-[#FBE9D3]" label="예약진행 중" />
+        <Legend color="bg-[#EEF0F3]" label="예약완료" />
+        <span className="flex items-center gap-1.5">
+          <span className="text-[#D14343]">●</span> 일요일 · 공휴일
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="text-[#2E90D9]">●</span> 토요일
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#2E90D9]" /> 손없는날
+        </span>
       </div>
     </div>
   );

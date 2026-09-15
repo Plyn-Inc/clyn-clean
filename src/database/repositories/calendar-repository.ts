@@ -183,3 +183,109 @@ export async function aggregateConfirmedReservationsInRange(
   for (const r of rows) map.set(`${r.desired_date}|${r.time_slot}`, Number(r.c));
   return map;
 }
+
+// ---------------------------------------------------------------------------
+// 사이청소 all_day 보호 / 슬롯 재개방 override
+// ---------------------------------------------------------------------------
+
+export interface SlotReopenOverrideRow {
+  id: number;
+  date: string;
+  time_slot: string;
+  is_open: number;
+  reason: string | null;
+  source_reservation_id: number | null;
+  updated_by_admin_id: number | null;
+  updated_at: string;
+}
+
+/** 범위 내 재개방 override를 "YYYY-MM-DD|slot" 키 Map으로 반환 */
+export async function findReopenOverridesInRange(
+  start: string,
+  end: string
+): Promise<Map<string, SlotReopenOverrideRow>> {
+  const rows = await queryRows<SlotReopenOverrideRow>(
+    `SELECT * FROM calendar_slot_reopen_overrides WHERE date >= ? AND date <= ?`,
+    [start, end]
+  );
+  return new Map(rows.map((r) => [`${r.date}|${r.time_slot}`, r]));
+}
+
+export function findReopenOverride(
+  date: string,
+  timeSlot: string
+): Promise<SlotReopenOverrideRow | undefined> {
+  return queryRow<SlotReopenOverrideRow>(
+    `SELECT * FROM calendar_slot_reopen_overrides WHERE date = ? AND time_slot = ?`,
+    [date, timeSlot]
+  );
+}
+
+/**
+ * 관리자 슬롯 재개방 지정.
+ *
+ * 실제 예약 점유가 override보다 우선한다. 이 레코드는 "사이청소 all_day 보호"만
+ * 해제할 뿐, 이미 확정된 예약이 있는 슬롯을 열지 않는다.
+ */
+export function upsertReopenOverride(input: {
+  date: string;
+  timeSlot: "morning" | "afternoon";
+  isOpen: boolean;
+  reason?: string | null;
+  sourceReservationId?: number | null;
+  adminId?: number | null;
+}): Promise<void> {
+  return execute(
+    `INSERT INTO calendar_slot_reopen_overrides
+       (date, time_slot, is_open, reason, source_reservation_id, updated_by_admin_id, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT (date, time_slot) DO UPDATE SET
+       is_open = EXCLUDED.is_open,
+       reason = EXCLUDED.reason,
+       source_reservation_id = EXCLUDED.source_reservation_id,
+       updated_by_admin_id = EXCLUDED.updated_by_admin_id,
+       updated_at = datetime('now')`,
+    [
+      input.date,
+      input.timeSlot,
+      input.isOpen ? 1 : 0,
+      input.reason ?? null,
+      input.sourceReservationId ?? null,
+      input.adminId ?? null,
+    ]
+  );
+}
+
+export function deleteReopenOverride(date: string, timeSlot: string): Promise<void> {
+  return execute(
+    `DELETE FROM calendar_slot_reopen_overrides WHERE date = ? AND time_slot = ?`,
+    [date, timeSlot]
+  );
+}
+
+/**
+ * 범위 내 사이청소(all_day) 예약이 점유한 날짜를 반환한다.
+ *
+ * 사이청소는 종일 작업이므로 해당 날짜의 오전·오후를 모두 보호한다.
+ */
+export async function findAllDayBlockedDates(start: string, end: string): Promise<Set<string>> {
+  const rows = await queryRows<{ desired_date: string }>(
+    `SELECT DISTINCT rs.desired_date
+       FROM reservations rs
+      WHERE rs.desired_date >= ? AND rs.desired_date <= ?
+        AND rs.time_slot = 'all_day'
+        AND rs.reservation_status IN ('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')
+        AND NOT (
+          rs.reservation_status IN ('awaiting_deposit','approved_awaiting_deposit')
+          AND EXISTS (
+            SELECT 1 FROM payments p
+             WHERE p.reservation_id = rs.id
+               AND p.payment_status = 'pending'
+               AND p.payment_due_date IS NOT NULL
+               AND p.payment_due_date < datetime('now')
+          )
+        )`,
+    [start, end]
+  );
+  return new Set(rows.map((r) => r.desired_date));
+}

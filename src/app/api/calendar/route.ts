@@ -65,16 +65,17 @@ export async function GET(req: NextRequest) {
         isHoliday: special?.isHoliday ?? false,
         isSonEomneunDay: special?.isSonEomneunDay ?? false,
         badge: special?.customerBadge ?? null,
-        // 특수일 캐시 동기화 여부는 진단용으로만 노출한다.
-        // 예약 가능 여부는 실제 슬롯/예약 상태로만 판단한다.
-        specialDaySynced: !!special && special.source !== "generator",
+        // 캐시가 없는 날짜는 예약 선택을 허용하지 않는다 (일반일로 간주 금지)
+        specialDaySynced: !!special,
+        // 사이청소 예약이 점유한 날짜는 오전·오후가 함께 막힌다
+        allDayBlocked: day.morning.blockedByAllDay === true,
         morning: {
           publicStatus: toPublicSlotStatus({
             effectiveStatus: day.morning.effectiveStatus,
             remaining: day.morning.remaining,
             hasConfirmed: morningConfirmed,
           }),
-          selectable: day.morning.effectiveStatus === "available" && day.morning.remaining > 0,
+          selectable: !!special && day.morning.effectiveStatus === "available" && day.morning.remaining > 0,
           consultRequired: day.morning.effectiveStatus === "consult_required",
         },
         afternoon: {
@@ -83,7 +84,7 @@ export async function GET(req: NextRequest) {
             remaining: day.afternoon.remaining,
             hasConfirmed: afternoonConfirmed,
           }),
-          selectable: day.afternoon.effectiveStatus === "available" && day.afternoon.remaining > 0,
+          selectable: !!special && day.afternoon.effectiveStatus === "available" && day.afternoon.remaining > 0,
           consultRequired: day.afternoon.effectiveStatus === "consult_required",
         },
       };

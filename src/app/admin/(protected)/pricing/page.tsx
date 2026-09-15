@@ -1,112 +1,115 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { HOUSE_TYPES_FIXED, HOUSE_SIZES_APARTMENT, EXTRA_OPTIONS } from "@/lib/types";
-
-// 고정 상품 키 목록 (inputs.ts와 동일한 source of truth)
-const FIXED_HOUSE_KEYS = [
-  ...HOUSE_TYPES_FIXED,
-  ...HOUSE_SIZES_APARTMENT.map((n) => `${n}평`),
-];
+import { SERVICE_TYPES, serviceLabel } from "@/lib/types";
 
 interface PriceRule {
   id: number;
   service_type: string;
+  product_key: string | null;
   note: string | null;
   base_price: number;
-  is_active: number;
-}
-
-interface OptionPrice {
-  id: number;
-  option_key: string;
-  option_label: string;
-  price: number;
+  deposit_amount: number;
   is_active: number;
 }
 
 type Msg = { type: "ok" | "err"; text: string } | null;
 
+/**
+ * 가격 관리.
+ *
+ * 서비스별 독립 가격 모델이다. 사이청소/거주청소는 입주청소의 배수가 아니라
+ * 각자의 price_rules row를 가지며, 여기서 개별 수정한다.
+ */
 export default function AdminPricingPage() {
   const [rules, setRules] = useState<PriceRule[]>([]);
-  const [options, setOptions] = useState<OptionPrice[]>([]);
+  const [surcharge, setSurcharge] = useState("");
+  const [tab, setTab] = useState<string>(SERVICE_TYPES[0]);
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<Msg>(null);
-  const [saving, setSaving] = useState<string | null>(null); // 저장 중인 key
+  const [saving, setSaving] = useState<string | null>(null);
 
   function load() {
-    setLoading(true);
-    fetch("/api/admin/price-rules")
-      .then((r) => r.json())
-      .then((data) => {
-        setRules(data.rules || []);
-        setOptions(data.options || []);
+    Promise.all([
+      fetch("/api/admin/price-rules").then((r) => r.json()),
+      fetch("/api/admin/settings").then((r) => r.json()),
+    ])
+      .then(([p, s]) => {
+        setRules(p.rules ?? []);
+        setSurcharge(String(s.settings?.holiday_surcharge ?? "30000"));
+        setLoading(false);
       })
-      .finally(() => setLoading(false));
+      .catch(() => setLoading(false));
   }
 
   useEffect(() => {
     let cancelled = false;
-    fetch("/api/admin/price-rules")
-      .then((r) => r.json())
-      .then((data) => {
+    void Promise.resolve().then(async () => {
+      try {
+        const [p, s] = await Promise.all([
+          fetch("/api/admin/price-rules").then((r) => r.json()),
+          fetch("/api/admin/settings").then((r) => r.json()),
+        ]);
         if (cancelled) return;
-        setRules(data.rules || []);
-        setOptions(data.options || []);
+        setRules(p.rules ?? []);
+        setSurcharge(String(s.settings?.holiday_surcharge ?? "30000"));
         setLoading(false);
-      })
-      .catch(() => { if (!cancelled) setLoading(false); });
+      } catch {
+        if (!cancelled) setLoading(false);
+      }
+    });
     return () => { cancelled = true; };
   }, []);
 
-  async function saveRule(note: string, price: number, isActive: boolean) {
-    const existing = rules.find((r) => r.service_type === "입주청소" && r.note === note);
-    setSaving(note);
+  async function saveRule(rule: PriceRule, basePrice: number, deposit: number, active: boolean) {
+    setSaving(`${rule.service_type}:${rule.product_key}`);
     setMsg(null);
-    const body = {
-      type: "rule",
-      id: existing?.id,
-      serviceType: "입주청소",
-      areaMin: 0,
-      areaMax: null,
-      basePrice: price,
-      isActive,
-      note,
-    };
     const res = await fetch("/api/admin/price-rules", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify({
+        type: "rule",
+        id: rule.id,
+        serviceType: rule.service_type,
+        productKey: rule.product_key,
+        areaMin: 0,
+        areaMax: null,
+        basePrice,
+        depositAmount: deposit,
+        isActive: active,
+        note: rule.note ?? rule.product_key,
+      }),
     });
     const data = await res.json();
     setSaving(null);
-    if (res.ok) { setMsg({ type: "ok", text: `${note} 저장 완료` }); load(); }
+    if (res.ok) { setMsg({ type: "ok", text: "저장했습니다." }); load(); }
     else setMsg({ type: "err", text: data.error || "저장 실패" });
   }
 
-  async function saveOption(key: string, price: number, isActive: boolean) {
-    setSaving(key);
+  async function saveSurcharge() {
+    setSaving("surcharge");
     setMsg(null);
-    const res = await fetch("/api/admin/price-rules", {
+    const res = await fetch("/api/admin/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ type: "option", optionKey: key, price, isActive }),
+      body: JSON.stringify({ holiday_surcharge: surcharge }),
     });
-    const data = await res.json();
     setSaving(null);
-    if (res.ok) { setMsg({ type: "ok", text: "옵션 저장 완료" }); load(); }
-    else setMsg({ type: "err", text: data.error || "저장 실패" });
+    if (res.ok) setMsg({ type: "ok", text: "휴일 가산금을 저장했습니다." });
+    else setMsg({ type: "err", text: "저장 실패" });
   }
 
   if (loading) return <p className="text-sm text-[var(--ink-soft)]">불러오는 중...</p>;
 
+  const tabRules = rules.filter((r) => r.service_type === tab && r.product_key);
+
   return (
-    <div className="max-w-2xl space-y-10">
+    <div className="max-w-3xl space-y-8">
       <div>
-        <h1 className="font-display text-xl font-bold">가격 설정</h1>
-        <p className="mt-1.5 text-sm text-[var(--ink-soft)]">
-          입주청소 기준가격을 수정하면 사이청소(×1.5)·거주청소(×1.1)에 자동 반영됩니다.
-          가격 변경은 새 예약에만 영향을 주며 기존 예약 Snapshot은 변경되지 않습니다.
+        <h1 className="font-display text-xl font-bold">가격 관리</h1>
+        <p className="mt-1.5 text-sm leading-relaxed text-[var(--ink-soft)]">
+          서비스별로 가격이 독립 관리됩니다. 사이청소·거주청소는 입주청소 가격의 배수가 아니므로
+          각 서비스에서 직접 수정해야 합니다. 가격 변경은 신규 예약에만 적용되며 기존 예약 금액은 바뀌지 않습니다.
         </p>
       </div>
 
@@ -116,130 +119,111 @@ export default function AdminPricingPage() {
         </div>
       )}
 
-      {/* 입주청소 기준가격 */}
-      <section>
-        <h2 className="mb-4 font-display text-base font-bold">입주청소 기준가격</h2>
-        <p className="mb-4 text-xs text-[var(--ink-soft)]">
-          사이청소 = 기준가 × 1.5　　거주청소 = 기준가 × 1.1
+      {/* 휴일 가산금 */}
+      <section className="rounded-2xl border border-[var(--line)] bg-white p-5">
+        <p className="text-sm font-semibold">휴일 가산금</p>
+        <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">
+          일요일 또는 공휴일 예약에 1회 가산됩니다. 토요일과 손없는날에는 가산하지 않습니다.
+          조건이 겹쳐도 중복 가산되지 않습니다.
         </p>
-        <div className="space-y-2">
-          {FIXED_HOUSE_KEYS.map((key) => {
-            const rule = rules.find((r) => r.service_type === "입주청소" && r.note === key);
-            return (
-              <HouseRow
-                key={key}
-                label={key}
-                defaultPrice={rule?.base_price ?? 0}
-                defaultActive={rule ? rule.is_active === 1 : true}
-                isSaving={saving === key}
-                onSave={(price, active) => saveRule(key, price, active)}
-              />
-            );
-          })}
+        <div className="mt-3 flex gap-2">
+          <input
+            type="number"
+            min={0}
+            value={surcharge}
+            onChange={(e) => setSurcharge(e.target.value)}
+            className="w-40 rounded-lg border border-[var(--line)] px-3 py-2 text-sm"
+          />
+          <span className="self-center text-xs text-[var(--ink-soft)]">원</span>
+          <button
+            disabled={saving === "surcharge"}
+            onClick={saveSurcharge}
+            className="rounded-lg bg-[var(--navy)] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
+          >
+            저장
+          </button>
         </div>
       </section>
 
-      {/* 추가 옵션 */}
+      {/* 서비스 탭 */}
       <section>
-        <h2 className="mb-4 font-display text-base font-bold">추가 서비스 옵션</h2>
-        <p className="mb-4 text-xs text-[var(--ink-soft)]">
-          0원 = 상담 후 확정. 고객 견적화면에서 &quot;작업 전 금액 안내&quot;로 표시됩니다.
-        </p>
-        <div className="space-y-2">
-          {EXTRA_OPTIONS.map((opt) => {
-            const row = options.find((o) => o.option_key === opt.key);
-            return (
-              <OptionRow
-                key={opt.key}
-                optKey={opt.key}
-                label={opt.label}
-                defaultPrice={row?.price ?? 0}
-                defaultActive={row ? row.is_active === 1 : true}
-                isSaving={saving === opt.key}
-                onSave={(price, active) => saveOption(opt.key, price, active)}
-              />
-            );
-          })}
+        <div className="flex flex-wrap gap-2">
+          {SERVICE_TYPES.map((s) => (
+            <button
+              key={s}
+              onClick={() => setTab(s)}
+              className={`rounded-full border px-4 py-2 text-xs font-medium ${
+                tab === s
+                  ? "border-[var(--navy)] bg-[var(--navy)] text-white"
+                  : "border-[var(--line)] text-[var(--ink-soft)]"
+              }`}
+            >
+              {serviceLabel(s)}
+            </button>
+          ))}
         </div>
+
+        {tabRules.length === 0 ? (
+          <p className="mt-5 text-sm text-[var(--ink-soft)]">
+            {serviceLabel(tab)} 가격 항목이 없습니다.
+          </p>
+        ) : (
+          <div className="mt-5 space-y-2">
+            {tabRules.map((rule) => (
+              <PriceRow
+                key={rule.id}
+                rule={rule}
+                isSaving={saving === `${rule.service_type}:${rule.product_key}`}
+                onSave={(p, d, a) => saveRule(rule, p, d, a)}
+              />
+            ))}
+          </div>
+        )}
       </section>
     </div>
   );
 }
 
-function HouseRow({
-  label, defaultPrice, defaultActive, isSaving, onSave,
+function PriceRow({
+  rule, isSaving, onSave,
 }: {
-  label: string;
-  defaultPrice: number;
-  defaultActive: boolean;
+  rule: PriceRule;
   isSaving: boolean;
-  onSave: (price: number, active: boolean) => void;
+  onSave: (basePrice: number, deposit: number, active: boolean) => void;
 }) {
-  const [price, setPrice] = useState(String(defaultPrice));
-  const [active, setActive] = useState(defaultActive);
+  const [price, setPrice] = useState(String(rule.base_price));
+  const [deposit, setDeposit] = useState(String(rule.deposit_amount ?? 0));
+  const [active, setActive] = useState(rule.is_active === 1);
+
+  const label = rule.product_key === "40평" ? "40평 이상" : rule.note || rule.product_key || "-";
 
   return (
-    <div className="flex items-center gap-3 rounded-xl border border-[var(--line)] bg-white px-4 py-3">
-      <span className="w-24 shrink-0 text-sm font-medium">{label}</span>
-      <input
-        type="number"
-        value={price}
-        onChange={(e) => setPrice(e.target.value)}
-        className="w-32 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm focus:border-[var(--mint)] focus:outline-none"
-        placeholder="0"
-        min={0}
-      />
-      <span className="text-xs text-[var(--ink-soft)]">원</span>
-      <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+    <div className="flex flex-wrap items-center gap-3 rounded-xl border border-[var(--line)] bg-white px-4 py-3">
+      <span className="w-28 shrink-0 text-sm font-medium">{label}</span>
+      <label className="flex items-center gap-1.5 text-xs text-[var(--ink-soft)]">
+        가격
+        <input
+          type="number" min={0} value={price} onChange={(e) => setPrice(e.target.value)}
+          className="w-28 rounded-lg border border-[var(--line)] px-2 py-1.5 text-sm"
+        />
+      </label>
+      <label className="flex items-center gap-1.5 text-xs text-[var(--ink-soft)]">
+        예약금
+        <input
+          type="number" min={0} value={deposit} onChange={(e) => setDeposit(e.target.value)}
+          className="w-28 rounded-lg border border-[var(--line)] px-2 py-1.5 text-sm"
+        />
+      </label>
+      <label className="flex items-center gap-1.5 text-xs">
         <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
         활성
       </label>
       <button
         disabled={isSaving}
-        onClick={() => onSave(Number(price) || 0, active)}
-        className="ml-auto rounded-lg bg-[var(--navy)] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 hover:opacity-90"
+        onClick={() => onSave(Number(price) || 0, Number(deposit) || 0, active)}
+        className="ml-auto rounded-lg bg-[var(--navy)] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
       >
         {isSaving ? "저장 중..." : "저장"}
-      </button>
-    </div>
-  );
-}
-
-function OptionRow({
-  label, defaultPrice, defaultActive, isSaving, onSave,
-}: {
-  optKey: string;
-  label: string;
-  defaultPrice: number;
-  defaultActive: boolean;
-  isSaving: boolean;
-  onSave: (price: number, active: boolean) => void;
-}) {
-  const [price, setPrice] = useState(String(defaultPrice));
-  const [active, setActive] = useState(defaultActive);
-
-  return (
-    <div className="flex items-center gap-3 rounded-xl border border-[var(--line)] bg-white px-4 py-3">
-      <span className="flex-1 text-sm">{label}</span>
-      <input
-        type="number"
-        value={price}
-        onChange={(e) => setPrice(e.target.value)}
-        className="w-28 rounded-lg border border-[var(--line)] px-3 py-1.5 text-sm focus:border-[var(--mint)] focus:outline-none"
-        placeholder="0 = 상담후확정"
-        min={0}
-      />
-      <span className="text-xs text-[var(--ink-soft)]">원</span>
-      <label className="flex items-center gap-1.5 text-xs cursor-pointer">
-        <input type="checkbox" checked={active} onChange={(e) => setActive(e.target.checked)} />
-        활성
-      </label>
-      <button
-        disabled={isSaving}
-        onClick={() => onSave(Number(price) || 0, active)}
-        className="rounded-lg bg-[var(--navy)] px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50 hover:opacity-90"
-      >
-        {isSaving ? "..." : "저장"}
       </button>
     </div>
   );

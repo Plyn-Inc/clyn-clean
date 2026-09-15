@@ -110,10 +110,9 @@ export async function POST(req: NextRequest) {
       hasPet,
     });
 
-    if (
-      serviceType !== "집정리" &&
-      (quote.basePrice <= 0 || (houseTypeKey !== "40평" && !quote.priceConfirmed))
-    ) {
+    // 가격표가 없거나 관리자가 비활성화한 상품은 임의 가격을 만들지 않고 차단한다.
+    // 40평 이상도 시작가 row가 비활성이면 표시할 금액이 없다.
+    if (!quote.productAvailable) {
       return NextResponse.json(
         { error: "현재 선택한 주택유형은 온라인 견적이 비활성화되어 있습니다." },
         { status: 400 }

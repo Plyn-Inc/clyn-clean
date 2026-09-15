@@ -197,8 +197,19 @@ export interface Reservation {
   account_revealed_at: string | null;
   deposit_expired_at: string | null;
   auto_released: number;
-  /** 반려동물 있음 (1) — 상담 전환 판정. JSON 파싱이 아닌 정식 컬럼 */
+  /** @deprecated 반려동물 상담 전환 폐지 — 신규 예약은 항상 0 */
   has_pet: number;
+  // --- 20260914 개편: 서비스별 독립 가격 snapshot ---
+  product_key: string | null;
+  holiday_surcharge_snapshot: number;
+  total_amount_snapshot: number | null;
+  // --- 사이청소 전용 시간 ---
+  move_out_time: string | null;
+  move_in_time: string | null;
+  // --- 행정구역 code snapshot ---
+  area_sido_code: string | null;
+  area_sigungu_code: string | null;
+  area_dong_code: string | null;
   /** 날짜 조건 가격 보정 내부 감사용 (고객 미노출) */
   date_adjustment_applied: number;
   date_adjustment_amount: number;
@@ -318,7 +329,7 @@ export interface Post {
  */
 export const SERVICE_TYPE_LABEL: Record<string, string> = {
   "입주청소": "입주청소",
-  "사이청소": "사이청소",
+  "사이청소": "당일 이사 사이청소",
   "거주청소": "거주청소",
   "집정리": "집정리",
 };

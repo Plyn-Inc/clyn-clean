@@ -37,6 +37,8 @@ const ruleSchema = z.object({
   depositAmount: z.number().min(0).max(MAX_PRICE).finite().optional(),
   isActive: z.boolean().optional().default(true),
   note: z.string().max(200).trim().optional().nullable(),
+  /** 상품 키 — 서비스별 독립 가격 모델의 조회 기준 */
+  productKey: z.string().max(50).trim().optional().nullable(),
 }).superRefine((data, ctx) => {
   if (data.areaMax != null && data.areaMax < data.areaMin) {
     ctx.addIssue({
@@ -85,18 +87,23 @@ export async function POST(req: NextRequest) {
       }
 
       const { id: editId, serviceType, basePrice, depositAmount, isActive, note } = parsed.data;
-      if (serviceType !== "입주청소" || !note || !FIXED_HOUSE_KEYS.has(note)) {
+      // 서비스별 독립 가격 모델 — product_key가 상품 식별자다.
+      // 입주청소뿐 아니라 사이청소/거주청소/집정리도 각자 수정할 수 있다.
+      const productKey = parsed.data.productKey ?? note ?? null;
+      if (!productKey) {
+        return NextResponse.json({ error: "상품 키가 필요합니다." }, { status: 400 });
+      }
+
+      const allRules = await listPriceRules();
+      const existing = allRules.find(
+        (r) => r.service_type === serviceType && (r.product_key ?? r.note) === productKey
+      );
+      if (!existing && !FIXED_HOUSE_KEYS.has(productKey)) {
         return NextResponse.json(
-          { error: "가격 설정은 등록된 입주청소 고정 상품만 수정할 수 있습니다." },
+          { error: "등록된 상품만 수정할 수 있습니다." },
           { status: 400 }
         );
       }
-
-      // 현재 가격 모델은 area 구간이 아니라 note의 고정 상품 key가 source of truth입니다.
-      // 과거 구간 중복검사는 고정 상품들이 모두 0~무한 구간을 쓰는 현재 모델과 충돌하므로 사용하지 않습니다.
-      const existing = (await listPriceRules()).find(
-        (r) => r.service_type === "입주청소" && r.note === note
-      );
       const targetId = editId ?? existing?.id;
 
       // 예약금은 총 청소금액을 넘을 수 없다 (예약금은 총액에 포함되는 금액).
@@ -116,13 +123,14 @@ export async function POST(req: NextRequest) {
 
       await upsertPriceRule({
         id: targetId,
-        service_type: "입주청소",
+        service_type: serviceType,
         area_min: 0,
         area_max: null,
         base_price: nextBase,
         deposit_amount: nextDeposit,
+        product_key: productKey,
         is_active: isActive !== false ? 1 : 0,
-        note,
+        note: note ?? productKey,
       });
     } else if (body.type === "option") {
       const parsed = optionSchema.safeParse(body);

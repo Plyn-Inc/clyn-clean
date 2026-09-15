@@ -12,8 +12,8 @@
  */
 import * as repo from "@/database/repositories/special-day-repository";
 import { withTransaction, getDatabaseBackend } from "@/database/connection";
-import { getSettings, setSetting } from "./settings";
-import { DATE_ADJUSTMENT_AMOUNT } from "./types";
+import { getSettings, setSetting, getHolidaySurcharge } from "./settings";
+
 import { bookingMinDate, bookingMaxDate, BOOKING_WINDOW_DAYS } from "./booking-window";
 import { fetchHolidays, fetchLunarDay, fetchLunarMonth, isKasiConfigured, KasiUnavailableError } from "./kasi";
 // backfill 보조 — KASI를 쓸 수 없는 환경(로컬/테스트)에서만 사용한다
@@ -94,44 +94,18 @@ export async function getSpecialDay(dateStr: string): Promise<SpecialDayInfo> {
   return toInfo(dateStr, row);
 }
 
-/**
- * 범위 조회 — 고객 캘린더 표시용.
- *
- * DB 캐시(KASI/manual)가 있으면 그 값을 우선한다. 아직 동기화되지 않은 날짜는
- * 현재 예약기간을 커버하는 정적 보조데이터로 시각 정보만 채운다. 이 fallback은
- * 달력의 공휴일/손없는날 표시를 위한 것이며, 가격 확정(getSpecialDay)은 계속
- * Production fail-closed 정책을 유지한다.
- */
+/** 범위 조회 — 캐시에 있는 날짜만 Map으로 반환 (캘린더 렌더링용) */
 export async function getSpecialDayRange(
   start: string,
   end: string
 ): Promise<Map<string, SpecialDayInfo>> {
   const rows = await repo.findSpecialDaysInRange(start, end);
   const allowGenerator = isGeneratorFallbackAllowed();
-  const out = new Map<string, SpecialDayInfo>(
+  return new Map(
     rows
       .filter((r) => allowGenerator || r.source !== "generator")
       .map((r) => [r.date, toInfo(r.date, r)])
   );
-
-  for (let cur = start; cur <= end; cur = addDays(cur, 1)) {
-    if (out.has(cur) || !staticYearSupported(cur)) continue;
-    const meta = staticMeta(cur);
-    const wd = weekdayOf(cur);
-    out.set(cur, {
-      date: cur,
-      isWeekend: meta.isWeekend,
-      isSaturday: wd === 6,
-      isSunday: wd === 0,
-      isHoliday: meta.isHoliday,
-      holidayName: meta.holidayName,
-      isSonEomneunDay: meta.isSonEomneunDay,
-      customerBadge: meta.customerBadge,
-      source: "generator",
-    });
-  }
-
-  return out;
 }
 
 /**
@@ -144,9 +118,53 @@ export async function getDateAdjustmentFromStore(
   dateStr: string | null | undefined
 ): Promise<number> {
   if (!dateStr) return 0;
-  const info = await getSpecialDay(dateStr);
-  const applies = info.isWeekend || info.isHoliday || info.isSonEomneunDay;
-  return applies ? DATE_ADJUSTMENT_AMOUNT : 0;
+  const surcharge = await getHolidaySurcharge();
+  // 토요일 / 손없는날은 가산하지 않는다. 일요일 또는 공휴일에만 1회 가산한다.
+  let info: SpecialDayInfo;
+  try {
+    info = await getSpecialDay(dateStr);
+  } catch {
+    // 공휴일 정보를 확인할 수 없으면 가산하지 않고 기본가격으로 진행한다.
+    // (특수일 조회 실패가 예약 자체를 막지 않는다 — 요구사항 25)
+    const wd = weekdayOf(dateStr);
+    return wd === 0 ? surcharge : 0;
+  }
+  const applies = info.isSunday || info.isHoliday;
+  return applies ? surcharge : 0;
+}
+
+/**
+ * 날짜 가산 판정 결과 — 고객에게 사유를 노출하지 않고 내부 감사에만 사용한다.
+ */
+export interface DateSurchargeResult {
+  amount: number;
+  /** 공휴일 정보 조회에 성공했는지 (실패해도 예약은 진행된다) */
+  specialDayAvailable: boolean;
+}
+
+/**
+ * 휴일 가산금을 판정한다. 공휴일 캐시 조회가 실패해도 예외를 던지지 않는다.
+ *
+ * 실패 시:
+ *   - 일요일은 서버 날짜 계산으로 판정 가능하므로 가산한다
+ *   - 공휴일 여부는 알 수 없으므로 가산하지 않고 기본가격으로 진행한다
+ *   - specialDayAvailable=false로 관리자 알림 대상임을 표시한다
+ */
+export async function resolveDateSurcharge(
+  dateStr: string | null | undefined
+): Promise<DateSurchargeResult> {
+  if (!dateStr) return { amount: 0, specialDayAvailable: true };
+  const surcharge = await getHolidaySurcharge();
+  try {
+    const info = await getSpecialDay(dateStr);
+    return {
+      amount: info.isSunday || info.isHoliday ? surcharge : 0,
+      specialDayAvailable: true,
+    };
+  } catch {
+    const wd = weekdayOf(dateStr);
+    return { amount: wd === 0 ? surcharge : 0, specialDayAvailable: false };
+  }
 }
 
 /** 캐시가 해당 날짜를 커버하는지 확인 (throw 없이) */

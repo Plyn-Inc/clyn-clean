@@ -85,8 +85,16 @@ export interface CreateReservationInput {
   hasSitePhotos?: boolean;
   depositorName: string;
   privacyAgreed?: boolean;
-  /** 반려동물 있음 — 상담 전환 판정 */
+  /** @deprecated 반려동물 상담 전환은 폐지됨 */
   hasPet?: boolean;
+  // --- 20260914 개편 ---
+  /** 사이청소 전용 시간 */
+  moveOutTime?: string;
+  moveInTime?: string;
+  /** 행정구역 code */
+  areaSidoCode?: string;
+  areaSigunguCode?: string;
+  areaDongCode?: string;
   // --- 최소 고객정보: 작업지역 (행정구역 동 기준) ---
   areaSido?: string;
   areaSigungu?: string;
@@ -257,8 +265,9 @@ export async function createReservation(
         houseTypeKey: input.houseTypeKey,
         jipjeongriPackage: input.jipjeongriPackage,
         actualPyeong: input.actualPyeong ?? (input.areaPyeong ?? undefined),
-        extraOptions: [],
         instantDiscountEligible: false,
+        // 휴일 가산금 snapshot은 예약일 기준으로 계산되어야 한다
+        desiredDate: input.desiredDate,
       });
       priceConfirmedSnap = q2.priceConfirmed ? 1 : 0;
       dateAdjApplied = q2.dateAdjustmentApplied;
@@ -281,7 +290,9 @@ export async function createReservation(
       houseStructure: input.houseStructure ?? null,
       occupancyStatus: input.occupancyStatus ?? null,
       desiredDate: input.desiredDate,
-      timeSlot: input.timeSlot,
+      // 사이청소는 종일 작업이므로 all_day 슬롯으로 저장한다.
+      // 해당 날짜의 오전·오후가 함께 보호된다.
+      timeSlot: input.serviceType === "사이청소" ? "all_day" : input.timeSlot,
       entryRoute: input.entryRoute,
       extraOptions: JSON.stringify(input.extraOptions ?? []),
       extraNotes: input.extraNotes ?? null,
@@ -307,6 +318,20 @@ export async function createReservation(
       hasPet: input.hasPet ? 1 : 0,
       dateAdjustmentApplied: dateAdjApplied ? 1 : 0,
       dateAdjustmentAmount: dateAdjAmount,
+      // 서비스별 독립 가격 snapshot — 가격표가 바뀌어도 이 값은 고정된다
+      productKey:
+        input.serviceType === "집정리"
+          ? input.jipjeongriPackage ?? null
+          : input.houseTypeKey ?? null,
+      holidaySurchargeSnapshot: dateAdjAmount,
+      totalAmountSnapshot: estimatedTotal,
+      // 사이청소 시간 — extra_notes JSON이 아니라 정식 컬럼에 저장한다
+      moveOutTime: input.moveOutTime ?? null,
+      moveInTime: input.moveInTime ?? null,
+      // 행정구역 code snapshot (표시 문자열은 area_* 컬럼 유지)
+      areaSidoCode: input.areaSidoCode ?? null,
+      areaSigunguCode: input.areaSigunguCode ?? null,
+      areaDongCode: input.areaDongCode ?? null,
     });
 
     // 예약 신청 단계에서는 payment를 생성하지 않는다.

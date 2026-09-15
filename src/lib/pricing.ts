@@ -6,11 +6,10 @@ import {
   DEFAULT_BASE_PRICE_BY_HOUSE_TYPE,
   VAT_NOTICE,
   SIZE_40_PLUS_CONSULT_NOTICE,
-  PET_CONSULT_NOTICE,
 } from "./types";
 // Production 판정은 DB 캐시(special-days-store)를 단일 원천으로 사용한다.
 // 코드 내 정적 목록(special-days.ts)은 backfill 보조 용도로만 남아 있다.
-import { getDateAdjustmentFromStore } from "./special-days-store";
+import { resolveDateSurcharge } from "./special-days-store";
 
 export interface PriceRule {
   id: number;
@@ -20,6 +19,8 @@ export interface PriceRule {
   base_price: number;
   /** 평형별 예약 선금(원). 총 청소금액에 포함되며 추가 비용이 아니다. */
   deposit_amount: number;
+  /** 상품 키 (주거형태/평형/패키지) */
+  product_key: string | null;
   is_active: number;
   note: string | null;
 }
@@ -42,11 +43,6 @@ export const MOVE_IN_BASE_PRICES: Record<string, number> = DEFAULT_BASE_PRICE_BY
 export const SIZE_40_PLUS_LABEL = "40평 이상";
 export const SIZE_40_PLUS_MIN = DEFAULT_BASE_PRICE_BY_HOUSE_TYPE["40평"];
 
-export const SERVICE_MULTIPLIER: Record<string, number> = {
-  "입주청소": 1.0,
-  "사이청소": 1.5,
-  "거주청소": 1.1,
-};
 
 export const JIPJEONGRI_PRICES: Record<string, number> = Object.fromEntries(
   JIPJEONGRI_PACKAGES.map((p) => [p.key, p.price])
@@ -70,6 +66,7 @@ export interface QuoteResult {
   houseTypeKey: string;
   basePrice: number;
   multiplier: number;
+  /** @deprecated 배수 미사용 — 항상 basePrice와 동일. 응답 계약 호환용 */
   priceAfterMultiplier: number;
   optionBreakdown: { key: string; label: string; price: number; isConsult: boolean }[];
   extraTotal: number;
@@ -97,6 +94,13 @@ export interface QuoteResult {
   isStartingPrice: boolean;
   /** 고객 표시용 금액 문자열. 확정가/시작가를 구분해 미리 조립한다 */
   displayPriceLabel: string;
+  /**
+   * 해당 서비스×상품의 price_rules row가 존재하고 활성 상태인지.
+   *
+   * false이면 가격표가 없거나 관리자가 비활성화한 상품이다.
+   * 임의 가격을 만들지 않고 상담으로 전환해야 한다.
+   */
+  productAvailable: boolean;
   // --- 내부 감사용 (고객 응답에서는 제거된다) ---
   /** 날짜 조건 가격 보정이 적용됐는지 여부 */
   dateAdjustmentApplied: boolean;
@@ -119,6 +123,47 @@ function sanitizeCustomerNotice(raw: string | null | undefined): string {
   const banned = [/잔금은?\s*작업\s*완료\s*후/, /VAT\s*별도/, /부가세\s*별도/];
   if (banned.some((re) => re.test(text))) return VAT_NOTICE;
   return text;
+}
+
+/**
+ * 서비스 + 상품 조합의 가격을 직접 조회한다.
+ *
+ * 배수 계산을 하지 않는다. price_rules에 각 서비스의 독립 row가 존재한다.
+ */
+export interface ServiceProductPrice {
+  basePrice: number;
+  depositAmount: number;
+  isActive: boolean;
+}
+
+export async function getServiceProductPrice(
+  serviceType: string,
+  productKey: string
+): Promise<ServiceProductPrice | null> {
+  const rules = await queryRows<PriceRule>(
+    `SELECT * FROM price_rules
+      WHERE service_type = ? AND product_key = ?
+      ORDER BY id DESC
+      LIMIT 1`,
+    [serviceType, productKey]
+  );
+  if (rules.length === 0) return null;
+  const r = rules[0];
+  return {
+    basePrice: Number(r.base_price ?? 0),
+    depositAmount: Number(r.deposit_amount ?? 0),
+    isActive: r.is_active === 1,
+  };
+}
+
+/** 서비스의 활성 상품 목록 (가격 카드용) */
+export async function listServiceProducts(serviceType: string): Promise<PriceRule[]> {
+  return queryRows<PriceRule>(
+    `SELECT * FROM price_rules
+      WHERE service_type = ? AND product_key IS NOT NULL AND is_active = 1
+      ORDER BY id ASC`,
+    [serviceType]
+  );
 }
 
 export async function getMoveInBasePrice(houseTypeKey: string): Promise<number | null> {
@@ -172,7 +217,7 @@ export async function calculateQuote(input: QuoteInput): Promise<QuoteResult> {
     getSetting("instant_discount_enabled"),
     getSetting("balance_notice"),
   ]);
-  const deposit = Number(depositRaw || 0);
+  const fallbackDeposit = Number(depositRaw || 0);
   const discountAmount = Number(discountRaw || 0);
   const discountEnabled = discountEnabledRaw === "1";
   // settings.balance_notice에 구 값("잔금은 작업 완료 후 현장에서 안내드립니다." 등)이
@@ -180,45 +225,39 @@ export async function calculateQuote(input: QuoteInput): Promise<QuoteResult> {
   // DB migration(20260910150000)과 이중 방어.
   const balanceNotice = sanitizeCustomerNotice(balanceNoticeRaw);
 
-  if (input.serviceType === "집정리") {
-    return await calculateJipjeongriQuote(input, deposit, discountAmount, discountEnabled, balanceNotice);
-  }
+  // ── 상품 키 결정 ────────────────────────────────────────────────────────
+  // 집정리는 패키지 키, 그 외는 주거형태/평형 키를 사용한다.
+  const productKey =
+    input.serviceType === "집정리"
+      ? input.jipjeongriPackage || "1p4h"
+      : input.houseTypeKey || "";
+  const houseTypeKey = productKey;
+  const is40Plus = productKey === "40평" || productKey === "40평 이상";
 
-  const houseTypeKey = input.houseTypeKey || "";
-  const multiplier = SERVICE_MULTIPLIER[input.serviceType] ?? 1.0;
-  const is40Plus = houseTypeKey === "40평" || houseTypeKey === "40평 이상";
+  // ── 서비스별 독립 가격 조회 (배수 계산 없음) ──────────────────────────────
+  // 각 서비스는 price_rules(service_type, product_key)에 자신의 row를 가진다.
+  const product = productKey
+    ? await getServiceProductPrice(input.serviceType, is40Plus ? "40평" : productKey)
+    : null;
+  const basePrice = product?.basePrice ?? 0;
+  const priceConfirmed = !is40Plus && product !== null && product.isActive && basePrice > 0;
 
-  let basePrice: number;
-  let priceConfirmed: boolean;
+  // 예약금도 서비스별로 독립이다. 해당 서비스×상품 row의 값을 사용하고,
+  // 값이 없을 때만 전역 기본 설정으로 대체한다.
+  const deposit = product && product.depositAmount > 0 ? product.depositAmount : fallbackDeposit;
 
-  if (is40Plus) {
-    // 40평 이상은 확정 자동견적 상품이 아니다 (상담 전환 대상).
-    // 표시 시작가만 제공하고 예약금/계좌 단계로 진행하지 않는다.
-    const bp40 = await getMoveInBasePrice("40평");
-    basePrice = bp40 ?? 0;
-    priceConfirmed = false;
-  } else {
-    const bp = await getMoveInBasePrice(houseTypeKey);
-    basePrice = bp ?? 0;
-    priceConfirmed = bp !== null && bp > 0;
-  }
+  // 배수는 더 이상 runtime 계산에 쓰이지 않는다 (migration/seed에서 물리화됨)
+  const multiplier = 1.0;
+  // 서비스별 독립 가격이므로 별도 곱셈이 없다.
+  // priceAfterMultiplier 필드는 기존 응답 계약 호환을 위해 basePrice를 그대로 담는다.
+  const priceAfterMultiplier = basePrice;
 
-  const priceAfterMultiplier = Math.round(basePrice * multiplier);
-  const optionPriceMap = new Map((await getOptionPrices()).map((o) => [o.option_key, o]));
+  // 추가서비스는 예약 견적에서 제외됐다 (현장 확인 후 별도 안내)
   const optionBreakdown: QuoteResult["optionBreakdown"] = [];
-  let extraTotal = 0;
-
-  for (const key of input.extraOptions ?? []) {
-    const opt = optionPriceMap.get(key);
-    if (opt) {
-      const isConsult = opt.price === 0;
-      optionBreakdown.push({ key, label: opt.option_label, price: opt.price, isConsult });
-      extraTotal += opt.price;
-    }
-  }
+  const extraTotal = 0;
 
   // ── 상담 전환 판정 (서버 단일 원천) ────────────────────────────────────
-  // 40평 이상 / 반려동물 있음은 자동 예약금 단계로 보내지 않는다.
+  // 40평 이상만 상담 전환 대상이다. (반려동물 상담 전환은 폐지됨)
   let consultRequired = false;
   let consultReason: ConsultReason | null = null;
   let consultNotice: string | null = null;
@@ -227,22 +266,19 @@ export async function calculateQuote(input: QuoteInput): Promise<QuoteResult> {
     consultRequired = true;
     consultReason = "size_40_plus";
     consultNotice = SIZE_40_PLUS_CONSULT_NOTICE;
-  } else if (input.hasPet === true) {
-    consultRequired = true;
-    consultReason = "pet";
-    consultNotice = PET_CONSULT_NOTICE;
   } else if (!priceConfirmed) {
     consultRequired = true;
     consultReason = "price_unconfirmed";
     consultNotice = "견적 확인이 필요합니다. 상담 접수 후 담당자가 안내드립니다.";
   }
 
-  // ── 날짜 조건 내부 가격 보정 ───────────────────────────────────────────
-  // 토/일/공휴일/손없는날 중 하나라도 해당하면 30,000원을 한 번만 가산한다.
-  // 상담 전환 건에는 확정 자동견적을 만들지 않으므로 가산하지 않는다.
-  // 날짜 보정은 DB 캐시에서 판정한다. 캐시에 없으면 SpecialDayNotSyncedError가 발생해
-  // 금액이 잘못 확정되지 않는다 (일반일로 간주하지 않음).
-  const dateAdjustmentAmount = consultRequired ? 0 : await getDateAdjustmentFromStore(input.desiredDate);
+  // ── 휴일 가산금 ────────────────────────────────────────────────────────
+  // 일요일 또는 공휴일에만 1회 가산한다. 토요일·손없는날은 가산하지 않는다.
+  // 공휴일 캐시 조회가 실패해도 예약을 막지 않고 기본가격으로 진행한다.
+  const surcharge = consultRequired
+    ? { amount: 0, specialDayAvailable: true }
+    : await resolveDateSurcharge(input.desiredDate);
+  const dateAdjustmentAmount = surcharge.amount;
   const dateAdjustmentApplied = dateAdjustmentAmount > 0;
 
   const subtotal = priceAfterMultiplier + extraTotal + dateAdjustmentAmount;
@@ -289,58 +325,12 @@ export async function calculateQuote(input: QuoteInput): Promise<QuoteResult> {
     consultNotice,
     isStartingPrice,
     displayPriceLabel,
+    productAvailable: product !== null && product.isActive && basePrice > 0,
     dateAdjustmentApplied,
     dateAdjustmentAmount,
   };
 }
 
-async function calculateJipjeongriQuote(
-  input: QuoteInput,
-  deposit: number,
-  discountAmount: number,
-  discountEnabled: boolean,
-  balanceNotice: string
-): Promise<QuoteResult> {
-  const packageKey = input.jipjeongriPackage || "1p4h";
-  const basePrice = JIPJEONGRI_PRICES[packageKey] ?? JIPJEONGRI_PRICES["1p4h"] ?? 129000;
-
-  // 반려동물 있음은 집정리에서도 상담 전환 대상이다.
-  const petConsult = input.hasPet === true;
-  // 상담 전환 건에는 확정 자동견적을 만들지 않으므로 날짜 보정도 적용하지 않는다.
-  const dateAdjustmentAmount = petConsult ? 0 : await getDateAdjustmentFromStore(input.desiredDate);
-  const dateAdjustmentApplied = dateAdjustmentAmount > 0;
-
-  const eligible = input.instantDiscountEligible === true;
-  const instantDiscount = discountEnabled && eligible ? discountAmount : 0;
-  const estimatedTotal = Math.max(basePrice + dateAdjustmentAmount - instantDiscount, 0);
-  return {
-    serviceType: "집정리",
-    houseTypeKey: packageKey,
-    basePrice,
-    multiplier: 1.0,
-    priceAfterMultiplier: basePrice,
-    optionBreakdown: [],
-    extraTotal: 0,
-    subtotal: basePrice,
-    instantDiscount,
-    discountEligible: discountEnabled && eligible,
-    estimatedTotal,
-    depositAmount: deposit,
-    estimatedBalance: Math.max(estimatedTotal - deposit, 0),
-    priceConfirmed: basePrice > 0,
-    notice:
-      "폐기물 처리 및 폐기차 비용은 별도 안내드립니다.\n" +
-      sanitizeCustomerNotice(balanceNotice),
-    calculatedAt: new Date().toISOString(),
-    consultRequired: petConsult,
-    consultReason: petConsult ? "pet" : null,
-    consultNotice: petConsult ? PET_CONSULT_NOTICE : null,
-    isStartingPrice: false,
-    displayPriceLabel: `${estimatedTotal.toLocaleString("ko-KR")}원`,
-    dateAdjustmentApplied,
-    dateAdjustmentAmount,
-  };
-}
 
 
 // ---------------------------------------------------------------------------
@@ -354,13 +344,13 @@ export function listPriceRules(): Promise<PriceRule[]> {
 export async function upsertPriceRule(rule: Omit<PriceRule, "id"> & { id?: number }): Promise<void> {
   if (rule.id) {
     await execute(
-      `UPDATE price_rules SET service_type=?, area_min=?, area_max=?, base_price=?, deposit_amount=?, is_active=?, note=?, updated_at=datetime('now') WHERE id=?`,
-      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.deposit_amount ?? 0, rule.is_active, rule.note ?? null, rule.id]
+      `UPDATE price_rules SET service_type=?, area_min=?, area_max=?, base_price=?, deposit_amount=?, is_active=?, note=?, product_key=?, updated_at=datetime('now') WHERE id=?`,
+      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.deposit_amount ?? 0, rule.is_active, rule.note ?? null, rule.product_key ?? rule.note ?? null, rule.id]
     );
   } else {
     await execute(
-      `INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.deposit_amount ?? 0, rule.is_active, rule.note ?? null]
+      `INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note, product_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [rule.service_type, rule.area_min, rule.area_max ?? null, rule.base_price, rule.deposit_amount ?? 0, rule.is_active, rule.note ?? null, rule.product_key ?? rule.note ?? null]
     );
   }
 }

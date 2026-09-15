@@ -16,7 +16,7 @@ import {
 import type { OccupancyStatus } from "@/lib/types";
 import type { SelectedSlot } from "./ReservationCalendar";
 import AgreementSection, { type AgreementState } from "./AgreementSection";
-import WorkAreaInput, { type WorkAreaValue } from "./WorkAreaInput";
+import RegionSelect, { EMPTY_REGION, type RegionValue } from "./RegionSelect";
 import DepositAccountPanel, { type DepositAccountInfo } from "./DepositAccountPanel";
 import { bookingMaxDate, isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
 import { callApi } from "@/lib/error-messages";
@@ -36,12 +36,6 @@ import { callApi } from "@/lib/error-messages";
  *
  * 금액은 서버가 단일 원천에서 계산한다. 클라이언트는 계산하지 않는다.
  */
-
-interface OptionRow {
-  option_key: string;
-  option_label: string;
-  price: number;
-}
 
 interface Quote {
   basePrice: number;
@@ -86,30 +80,20 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
   const maxDate = bookingMaxDate();
 
   // 3단계
-  const [options, setOptions] = useState<OptionRow[]>([]);
-  const [extraOptions, setExtraOptions] = useState<string[]>([]);
   const [occupancyStatus, setOccupancyStatus] = useState<OccupancyStatus>("before_move_in");
   const [moveOutTime, setMoveOutTime] = useState("");
   const [moveInTime, setMoveInTime] = useState("");
-  const [hasPet, setHasPet] = useState(false);
-  const [petType, setPetType] = useState("");
-  const [petCount, setPetCount] = useState("1");
-  const [petHairSoil, setPetHairSoil] = useState("");
-  const [petSmell, setPetSmell] = useState(false);
-  const [petFeces, setPetFeces] = useState(false);
-  const [petNote, setPetNote] = useState("");
   const [extraNotes, setExtraNotes] = useState("");
 
   // 4단계
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
-  const [area, setArea] = useState<WorkAreaValue>({ sido: "", sigungu: "", dong: "" });
+  const [region, setRegion] = useState<RegionValue>(EMPTY_REGION);
   const [address, setAddress] = useState("");
 
   // 상담 전환 전용 동의 (서비스 3종과 분리)
   const [consultPrivacyAgreed, setConsultPrivacyAgreed] = useState(false);
-  const [petConfirmed, setPetConfirmed] = useState<boolean | null>(null);
 
   // 5단계
   const [privacyAgreed, setPrivacyAgreed] = useState(false);
@@ -143,10 +127,6 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
       .then((r) => r.json())
       .then((d) => { if (!cancelled) setToday(d.today ?? ""); })
       .catch(() => {});
-    fetch("/api/quote")
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled) setOptions(d.options ?? []); })
-      .catch(() => {});
     return () => { cancelled = true; };
   }, []);
 
@@ -162,11 +142,9 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
           houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
           jipjeongriPackage: serviceType === "집정리" ? jipjeongriPackage : undefined,
           actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
-          extraOptions,
           entryRoute,
           desiredDate: desiredDate || undefined,
           timeSlot: timeSlot || undefined,
-          hasPet,
         }),
       });
       const data = await res.json();
@@ -176,7 +154,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
     } finally {
       setQuoteLoading(false);
     }
-  }, [serviceType, resolvedKey, jipjeongriPackage, actualPyeong, extraOptions, entryRoute, desiredDate, timeSlot, hasPet]);
+  }, [serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot]);
 
   // 견적은 입력이 바뀔 때마다 서버에서 다시 받아온다.
   // effect 내 동기 setState 경고를 피하기 위해 microtask로 넘긴다.
@@ -216,17 +194,21 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
     if (s === 4) {
       if (!customerName.trim()) return "예약자명을 입력해주세요.";
       if (!customerPhone.trim()) return "연락처를 입력해주세요.";
-      if (!area.sido || !area.sigungu || !area.dong) return "작업 장소를 모두 선택해주세요.";
+      if (!region.sidoCode) return "시/도를 선택해주세요.";
+      // 세종시처럼 시/군/구 단계가 없는 지역은 읍/면/동만 선택하면 된다
+      if (!region.sigunguCode && !region.dongCode) return "지역을 선택해주세요.";
+      if (region.sigunguCode && !region.dongCode) return "읍/면/동을 선택해주세요.";
+      if (region.serviceAvailable === false) {
+        return "선택하신 지역은 직접 예약이 어렵습니다. 상담 접수로 진행해주세요.";
+      }
       // 상담 전환 건은 여기서 접수되므로 개인정보 동의를 실제로 받아야 한다.
       if (consultRequired) {
-        if (petConfirmed === null) return "반려동물 여부를 확인해주세요.";
         if (!consultPrivacyAgreed) return "상담을 위한 개인정보 수집·이용에 동의해주세요.";
       }
       return null;
     }
     if (s === 5) {
       if (!privacyAgreed) return "개인정보 수집·이용에 동의해주세요.";
-      if (petConfirmed === null) return "반려동물 여부를 확인해주세요.";
       if (!agreement.corePrinciplesAgreed) return "안내 핵심 원칙에 동의해주세요.";
       if (!agreement.serviceTermsAgreed) return "청소 서비스 이용 안내에 동의해주세요.";
       if (!agreement.additionalChargeAgreed) return "견적 및 추가요금 안내에 동의해주세요.";
@@ -245,33 +227,6 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
   }
   function prev() { setError(null); setStep((s) => Math.max(s - 1, 1) as Step); }
 
-  /**
-   * 반려동물 최종 확인 — 이 값이 서버로 전달되는 hasPet의 source of truth다.
-   * 3단계에서 "없음"을 골랐더라도 최종 확인에서 "있었음"을 선택하면
-   * hasPet=true가 되어 서버가 상담으로 전환한다.
-   */
-  function confirmPet(v: boolean) {
-    setPetConfirmed(v);
-    setHasPet(v);
-  }
-
-  function buildPetMeta() {
-    // hasPet은 최종 확인(confirmPet)과 항상 동기화된다.
-    // 3단계 상세를 입력하지 않고 최종 확인에서만 "있었음"을 고른 경우에도
-    // 상담 데이터에 반려동물 정보가 누락되지 않도록 기록한다.
-    if (!hasPet) return null;
-    return {
-      hasPet: true,
-      confirmedAtFinalStep: petConfirmed === true,
-      type: petType || "미입력",
-      count: petType || petHairSoil ? petCount : "미입력",
-      hairSoil: petHairSoil || "미입력",
-      smell: petSmell,
-      feces: petFeces,
-      note: petNote,
-    };
-  }
-
   async function submitConsultation() {
     // 클라이언트에서 동의하지 않은 값을 true로 만들어 보내지 않는다.
     if (!consultPrivacyAgreed) {
@@ -286,7 +241,10 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           customerName, customerPhone,
-          areaSido: area.sido, areaSigungu: area.sigungu, areaDong: area.dong,
+          areaSido: region.sidoName, areaSigungu: region.sigunguName, areaDong: region.dongName,
+          areaSidoCode: region.sidoCode || undefined,
+          areaSigunguCode: region.sigunguCode || undefined,
+          areaDongCode: region.dongCode || undefined,
           address: address || undefined,
           serviceType,
           houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
@@ -295,8 +253,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
           preferredTimeSlot: timeSlot || undefined,
           // 40평과 반려동물이 동시에 해당하면 40평을 주 사유로 하되,
           // petMeta로 반려동물 정보를 함께 보존한다.
-          reason: is40Plus ? "size_40_plus" : hasPet ? "pet" : "manual",
-          petMeta: buildPetMeta(),
+          reason: is40Plus ? "size_40_plus" : "manual",
           extraNotes: extraNotes || undefined,
           privacyAgreed: consultPrivacyAgreed,
         }),
@@ -312,8 +269,6 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
     setError(null);
     {
       const meta: Record<string, unknown> = {};
-      const pet = buildPetMeta();
-      if (pet) meta.pet = pet;
       if (serviceType === "사이청소") { meta.moveOutTime = moveOutTime; meta.moveInTime = moveInTime; }
       if (serviceType === "집정리") { meta.jipjeongriPackage = jipjeongriPackage; meta.jipjeongriSpaces = jipjeongriSpaces; }
 
@@ -324,23 +279,23 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
           customerName, customerPhone,
           customerEmail: customerEmail || undefined,
           serviceType,
-          region: `${area.sido} ${area.sigungu}`.trim(),
-          address: address || `${area.sido} ${area.sigungu} ${area.dong}`.trim(),
-          areaSido: area.sido, areaSigungu: area.sigungu, areaDong: area.dong,
+          region: `${region.sidoName} ${region.sigunguName}`.trim(),
+          address: address || [region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" "),
+          areaSido: region.sidoName, areaSigungu: region.sigunguName, areaDong: region.dongName,
+          areaSidoCode: region.sidoCode || undefined,
+          areaSigunguCode: region.sigunguCode || undefined,
+          areaDongCode: region.dongCode || undefined,
           houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
           actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
           jipjeongriPackage: serviceType === "집정리" ? jipjeongriPackage : undefined,
           occupancyStatus,
           desiredDate, timeSlot, entryRoute,
-          extraOptions,
           extraNotes: extraNotes + (Object.keys(meta).length ? `\n[내부메타] ${JSON.stringify(meta)}` : ""),
           depositorName: customerName,
           privacyAgreed,
           corePrinciplesAgreed: agreement.corePrinciplesAgreed,
           serviceTermsAgreed: agreement.serviceTermsAgreed,
           additionalChargeAgreed: agreement.additionalChargeAgreed,
-          hasPet,
-          petMeta: buildPetMeta(),
         }),
       });
 
@@ -507,6 +462,37 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
               )}
             </>
           )}
+
+          {/* 선택 즉시 가격 표시 — 마지막 단계까지 기다리지 않는다 */}
+          {(resolvedKey || serviceType === "집정리") && (
+            <div className="rounded-2xl border-2 border-[var(--mint)] bg-[var(--mint-soft)] p-5">
+              {quoteLoading ? (
+                <p className="text-sm text-[var(--ink-soft)]">가격을 불러오는 중...</p>
+              ) : quote ? (
+                <>
+                  <p className="text-xs font-semibold text-[var(--mint)]">
+                    {serviceLabel(serviceType)} · {resolvedKey === "40평" ? "40평 이상" : resolvedKey || "집정리"}
+                  </p>
+                  <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">
+                    {quote.displayPriceLabel}
+                  </p>
+                  <p className="mt-2 text-xs text-[var(--ink-soft)]">{VAT_NOTICE}</p>
+                  {quote.consultRequired && quote.consultNotice && (
+                    <p className="mt-2 text-xs leading-relaxed text-[var(--amber)]">
+                      {quote.consultNotice}
+                    </p>
+                  )}
+                  {!quote.consultRequired && (
+                    <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">
+                      날짜를 선택하면 최종 예약금액이 확정됩니다.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <p className="text-sm text-[var(--ink-soft)]">가격 정보를 불러올 수 없습니다.</p>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -533,6 +519,17 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
               ))}
             </div>
           </div>
+
+          {/* 날짜 선택 후 최종 예약금액 (휴일 가산금 반영) */}
+          {desiredDate && quote && !quote.consultRequired && (
+            <div className="rounded-2xl border border-[var(--line)] bg-white p-5">
+              <p className="text-xs font-semibold text-[var(--ink-soft)]">최종 예약금액</p>
+              <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">
+                {quote.estimatedTotal.toLocaleString("ko-KR")}원
+              </p>
+              <p className="mt-2 text-xs text-[var(--ink-soft)]">{VAT_NOTICE}</p>
+            </div>
+          )}
         </div>
       )}
 
@@ -575,87 +572,6 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
             </div>
           )}
 
-          {/* 추가 서비스 (선택) */}
-          {options.length > 0 && serviceType !== "집정리" && (
-            <div>
-              <label className="mb-2 block text-sm font-semibold">추가 서비스 (선택)</label>
-              <div className="flex flex-wrap gap-2">
-                {options.map((o) => (
-                  <button key={o.option_key} type="button"
-                    onClick={() => setExtraOptions((v) => toggle(v, o.option_key))}
-                    className={`min-h-[40px] rounded-full border px-4 text-sm font-medium transition ${
-                      extraOptions.includes(o.option_key) ? "border-[var(--mint)] bg-[var(--mint-soft)] text-[var(--mint)]" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
-                    {o.option_label}
-                    {o.price > 0 && <span className="ml-1 text-xs">+{o.price.toLocaleString("ko-KR")}원</span>}
-                  </button>
-                ))}
-              </div>
-              <p className="mt-2 text-xs leading-relaxed text-[var(--ink-soft)]">{EXTRA_SERVICE_NOTICE}</p>
-            </div>
-          )}
-
-          {/* 반려동물 */}
-          <div>
-            <label className="mb-2 block text-sm font-semibold">반려동물</label>
-            <div className="flex gap-3">
-              {([false, true] as const).map((v) => (
-                <button key={String(v)} type="button" onClick={() => setHasPet(v)}
-                  className={`min-h-[48px] flex-1 rounded-xl border text-sm font-medium ${
-                    hasPet === v ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
-                  {v ? "있음" : "없음"}
-                </button>
-              ))}
-            </div>
-            {hasPet && (
-              <div className="mt-3 space-y-3 rounded-xl border border-[var(--line)] p-4">
-                <div>
-                  <p className="mb-1.5 text-xs font-semibold text-[var(--ink-soft)]">종류</p>
-                  <div className="flex gap-2">
-                    {[["dog", "반려견"], ["cat", "반려묘"], ["other", "기타"]].map(([v, l]) => (
-                      <button key={v} type="button" onClick={() => setPetType(v)}
-                        className={`min-h-[36px] rounded-full border px-3 text-xs font-medium ${
-                          petType === v ? "border-[var(--mint)] bg-[var(--mint-soft)] text-[var(--mint)]" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
-                        {l}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div className="flex gap-3">
-                  <div className="flex-1">
-                    <p className="mb-1.5 text-xs font-semibold text-[var(--ink-soft)]">마리 수</p>
-                    <select value={petCount} onChange={(e) => setPetCount(e.target.value)}
-                      className="w-full rounded-lg border border-[var(--line)] px-3 py-2 text-sm">
-                      {["1", "2", "3", "4이상"].map((n) => <option key={n} value={n}>{n}마리</option>)}
-                    </select>
-                  </div>
-                  <div className="flex-1">
-                    <p className="mb-1.5 text-xs font-semibold text-[var(--ink-soft)]">털 오염 정도</p>
-                    <select value={petHairSoil} onChange={(e) => setPetHairSoil(e.target.value)}
-                      className="w-full rounded-lg border border-[var(--line)] px-3 py-2 text-sm">
-                      <option value="">선택</option>
-                      <option value="없음">거의 없음</option>
-                      <option value="보통">보통</option>
-                      <option value="심함">심함</option>
-                    </select>
-                  </div>
-                </div>
-                <div className="flex gap-4">
-                  <label className="flex cursor-pointer items-center gap-2 text-sm">
-                    <input type="checkbox" checked={petSmell} onChange={(e) => setPetSmell(e.target.checked)} className="h-4 w-4 rounded" />
-                    냄새 있음
-                  </label>
-                  <label className="flex cursor-pointer items-center gap-2 text-sm">
-                    <input type="checkbox" checked={petFeces} onChange={(e) => setPetFeces(e.target.checked)} className="h-4 w-4 rounded" />
-                    배변 오염 있음
-                  </label>
-                </div>
-                <textarea value={petNote} onChange={(e) => setPetNote(e.target.value)} rows={2}
-                  placeholder="기타 오염 상태나 특이사항"
-                  className="w-full rounded-lg border border-[var(--line)] px-3.5 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
-              </div>
-            )}
-          </div>
-
           <div>
             <label className="mb-1.5 block text-sm font-semibold">기타 요청사항</label>
             <textarea value={extraNotes} onChange={(e) => setExtraNotes(e.target.value)} rows={3}
@@ -669,30 +585,13 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
         <div className="grid gap-5 md:grid-cols-2">
           <Field label="예약자명" required value={customerName} onChange={setCustomerName} />
           <Field label="연락처" required value={customerPhone} onChange={setCustomerPhone} placeholder="010-0000-0000" />
-          <div className="md:col-span-2"><WorkAreaInput value={area} onChange={setArea} /></div>
+          <div className="md:col-span-2"><RegionSelect value={region} onChange={setRegion} /></div>
           <div className="md:col-span-2"><Field label="상세 주소 (선택)" value={address} onChange={setAddress} /></div>
           <div className="md:col-span-2"><Field label="이메일 (선택)" value={customerEmail} onChange={setCustomerEmail} type="email" /></div>
 
           {/* 상담 전환 건은 이 단계에서 접수되므로 동의를 실제로 받는다 */}
           {consultRequired && (
             <div className="space-y-4 md:col-span-2">
-              <div className="rounded-2xl border border-[var(--line)] p-4">
-                <p className="mb-2 text-sm font-semibold">
-                  반려동물 확인 <span className="text-xs text-[var(--rose)]">*필수</span>
-                </p>
-                <div className="flex gap-3">
-                  {([true, false] as const).map((v) => (
-                    <button key={String(v)} type="button" onClick={() => confirmPet(v)}
-                      className={`min-h-[48px] flex-1 rounded-xl border text-sm font-medium ${
-                        petConfirmed === v ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
-                      {v ? "있었음" : "관련없음"}
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-2 text-xs text-[var(--ink-soft)]">
-                  반려동물이 있었던 공간은 추가 확인이 필요해 상담으로 안내드립니다.
-                </p>
-              </div>
 
               <label className="flex cursor-pointer items-start gap-3 rounded-2xl bg-[var(--sand-deep)] p-4">
                 <input type="checkbox" checked={consultPrivacyAgreed}
@@ -721,23 +620,6 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
                 <a href="/privacy" target="_blank" className="text-[var(--mint)] underline">개인정보처리방침</a>
               </span>
             </label>
-          </div>
-          <div className="rounded-2xl border border-[var(--line)] p-4">
-            <p className="mb-2 text-sm font-semibold">
-              반려동물 확인 <span className="text-xs text-[var(--rose)]">*필수</span>
-            </p>
-            <div className="flex gap-3">
-              {([true, false] as const).map((v) => (
-                <button key={String(v)} type="button" onClick={() => confirmPet(v)}
-                  className={`min-h-[48px] flex-1 rounded-xl border text-sm font-medium ${
-                    petConfirmed === v ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
-                  {v ? "있었음" : "관련없음"}
-                </button>
-              ))}
-            </div>
-            <p className="mt-2 text-xs text-[var(--ink-soft)]">
-              반려동물이 있었던 공간은 추가 확인이 필요해 상담으로 안내드립니다.
-            </p>
           </div>
 
           <AgreementSection value={agreement} onChange={setAgreement} />
@@ -770,10 +652,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
             <SummaryRow label="희망 날짜" value={desiredDate} />
             <SummaryRow label="시간대" value={timeSlot === "morning" ? "오전" : "오후"} />
             <SummaryRow label="예약자" value={customerName} />
-            <SummaryRow label="작업 장소" value={`${area.sido} ${area.sigungu} ${area.dong}`} />
-            {extraOptions.length > 0 && (
-              <SummaryRow label="추가 서비스" value={extraOptions.map((k) => options.find((o) => o.option_key === k)?.option_label ?? k).join(", ")} />
-            )}
+            <SummaryRow label="작업 장소" value={[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} />
           </dl>
         </div>
       )}

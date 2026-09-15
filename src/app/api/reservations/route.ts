@@ -94,8 +94,12 @@ const reservationSchema = z.object({
   clientEstimatedTotal: z.number().optional(),
   /** 반려동물 있음 — 서버 상담 gate 판정에 사용 */
   hasPet: z.boolean().optional(),
-  /** 반려동물 상세 (상담 전환 시 보존) */
+  /** @deprecated 반려동물 상담 전환 폐지 */
   petMeta: z.record(z.string(), z.unknown()).nullable().optional(),
+  // --- 행정구역 code ---
+  areaSidoCode: z.string().max(20).optional(),
+  areaSigunguCode: z.string().max(20).optional(),
+  areaDongCode: z.string().max(20).optional(),
 });
 
 export async function POST(req: NextRequest) {
@@ -225,6 +229,35 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  // ── 가격표 검증 ─────────────────────────────────────────────────────────
+  // 가격표가 없거나 관리자가 비활성화한 상품은 임의 가격으로 예약시키지 않는다.
+  if (!serverQuote.productAvailable) {
+    return NextResponse.json(
+      {
+        error: "현재 선택한 상품은 온라인 예약이 비활성화되어 있습니다. 상담으로 문의해주세요.",
+        code: "PRODUCT_UNAVAILABLE",
+      },
+      { status: 400 }
+    );
+  }
+
+  // ── 서비스 가능지역 검증 ────────────────────────────────────────────────
+  // 행정구역 master가 임포트된 경우에만 적용한다.
+  // 미임포트 상태에서 모든 예약을 막으면 서비스가 중단되므로 통과시킨다.
+  if (data.areaSigunguCode) {
+    const { countAreas, isServiceArea } = await import("@/database/repositories/region-repository");
+    if ((await countAreas()) > 0 && !(await isServiceArea(data.areaSigunguCode))) {
+      return NextResponse.json(
+        {
+          error:
+            "선택하신 지역은 현재 직접 예약이 어렵습니다. 상담 접수를 남겨주시면 담당자가 확인 후 안내드립니다.",
+          code: "OUT_OF_SERVICE_AREA",
+        },
+        { status: 409 }
+      );
+    }
+  }
+
   // ── 상담 전환 gate (서버가 최종 권한) ──────────────────────────────────
   // 40평 이상 / 반려동물 있음은 일반 예약·예약금 프로세스로 진행하지 않는다.
   // UI에서만 막지 않고 API 자체가 거부한다.
@@ -281,16 +314,9 @@ export async function POST(req: NextRequest) {
   }
 
   try {
-    let normalizedExtraNotes = data.extraNotes ?? "";
-    if (data.serviceType === "사이청소") {
-      const timeMetadata = JSON.stringify({
-        moveOutTime: data.moveOutTime,
-        moveInTime: data.moveInTime,
-      });
-      normalizedExtraNotes = [normalizedExtraNotes.trim(), `[사이청소시간] ${timeMetadata}`]
-        .filter(Boolean)
-        .join("\n");
-    }
+    // 사이청소 시간은 move_out_time / move_in_time 정식 컬럼에 저장한다.
+    // extra_notes JSON 파싱에 의존하지 않는다.
+    const normalizedExtraNotes = data.extraNotes ?? "";
 
     const { reservation, payment } = await createReservation({
       ...data,

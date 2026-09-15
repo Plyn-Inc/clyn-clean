@@ -129,6 +129,20 @@ export const SITE_SEO_FALLBACK = {
     "예약 가능 날짜를 바로 확인하고, 캘린더 또는 바로 예약하기로 간편하게 예약하세요.",
 } as const;
 
+/**
+ * 휴일 가산금 (원).
+ *
+ * 일요일 또는 공휴일에만 1회 가산한다. 토요일·손없는날에는 가산하지 않는다.
+ * 관리자 설정값이며 기본값은 30,000원이다.
+ */
+export const DEFAULT_HOLIDAY_SURCHARGE = 30000;
+
+export async function getHolidaySurcharge(): Promise<number> {
+  const raw = await getSetting("holiday_surcharge");
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 ? v : DEFAULT_HOLIDAY_SURCHARGE;
+}
+
 /** DB 조회 실패 시 사용할 회사 기본정보 */
 export function fallbackCompanySettings(): CompanySettings {
   return {

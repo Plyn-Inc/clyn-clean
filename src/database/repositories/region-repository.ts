@@ -1,0 +1,124 @@
+import { execute, queryRow, queryRows } from "../connection";
+
+export type AreaLevel = "sido" | "sigungu" | "eupmyeondong";
+
+export interface AdministrativeArea {
+  code: string;
+  name: string;
+  level: AreaLevel;
+  parent_code: string | null;
+  is_current: number;
+  updated_at: string;
+}
+
+export interface ServiceArea {
+  sigungu_code: string;
+  is_enabled: number;
+  admin_note: string | null;
+  updated_by_admin_id: number | null;
+  updated_at: string;
+}
+
+/** 행정구역 master가 임포트됐는지 (미임포트 시 관리자 화면에 안내) */
+export async function countAreas(): Promise<number> {
+  const row = await queryRow<{ c: number }>("SELECT COUNT(*) as c FROM administrative_areas");
+  return Number(row?.c ?? 0);
+}
+
+export function listByLevel(level: AreaLevel): Promise<AdministrativeArea[]> {
+  return queryRows<AdministrativeArea>(
+    `SELECT * FROM administrative_areas
+      WHERE level = ? AND is_current = 1
+      ORDER BY code ASC`,
+    [level]
+  );
+}
+
+/**
+ * 하위 행정구역 조회.
+ *
+ * 세종특별자치시처럼 시/군/구 단계가 없는 경우, sido의 자식이 바로
+ * eupmyeondong일 수 있다. parent_code만으로 조회하므로 구조에 관계없이 동작한다.
+ */
+export function listChildren(parentCode: string): Promise<AdministrativeArea[]> {
+  return queryRows<AdministrativeArea>(
+    `SELECT * FROM administrative_areas
+      WHERE parent_code = ? AND is_current = 1
+      ORDER BY code ASC`,
+    [parentCode]
+  );
+}
+
+export function findArea(code: string): Promise<AdministrativeArea | undefined> {
+  return queryRow<AdministrativeArea>(
+    "SELECT * FROM administrative_areas WHERE code = ?",
+    [code]
+  );
+}
+
+export function upsertArea(area: {
+  code: string;
+  name: string;
+  level: AreaLevel;
+  parentCode: string | null;
+  isCurrent?: boolean;
+}): Promise<void> {
+  return execute(
+    `INSERT INTO administrative_areas (code, name, level, parent_code, is_current, updated_at)
+     VALUES (?, ?, ?, ?, ?, datetime('now'))
+     ON CONFLICT (code) DO UPDATE SET
+       name = EXCLUDED.name,
+       level = EXCLUDED.level,
+       parent_code = EXCLUDED.parent_code,
+       is_current = EXCLUDED.is_current,
+       updated_at = datetime('now')`,
+    [area.code, area.name, area.level, area.parentCode, area.isCurrent === false ? 0 : 1]
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 서비스 가능지역 (시/군/구 단위)
+// ---------------------------------------------------------------------------
+
+export function listServiceAreas(): Promise<(ServiceArea & { name: string | null })[]> {
+  return queryRows<ServiceArea & { name: string | null }>(
+    `SELECT sa.*, a.name
+       FROM service_areas sa
+       LEFT JOIN administrative_areas a ON a.code = sa.sigungu_code
+      ORDER BY sa.sigungu_code ASC`
+  );
+}
+
+export async function isServiceArea(sigunguCode: string): Promise<boolean> {
+  const row = await queryRow<{ is_enabled: number }>(
+    "SELECT is_enabled FROM service_areas WHERE sigungu_code = ?",
+    [sigunguCode]
+  );
+  return row?.is_enabled === 1;
+}
+
+/** 활성 서비스 지역 코드 집합 */
+export async function enabledServiceAreaCodes(): Promise<Set<string>> {
+  const rows = await queryRows<{ sigungu_code: string }>(
+    "SELECT sigungu_code FROM service_areas WHERE is_enabled = 1"
+  );
+  return new Set(rows.map((r) => r.sigungu_code));
+}
+
+export function setServiceArea(input: {
+  sigunguCode: string;
+  isEnabled: boolean;
+  adminNote?: string | null;
+  adminId?: number | null;
+}): Promise<void> {
+  return execute(
+    `INSERT INTO service_areas (sigungu_code, is_enabled, admin_note, updated_by_admin_id, updated_at)
+     VALUES (?, ?, ?, ?, datetime('now'))
+     ON CONFLICT (sigungu_code) DO UPDATE SET
+       is_enabled = EXCLUDED.is_enabled,
+       admin_note = EXCLUDED.admin_note,
+       updated_by_admin_id = EXCLUDED.updated_by_admin_id,
+       updated_at = datetime('now')`,
+    [input.sigunguCode, input.isEnabled ? 1 : 0, input.adminNote ?? null, input.adminId ?? null]
+  );
+}

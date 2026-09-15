@@ -40,8 +40,22 @@ export interface CreateReservationRow {
   additionalChargeAgreed: number;
   /** 3종 동의 완료 시에만 값이 들어간다 */
   agreementVersion: string | null;
-  /** 반려동물 있음 (상담 전환 판정용 정식 컬럼) */
+  /** 반려동물 있음 (legacy — 신규 예약에서는 항상 0) */
   hasPet: number;
+  // --- 20260914 개편: 서비스별 독립 가격 snapshot ---
+  /** 상품 키 (주거형태/평형/집정리 패키지) */
+  productKey: string | null;
+  /** 휴일 가산금 snapshot (일요일/공휴일 1회) */
+  holidaySurchargeSnapshot: number;
+  /** 총 예약금액 = 기본가격 + 휴일 가산금 */
+  totalAmountSnapshot: number | null;
+  // --- 사이청소 전용 시간 (extra_notes JSON 의존 제거) ---
+  moveOutTime: string | null;
+  moveInTime: string | null;
+  // --- 행정구역 code snapshot ---
+  areaSidoCode: string | null;
+  areaSigunguCode: string | null;
+  areaDongCode: string | null;
   /** 날짜 조건 가격 보정 내부 감사용 */
   dateAdjustmentApplied: number;
   dateAdjustmentAmount: number;
@@ -63,6 +77,9 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       core_principles_agreed, service_terms_agreed, additional_charge_agreed,
       agreement_version, agreed_at,
       has_pet, date_adjustment_applied, date_adjustment_amount,
+      product_key, holiday_surcharge_snapshot, total_amount_snapshot,
+      move_out_time, move_in_time,
+      area_sido_code, area_sigungu_code, area_dong_code,
       reservation_status
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
@@ -70,6 +87,9 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       ?, ?, ?,
       ?, ?, ?,
       ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END,
+      ?, ?, ?,
+      ?, ?, ?,
+      ?, ?,
       ?, ?, ?,
       'received'
     )`,
@@ -86,6 +106,9 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       row.corePrinciplesAgreed, row.serviceTermsAgreed, row.additionalChargeAgreed,
       row.agreementVersion, row.agreementVersion,
       row.hasPet, row.dateAdjustmentApplied, row.dateAdjustmentAmount,
+      row.productKey, row.holidaySurchargeSnapshot, row.totalAmountSnapshot,
+      row.moveOutTime, row.moveInTime,
+      row.areaSidoCode, row.areaSigunguCode, row.areaDongCode,
     ]
   );
 }

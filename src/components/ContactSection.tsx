@@ -14,6 +14,7 @@ export default function ContactSection({ company }: { company: CompanySettings }
           예약하지 않고 상담이 필요한 경우, 아래 방법으로 편하게 문의해주세요.
         </p>
 
+        {/* 문자 문의는 제공하지 않는다 — 전화 / 카카오톡 2채널만 운영 */}
         <div className="mt-10 grid gap-4 sm:grid-cols-2">
           <ContactButton
             label="전화 문의"

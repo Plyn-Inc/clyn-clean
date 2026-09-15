@@ -89,6 +89,35 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS administrative_areas (
+      code TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      level TEXT NOT NULL,
+      parent_code TEXT,
+      is_current INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS service_areas (
+      sigungu_code TEXT PRIMARY KEY,
+      is_enabled INTEGER NOT NULL DEFAULT 0,
+      admin_note TEXT,
+      updated_by_admin_id INTEGER,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS calendar_slot_reopen_overrides (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      date TEXT NOT NULL,
+      time_slot TEXT NOT NULL,
+      is_open INTEGER NOT NULL DEFAULT 0,
+      reason TEXT,
+      source_reservation_id INTEGER,
+      updated_by_admin_id INTEGER,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE (date, time_slot)
+    );
+
     CREATE TABLE IF NOT EXISTS special_days (
       date TEXT PRIMARY KEY,
       is_holiday INTEGER NOT NULL DEFAULT 0,
@@ -226,6 +255,20 @@ function runIncrementalMigrations() {
   tryExec("ALTER TABLE reservations ADD COLUMN has_pet INTEGER NOT NULL DEFAULT 0");
   tryExec("ALTER TABLE reservations ADD COLUMN date_adjustment_applied INTEGER NOT NULL DEFAULT 0");
   tryExec("ALTER TABLE reservations ADD COLUMN date_adjustment_amount INTEGER NOT NULL DEFAULT 0");
+  // 20260914 예약시스템 개편
+  tryExec("ALTER TABLE price_rules ADD COLUMN product_key TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN move_out_time TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN move_in_time TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN area_sido_code TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN area_sigungu_code TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN area_dong_code TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN product_key TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN holiday_surcharge_snapshot INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN total_amount_snapshot INTEGER");
+  tryExec("ALTER TABLE consultation_requests ADD COLUMN area_sido_code TEXT");
+  tryExec("ALTER TABLE consultation_requests ADD COLUMN area_sigungu_code TEXT");
+  tryExec("ALTER TABLE consultation_requests ADD COLUMN area_dong_code TEXT");
+  tryExec("UPDATE price_rules SET product_key = note WHERE product_key IS NULL");
 }
 
 function seedDefaultSettings() {
@@ -237,6 +280,8 @@ function seedDefaultSettings() {
     balance_notice: "표시 금액은 부가세가 포함된 금액입니다.",
     special_days_synced_through: "",
     special_days_last_sync_at: "",
+    // 휴일 가산금 — 일요일/공휴일에만 1회 가산 (토요일·손없는날 미적용)
+    holiday_surcharge: "30000",
     bank_name: "",
     bank_account_number: "",
     bank_account_holder: "",
@@ -283,15 +328,18 @@ function seedPriceRules() {
   );
 
   const insert = getDb().prepare(
-    "INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note) VALUES (?, ?, ?, ?, ?, 1, ?)"
+    "INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note, product_key) VALUES (?, ?, ?, ?, ?, 1, ?, ?)"
   );
 
   for (const [key, price] of houseTypePrices) {
     if (!existingNotes.has(key)) {
-      // area_min/max는 사용하지 않고 note 키로 조회
-      insert.run("입주청소", 0, null, price, DEFAULT_DEPOSIT_BY_HOUSE_TYPE[key] ?? 0, key);
+      // product_key가 서비스별 독립 가격 조회의 기준이다
+      insert.run("입주청소", 0, null, price, DEFAULT_DEPOSIT_BY_HOUSE_TYPE[key] ?? 0, key, key);
     }
   }
+
+  // 기존 row에 product_key가 없으면 note로 채운다 (구 DB 호환)
+  getDb().exec("UPDATE price_rules SET product_key = note WHERE product_key IS NULL");
 
   // 확정 가격표로 갱신 (예약 snapshot에는 영향 없음)
   const updatePrice = getDb().prepare(
@@ -307,6 +355,40 @@ function seedPriceRules() {
   );
   for (const [key, deposit] of Object.entries(DEFAULT_DEPOSIT_BY_HOUSE_TYPE)) {
     fillDeposit.run(deposit, key);
+  }
+
+  // ── 서비스별 독립 가격 물리화 ────────────────────────────────────────────
+  // 사이청소 = 입주청소 × 1.5, 거주청소 = 입주청소 × 1.1 (seed 시 1회 계산)
+  // 이후 runtime에는 배수가 존재하지 않고 각 row를 직접 조회한다.
+  const insertDerived = getDb().prepare(
+    `INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note, product_key)
+     SELECT ?, 0, NULL, CAST(ROUND(p.base_price * ?) AS INTEGER), p.deposit_amount, p.is_active, p.note, p.product_key
+       FROM price_rules p
+      WHERE p.service_type = '입주청소' AND p.product_key = ?
+        AND NOT EXISTS (
+          SELECT 1 FROM price_rules x WHERE x.service_type = ? AND x.product_key = p.product_key
+        )`
+  );
+  for (const key of Object.keys(DEFAULT_BASE_PRICE_BY_HOUSE_TYPE)) {
+    insertDerived.run("사이청소", 1.5, key, "사이청소");
+    insertDerived.run("거주청소", 1.1, key, "거주청소");
+  }
+
+  // ── 집정리 패키지 상품 ──────────────────────────────────────────────────
+  const jipPackages: [string, string, number, number][] = [
+    ["1p4h", "1인 / 4시간", 129000, 60000],
+    ["2p4h", "2인 / 4시간", 249000, 60000],
+    ["3p4h", "3인 / 4시간", 359000, 70000],
+  ];
+  const insertJip = getDb().prepare(
+    `INSERT INTO price_rules (service_type, area_min, area_max, base_price, deposit_amount, is_active, note, product_key)
+     SELECT '집정리', 0, NULL, ?, ?, 1, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM price_rules x WHERE x.service_type = '집정리' AND x.product_key = ?
+      )`
+  );
+  for (const [key, label, price, deposit] of jipPackages) {
+    insertJip.run(price, deposit, label, key, key);
   }
 }
 
