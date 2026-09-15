@@ -69,7 +69,7 @@ const reservationSchema = z.object({
   jipjeongriPackage: z.enum(ALLOWED_JIPJEONGRI_PACKAGES as [string, ...string[]]).optional(),
   occupancyStatus: z.enum(["before_move_in", "after_move_out", "currently_living"]).optional(),
   desiredDate: z.string().min(1, "희망 날짜를 선택해주세요."),
-  timeSlot: z.enum(["morning", "afternoon"], { message: "오전 또는 오후를 선택해주세요." }),
+  timeSlot: z.enum(["morning", "afternoon", "all_day"], { message: "예약 시간 정보를 확인해주세요." }),
   entryRoute: z.enum(["calendar", "direct"]),
   extraOptions: z
     .array(z.enum(ALLOWED_EXTRA_OPTION_KEYS as [string, ...string[]], {
@@ -154,11 +154,35 @@ export async function POST(req: NextRequest) {
     }
   }
 
+  // 사이청소는 오전/오후 슬롯을 고객이 고르지 않는다.
+  // 신규 사이청소는 항상 all_day로 접수해 날짜 전체를 우선 보호한다.
+  if (data.serviceType === "사이청소" && data.timeSlot !== "all_day") {
+    return NextResponse.json(
+      { error: "사이청소는 퇴거/입주 시간으로 접수해주세요.", code: "BETWEEN_CLEANING_ALL_DAY_REQUIRED" },
+      { status: 400 }
+    );
+  }
+  if (data.serviceType !== "사이청소" && data.timeSlot === "all_day") {
+    return NextResponse.json(
+      { error: "일반 청소는 오전 또는 오후 시간대를 선택해주세요.", code: "TIME_SLOT_REQUIRED" },
+      { status: 400 }
+    );
+  }
+
   // 사이청소는 서버에서도 퇴거/입주 시간을 필수 검증하고 순서를 강제합니다.
   if (data.serviceType === "사이청소") {
     if (!data.moveOutTime?.trim() || !data.moveInTime?.trim()) {
       return NextResponse.json(
         { error: "사이청소는 기존 거주자 퇴거 완료시간과 신규 입주 예정시간을 모두 입력해주세요." },
+        { status: 400 }
+      );
+    }
+    if (
+      !data.moveOutTime.startsWith(`${data.desiredDate}T`) ||
+      !data.moveInTime.startsWith(`${data.desiredDate}T`)
+    ) {
+      return NextResponse.json(
+        { error: "퇴거/입주 시간은 선택한 예약 날짜와 같은 날짜여야 합니다." },
         { status: 400 }
       );
     }
@@ -233,24 +257,32 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 서비스 가능지역 검증 ────────────────────────────────────────────────
-  // 행정구역 master가 임포트된 경우에만 적용한다.
-  // 미임포트 상태에서 모든 예약을 막으면 서비스가 중단되므로 통과시킨다.
-  if (data.areaSigunguCode) {
-    const { countAreas, isServiceArea } = await import("@/database/repositories/region-repository");
-    if ((await countAreas()) > 0 && !(await isServiceArea(data.areaSigunguCode))) {
-      return NextResponse.json(
-        {
-          error:
-            "선택하신 지역은 현재 직접 예약이 어렵습니다. 상담 접수를 남겨주시면 담당자가 확인 후 안내드립니다.",
-          code: "OUT_OF_SERVICE_AREA",
-        },
-        { status: 409 }
-      );
-    }
+  // 공식 행정구역 master가 준비되기 전에는 직접 예약을 열지 않는다(B안).
+  // 클라이언트 우회 요청도 서버에서 동일하게 차단한다.
+  const { countAreas, isServiceArea } = await import("@/database/repositories/region-repository");
+  const areaMasterCount = await countAreas();
+  if (areaMasterCount === 0) {
+    return NextResponse.json(
+      {
+        error: "행정구역 데이터가 준비되지 않아 직접 예약을 진행할 수 없습니다. 상담 접수로 진행해주세요.",
+        code: "REGION_MASTER_NOT_READY",
+      },
+      { status: 409 }
+    );
+  }
+  if (data.areaSigunguCode && !(await isServiceArea(data.areaSigunguCode))) {
+    return NextResponse.json(
+      {
+        error:
+          "선택하신 지역은 현재 직접 예약이 어렵습니다. 상담 접수를 남겨주시면 담당자가 확인 후 안내드립니다.",
+        code: "OUT_OF_SERVICE_AREA",
+      },
+      { status: 409 }
+    );
   }
 
   // ── 상담 전환 gate (서버가 최종 권한) ──────────────────────────────────
-  // 40평 이상 / 반려동물 있음은 일반 예약·예약금 프로세스로 진행하지 않는다.
+  // 40평 이상 등 상담 필요 견적은 일반 예약·예약금 프로세스로 진행하지 않는다.
   // UI에서만 막지 않고 API 자체가 거부한다.
   if (serverQuote.consultRequired) {
     // 같은 상담 파이프라인으로 자동 전환한다.

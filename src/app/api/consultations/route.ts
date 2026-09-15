@@ -28,12 +28,13 @@ const schema = z.object({
   areaSido: z.string().trim().max(30).optional(),
   areaSigungu: z.string().trim().max(30).optional(),
   areaDong: z.string().trim().max(30).optional(),
+  areaText: z.string().trim().max(100).optional(),
   address: z.string().trim().max(200).optional(),
   serviceType: z.enum(SERVICE_TYPES as unknown as [string, ...string[]]).optional(),
   houseTypeKey: z.string().max(20).optional(),
   actualPyeong: z.number().positive().max(1000).optional(),
   preferredDate: z.string().optional(),
-  preferredTimeSlot: z.enum(["morning", "afternoon"]).optional(),
+  preferredTimeSlot: z.enum(["morning", "afternoon", "all_day"]).optional(),
   reason: z.enum(["size_40_plus", "pet", "price_unconfirmed", "manual"]).optional(),
   petMeta: z.record(z.string(), z.unknown()).nullable().optional(),
   extraNotes: z.string().max(2000).optional(),
@@ -68,9 +69,15 @@ export async function POST(req: NextRequest) {
 
   // ── 필수정보 서버 검증 (클라이언트 검증에 의존하지 않는다) ──────────────
   // 공통 필수: 이름 · 연락처 · 작업지역 · 희망일 · 상담내용 · 개인정보 동의
-  if (!isValidWorkArea({ sido: data.areaSido, sigungu: data.areaSigungu, dong: data.areaDong })) {
+  const hasStructuredArea = isValidWorkArea({
+    sido: data.areaSido,
+    sigungu: data.areaSigungu,
+    dong: data.areaDong,
+  });
+  const hasManualArea = Boolean(data.areaText?.trim());
+  if (!hasStructuredArea && !hasManualArea) {
     return NextResponse.json(
-      { error: "작업지역(시/도 · 시군구 · 행정동)을 모두 입력해주세요." },
+      { error: "작업지역을 입력해주세요." },
       { status: 400 }
     );
   }
@@ -113,12 +120,16 @@ export async function POST(req: NextRequest) {
   }
 
   try {
+    const areaNote = data.areaText?.trim() ? `[희망 작업지역] ${data.areaText.trim()}` : "";
+    const serviceNote =
+      data.serviceType === "집정리" && data.jipjeongriInfo
+        ? `[정리 요청] ${data.jipjeongriInfo}`
+        : "";
+    const mergedNotes = [areaNote, data.extraNotes, serviceNote].filter(Boolean).join("\n").trim();
     const created = await createConsultation({
       ...data,
-      extraNotes:
-        data.serviceType === "집정리" && data.jipjeongriInfo
-          ? `${data.extraNotes ?? ""}\n[정리 요청] ${data.jipjeongriInfo}`.trim()
-          : data.extraNotes,
+      address: data.address || data.areaText,
+      extraNotes: mergedNotes,
     });
     // 상담접수는 캘린더 슬롯을 점유하지 않는다. payment도 만들지 않는다.
     return NextResponse.json(

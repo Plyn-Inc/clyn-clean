@@ -2,8 +2,8 @@ import * as reservationRepo from "@/database/repositories/reservation-repository
 import { lockReservationSlot, withTransaction } from "@/database/connection";
 import { generateReservationCode, addHoursISO, isValidKoreanPhone, isValidWorkArea } from "./utils";
 import { getSlotEffectiveStatus, getDaySlotView } from "./calendar";
-import { getPricingSettings, checkReservationReadiness } from "./settings";
-import { calculateQuote, getDepositAmountForHouseType } from "./pricing";
+import { checkReservationReadiness } from "./settings";
+import { calculateQuote, getServiceProductPrice } from "./pricing";
 import { isAllAgreed, missingAgreements, AGREEMENT_VERSION, isAgreementContentReady } from "./agreement";
 import type {
   Reservation,
@@ -78,7 +78,7 @@ export interface CreateReservationInput {
   houseStructure?: string;
   occupancyStatus?: OccupancyStatus;
   desiredDate: string;
-  timeSlot: "morning" | "afternoon";
+  timeSlot: "morning" | "afternoon" | "all_day";
   entryRoute: EntryRoute;
   extraOptions?: string[];
   extraNotes?: string;
@@ -126,9 +126,9 @@ export interface CreateReservationResult {
 export async function computeInstantDiscountEligible(
   entryRoute: EntryRoute,
   desiredDate: string,
-  timeSlot: "morning" | "afternoon"
+  timeSlot: "morning" | "afternoon" | "all_day"
 ): Promise<boolean> {
-  if (entryRoute !== "calendar") return false;
+  if (entryRoute !== "calendar" || timeSlot === "all_day") return false;
   const slotStatus = await getSlotEffectiveStatus(desiredDate, timeSlot);
   return slotStatus === "available";
 }
@@ -157,6 +157,41 @@ async function validateSlotAvailability(
   throw new DateNotAvailableError(desiredDate, effectiveStatus);
 }
 
+function validateBetweenCleaningTimes(input: CreateReservationInput): void {
+  if (input.serviceType !== "사이청소") return;
+  if (!input.moveOutTime?.trim() || !input.moveInTime?.trim()) {
+    throw new Error("사이청소는 퇴거 완료시간과 입주 예정시간이 모두 필요합니다.");
+  }
+  const expectedPrefix = `${input.desiredDate}T`;
+  if (
+    !input.moveOutTime.startsWith(`${input.desiredDate}T`) ||
+    !input.moveInTime.startsWith(expectedPrefix)
+  ) {
+    throw new Error("사이청소 퇴거/입주 시간은 예약 날짜와 같은 날짜여야 합니다.");
+  }
+  const moveOutMs = Date.parse(input.moveOutTime);
+  const moveInMs = Date.parse(input.moveInTime);
+  if (!Number.isFinite(moveOutMs) || !Number.isFinite(moveInMs) || moveOutMs >= moveInMs) {
+    throw new Error("사이청소 입주 예정시간은 퇴거 완료시간보다 이후여야 합니다.");
+  }
+}
+
+/** 사이청소 신규 접수는 오전·오후 양쪽이 모두 비어 있을 때만 허용한다. */
+async function validateAllDayAvailability(desiredDate: string): Promise<void> {
+  const view = await getDaySlotView(desiredDate);
+  for (const slotView of [view.morning, view.afternoon]) {
+    const effectiveStatus = slotView.effectiveStatus;
+    if (effectiveStatus === "available" && slotView.remaining > 0) continue;
+    if (
+      effectiveStatus === "closed" ||
+      (effectiveStatus === "available" && slotView.remaining <= 0)
+    ) {
+      throw new DateFullyBookedError(desiredDate);
+    }
+    throw new DateNotAvailableError(desiredDate, effectiveStatus);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 예약 생성
 //
@@ -178,9 +213,10 @@ export async function createReservation(
     throw new ReservationNotReadyError(readiness.missingFields);
   }
 
+  validateBetweenCleaningTimes(input);
+
   // 계좌 정보는 예약 생성 시점에 필요하지 않다.
   // 필수 동의 검증을 통과한 뒤 revealDepositAccount()에서만 조회한다.
-  const pricing = await getPricingSettings();
 
   // 서비스 3종 동의 완료 여부 — 모두 완료된 경우에만 동의서 버전/시각을 기록한다
   // 약관 원문이 준비되지 않았으면 동의 자체를 유효한 것으로 기록하지 않는다.
@@ -196,9 +232,25 @@ export async function createReservation(
   let reservationId = 0;
 
   await withTransaction(async () => {
-    await lockReservationSlot(input.desiredDate, input.timeSlot);
+    // 같은 날짜의 일반 예약과 사이청소가 서로 엇갈려 들어오지 않도록
+    // 모든 신규 예약이 날짜 단위 all_day advisory lock을 먼저 공유한다.
+    await lockReservationSlot(input.desiredDate, "all_day");
+
     // 3. 슬롯 가용성 재검증 (DB lock 후)
-    await validateSlotAvailability(input.desiredDate, input.timeSlot);
+    if (input.serviceType === "사이청소") {
+      if (input.timeSlot !== "all_day") {
+        throw new DateNotAvailableError(input.desiredDate, "invalid_between_cleaning_slot");
+      }
+      await lockReservationSlot(input.desiredDate, "morning");
+      await lockReservationSlot(input.desiredDate, "afternoon");
+      await validateAllDayAvailability(input.desiredDate);
+    } else {
+      if (input.timeSlot === "all_day") {
+        throw new DateNotAvailableError(input.desiredDate, "invalid_regular_slot");
+      }
+      await lockReservationSlot(input.desiredDate, input.timeSlot);
+      await validateSlotAvailability(input.desiredDate, input.timeSlot);
+    }
 
     // 4. 서버에서 할인 자격 계산
     const eligible = await computeInstantDiscountEligible(
@@ -210,12 +262,13 @@ export async function createReservation(
     // 5. 견적 계산 (신규 형식 — houseTypeKey / jipjeongriPackage 사용)
     let estimatedTotal: number | null = null;
     let estimatedBalance: number | null = null;
+    let depositAmountSnap: number | null = null;
     let extraPriceSnapshot: number | null = null;
     let optionBreakdownSnapshot: string | null = null;
     let instantDiscountSnapshot: number | null = null;
-    // base_price_snapshot = 원본 입주 기준가격 (multiplier 적용 전)
+    // base_price_snapshot = 선택한 서비스/상품의 독립 기본가격 snapshot
     let basePriceSnap: number | null = null;
-    // price_multiplier = 파생 상품 승수 (사이청소 1.5, 거주청소 1.1 등)
+    // price_multiplier = 레거시 컬럼 호환용. 독립 가격 모델에서는 항상 1.0
     let priceMultiplierSnap: number = 1.0;
 
     try {
@@ -232,10 +285,11 @@ export async function createReservation(
       });
       estimatedTotal = q.estimatedTotal;
       estimatedBalance = q.estimatedBalance;
+      depositAmountSnap = q.depositAmount;
       extraPriceSnapshot = q.extraTotal;
       optionBreakdownSnapshot = JSON.stringify(q.optionBreakdown);
       instantDiscountSnapshot = q.instantDiscount > 0 ? q.instantDiscount : null;
-      // 원본 기준가격 저장 (사이청소라면 입주청소 기준가격)
+      // 선택한 서비스/상품의 독립 기본가격 저장
       basePriceSnap = q.basePrice > 0 ? q.basePrice : null;
       priceMultiplierSnap = q.multiplier;
     } catch {
@@ -290,8 +344,8 @@ export async function createReservation(
       houseStructure: input.houseStructure ?? null,
       occupancyStatus: input.occupancyStatus ?? null,
       desiredDate: input.desiredDate,
-      // 사이청소는 종일 작업이므로 all_day 슬롯으로 저장한다.
-      // 해당 날짜의 오전·오후가 함께 보호된다.
+      // 사이청소는 실제 작업시간과 별개로 날짜 보호를 위해 all_day 슬롯으로 저장한다.
+      // 해당 날짜의 오전·오후를 우선 잠근 뒤 관리자가 남는 슬롯만 재개방한다.
       timeSlot: input.serviceType === "사이청소" ? "all_day" : input.timeSlot,
       entryRoute: input.entryRoute,
       extraOptions: JSON.stringify(input.extraOptions ?? []),
@@ -300,7 +354,7 @@ export async function createReservation(
       basePriceSnapshot: basePriceSnap,
       extraPriceSnapshot,
       optionBreakdownSnapshot,
-      depositAmountSnapshot: pricing.depositAmount,
+      depositAmountSnapshot: depositAmountSnap,
       instantDiscountSnapshot,
       estimatedTotalSnapshot: estimatedTotal,
       estimatedBalanceSnapshot: estimatedBalance,
@@ -334,9 +388,9 @@ export async function createReservation(
       areaDongCode: input.areaDongCode ?? null,
     });
 
-    // 예약 신청 단계에서는 payment를 생성하지 않는다.
-    // 관리자가 승인(approveReservation)하는 시점에 금액을 확정하고 payment를 만든다.
-    // 이렇게 해야 승인 전 고객에게 계좌/입금기한이 노출되지 않고 불필요한 환불이 발생하지 않는다.
+    // 예약 row를 먼저 received 상태로 생성한다.
+    // 고객 4단계 완료 직후 deposit-account API가 서버 검증을 다시 거쳐 payment를 만들고
+    // approved_awaiting_deposit 상태로 전환한다.
     await reservationRepo.setReservationStatusRaw(reservationId, "received");
 
     await reservationRepo.insertLog(
@@ -593,11 +647,13 @@ export async function revealDepositAccount(
       await lockReservationSlot(reservation.desired_date, slot);
       const view = await getDaySlotView(reservation.desired_date);
       const slotView = slot === "morning" ? view.morning : view.afternoon;
-      const others = await reservationRepo.countActiveReservationsOnSlotExcluding(
-        reservation.desired_date,
-        slot,
-        reservationId
-      );
+      const others = slotView.reopened
+        ? await reservationRepo.countDirectActiveReservationsOnSlotExcluding(
+            reservation.desired_date, slot, reservationId
+          )
+        : await reservationRepo.countActiveReservationsOnSlotExcluding(
+            reservation.desired_date, slot, reservationId
+          );
       if (slotView.status === "off" || slotView.status === "consult_required") {
         throw new DepositAccountError(
           `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"}은 현재 예약을 받을 수 없습니다.`,
@@ -649,11 +705,17 @@ export async function revealDepositAccount(
       );
     }
 
-    // 5) 예약금 결정 — price_rules.deposit_amount 조회 (이 시점 값을 snapshot으로 고정)
-    const houseTypeKey = reservation.house_type_key ?? "";
-    let depositAmount = houseTypeKey
-      ? await getDepositAmountForHouseType(houseTypeKey)
-      : 0;
+    // 5) 예약금 결정 — 예약 생성 시점의 서비스×상품 snapshot을 최우선으로 사용한다.
+    //    레거시 예약처럼 snapshot이 없는 경우에만 현재 서비스×상품 row로 보완한다.
+    const productKey = reservation.product_key ?? reservation.house_type_key ?? "";
+    let depositAmount = Number(reservation.deposit_amount_snapshot ?? 0);
+    if (!(Number.isFinite(depositAmount) && depositAmount > 0) && productKey) {
+      const product = await getServiceProductPrice(
+        reservation.service_type,
+        productKey
+      );
+      depositAmount = Number(product?.depositAmount ?? 0);
+    }
     depositAmount = Math.round(depositAmount);
 
     if (!Number.isFinite(depositAmount) || depositAmount < 0) {
@@ -817,13 +879,15 @@ export async function confirmReservation(
   if (reservation.desired_date && reservation.time_slot &&
       reservation.time_slot !== "all_day") {
     const slot = reservation.time_slot as "morning" | "afternoon";
-    const othersCount = await reservationRepo.countActiveReservationsOnSlotExcluding(
-      reservation.desired_date,
-      slot,
-      reservationId
-    );
     const view = await getDaySlotView(reservation.desired_date);
     const slotView = slot === "morning" ? view.morning : view.afternoon;
+    const othersCount = slotView.reopened
+      ? await reservationRepo.countDirectActiveReservationsOnSlotExcluding(
+          reservation.desired_date, slot, reservationId
+        )
+      : await reservationRepo.countActiveReservationsOnSlotExcluding(
+          reservation.desired_date, slot, reservationId
+        );
 
     // 달력 자체가 off(휴무) 또는 상담필요인 경우만 차단
     // "closed"는 자기 예약이 포함된 카운트 기준이므로 여기서 판단하지 않음
@@ -967,6 +1031,11 @@ export async function changeReservationSlot(
 ): Promise<void> {
   const current = await reservationRepo.findReservationById(reservationId);
   if (!current) throw new Error("예약을 찾을 수 없습니다.");
+  if (current.service_type === "사이청소") {
+    throw new Error(
+      "사이청소 예약은 all_day 상태를 유지해야 합니다. 남는 오전/오후는 슬롯 재개방 기능을 사용해주세요."
+    );
+  }
 
   await withTransaction(async () => {
     await lockReservationSlot(newDate, newTimeSlot);
@@ -981,12 +1050,15 @@ export async function changeReservationSlot(
       throw new DateNotAvailableError(newDate, "consult_required");
     }
 
-    // 자기 예약을 제외한 카운트로 잔여석 재계산
-    const othersCount = await reservationRepo.countActiveReservationsOnSlotExcluding(
-      newDate,
-      newTimeSlot,
-      reservationId
-    );
+    // 자기 예약을 제외한 카운트로 잔여석 재계산.
+    // 재개방 슬롯에서는 날짜 보호용 all_day 예약은 capacity 점유로 세지 않는다.
+    const othersCount = slotView.reopened
+      ? await reservationRepo.countDirectActiveReservationsOnSlotExcluding(
+          newDate, newTimeSlot, reservationId
+        )
+      : await reservationRepo.countActiveReservationsOnSlotExcluding(
+          newDate, newTimeSlot, reservationId
+        );
     const capacity = slotView.capacity;
     if (othersCount >= capacity) {
       throw new SlotConflictError(newDate, newTimeSlot);

@@ -93,6 +93,8 @@ export async function POST(
     }),
     desiredDate: updated.desired_date,
     timeSlot: updated.time_slot,
+    moveOutTime: updated.move_out_time,
+    moveInTime: updated.move_in_time,
     // 금액: 총 청소금액 = 예약 선금 + 현장 잔금 (VAT 자동 가산 없음)
     totalAmount: updated.final_confirmed_total,
     depositAmount: updated.deposit_amount_snapshot,

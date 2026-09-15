@@ -74,6 +74,30 @@ export function remove(date: string, timeSlot: TimeSlot): Promise<void> {
   return execute("DELETE FROM calendar_days WHERE date = ? AND time_slot = ?", [date, timeSlot]);
 }
 
+export async function countDirectActiveReservationsOnSlot(
+  date: string,
+  timeSlot: "morning" | "afternoon"
+): Promise<number> {
+  const row = await queryRow<{ c: number | string }>(
+    `SELECT COUNT(*) as c FROM reservations rs
+      WHERE rs.desired_date = ?
+        AND rs.time_slot = ?
+        AND rs.reservation_status IN ('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')
+        AND NOT (
+          rs.reservation_status IN ('awaiting_deposit','approved_awaiting_deposit')
+          AND EXISTS (
+            SELECT 1 FROM payments p
+             WHERE p.reservation_id = rs.id
+               AND p.payment_status = 'pending'
+               AND p.payment_due_date IS NOT NULL
+               AND p.payment_due_date < datetime('now')
+          )
+        )`,
+    [date, timeSlot]
+  );
+  return Number(row?.c ?? 0);
+}
+
 export async function countActiveReservationsOnSlot(date: string, timeSlot: TimeSlot): Promise<number> {
   // 입금기한(계좌 안내 후 24시간)이 지난 미입금 예약은 슬롯을 더 이상 점유하지 않는다.
   // 예약 row는 삭제하지 않고 슬롯만 자동 해제한다 (요구사항 25·26).
@@ -264,9 +288,9 @@ export function deleteReopenOverride(date: string, timeSlot: string): Promise<vo
 }
 
 /**
- * 범위 내 사이청소(all_day) 예약이 점유한 날짜를 반환한다.
+ * 범위 내 사이청소(all_day) 예약이 날짜 보호를 적용 중인 날짜를 반환한다.
  *
- * 사이청소는 종일 작업이므로 해당 날짜의 오전·오후를 모두 보호한다.
+ * 실제 작업시간과 별개로 오전·오후를 우선 보호하고, 관리자가 필요한 슬롯만 재개방한다.
  */
 export async function findAllDayBlockedDates(start: string, end: string): Promise<Set<string>> {
   const rows = await queryRows<{ desired_date: string }>(

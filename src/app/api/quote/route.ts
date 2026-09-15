@@ -27,7 +27,7 @@ const quoteSchema = z.object({
   extraOptions: z.array(z.enum(ALLOWED_OPTIONS as [string, ...string[]])).optional(),
   entryRoute: z.enum(["calendar", "direct"]).optional(),
   desiredDate: z.string().optional(),
-  timeSlot: z.enum(["morning", "afternoon"]).optional(),
+  timeSlot: z.enum(["morning", "afternoon", "all_day"]).optional(),
   /** 반려동물 있음 — 상담 전환 판정에 사용 */
   hasPet: z.boolean().optional(),
 });
@@ -90,7 +90,11 @@ export async function POST(req: NextRequest) {
   }
 
   let eligible = false;
-  if (entryRoute === "calendar" && desiredDate && timeSlot) {
+  if (
+    entryRoute === "calendar" &&
+    desiredDate &&
+    (timeSlot === "morning" || timeSlot === "afternoon")
+  ) {
     try {
       eligible = await computeInstantDiscountEligible("calendar", desiredDate, timeSlot);
     } catch {

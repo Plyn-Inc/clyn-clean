@@ -40,9 +40,11 @@ interface AreaOption {
 export default function RegionSelect({
   value,
   onChange,
+  onImportedChange,
 }: {
   value: RegionValue;
   onChange: (next: RegionValue) => void;
+  onImportedChange?: (imported: boolean) => void;
 }) {
   const [sidoList, setSidoList] = useState<AreaOption[]>([]);
   const [midList, setMidList] = useState<AreaOption[]>([]);
@@ -55,10 +57,15 @@ export default function RegionSelect({
     const res = await fetch(url);
     if (!res.ok) throw new Error("regions fetch failed");
     const data = (await res.json()) as { areas?: AreaOption[]; imported?: boolean };
-    if (data.imported === false) setImported(false);
-    else setImported(true);
+    if (data.imported === false) {
+      setImported(false);
+      onImportedChange?.(false);
+    } else {
+      setImported(true);
+      onImportedChange?.(true);
+    }
     return data.areas ?? [];
-  }, []);
+  }, [onImportedChange]);
 
   useEffect(() => {
     let cancelled = false;
@@ -68,11 +75,14 @@ export default function RegionSelect({
         const list = await fetchAreas();
         if (!cancelled) setSidoList(list);
       } catch {
-        if (!cancelled) setImported(false);
+        if (!cancelled) {
+          setImported(false);
+          onImportedChange?.(false);
+        }
       }
     });
     return () => { cancelled = true; };
-  }, [fetchAreas]);
+  }, [fetchAreas, onImportedChange]);
 
   async function pickSido(code: string) {
     const sido = sidoList.find((s) => s.code === code);

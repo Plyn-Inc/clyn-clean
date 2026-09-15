@@ -4,14 +4,30 @@ import { useRef, useState } from "react";
 import ReservationCalendar from "./ReservationCalendar";
 import BookingForm from "./BookingForm";
 import type { SelectedSlot } from "./ReservationCalendar";
+import { SERVICE_TYPES } from "@/lib/types";
 
 export default function BookingSection() {
   const [selectedSlot, setSelectedSlot] = useState<SelectedSlot | null>(null);
+  const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  const [activeService, setActiveService] = useState(SERVICE_TYPES[0]);
   const bookingRef = useRef<HTMLDivElement | null>(null);
 
   function handleSelectSlot(slot: SelectedSlot) {
     setSelectedSlot(slot);
+    setSelectedDate(null);
     bookingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function handleSelectDate(date: string) {
+    setSelectedDate(date);
+    setSelectedSlot(null);
+    bookingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  function handleServiceChange(nextService: string) {
+    setActiveService(nextService);
+    setSelectedSlot(null);
+    setSelectedDate(null);
   }
 
   function handleSelectConsult(date: string) {
@@ -25,11 +41,15 @@ export default function BookingSection() {
       <div id="calendar" className="scroll-mt-24">
         <ReservationCalendar
           onSelectSlot={handleSelectSlot}
+          onSelectDate={handleSelectDate}
           onSelectConsultDate={handleSelectConsult}
+          selectedSlot={selectedSlot}
+          selectedDate={selectedDate}
+          dateOnly={activeService === "사이청소"}
         />
       </div>
       <div id="booking" ref={bookingRef} className="scroll-mt-24">
-        <BookingForm selectedSlot={selectedSlot} />
+        <BookingForm selectedSlot={selectedSlot} selectedDate={selectedDate} onServiceChange={handleServiceChange} />
       </div>
     </div>
   );

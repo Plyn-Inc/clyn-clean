@@ -353,6 +353,32 @@ export function setReservationSlot(reservationId: number, newDate: string, newTi
   );
 }
 
+export async function countDirectActiveReservationsOnSlotExcluding(
+  date: string,
+  timeSlot: "morning" | "afternoon",
+  excludeReservationId: number
+): Promise<number> {
+  const row = await queryRow<{ c: number | string }>(
+    `SELECT COUNT(*) as c FROM reservations rs
+     WHERE rs.desired_date = ?
+       AND rs.time_slot = ?
+       AND rs.reservation_status IN ('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')
+       AND rs.id != ?
+       AND NOT (
+         rs.reservation_status IN ('awaiting_deposit','approved_awaiting_deposit')
+         AND EXISTS (
+           SELECT 1 FROM payments p
+           WHERE p.reservation_id = rs.id
+             AND p.payment_status = 'pending'
+             AND p.payment_due_date IS NOT NULL
+             AND p.payment_due_date < datetime('now')
+         )
+       )`,
+    [date, timeSlot, excludeReservationId]
+  );
+  return Number(row?.c ?? 0);
+}
+
 export async function countActiveReservationsOnSlotExcluding(
   date: string,
   timeSlot: "morning" | "afternoon",

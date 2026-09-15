@@ -224,7 +224,7 @@ export interface Reservation {
   address: string;
   area_pyeong: number | null;
   house_type_key: string | null;       // 주택유형 키 (원룸/24평 등)
-  price_multiplier: number;            // 파생 상품 승수 (1.0/1.5/1.1)
+  price_multiplier: number;            // 레거시 호환 컬럼. 독립 가격 모델에서는 1.0
   house_structure: string | null;
   occupancy_status: OccupancyStatus | null;
   desired_date: string | null;

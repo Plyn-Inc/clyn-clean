@@ -69,6 +69,10 @@ before(async () => {
   // Use a separate connection for fixture writes; production modules use their singleton connection.
   db = new DatabaseSync(dbPath);
   db.exec('PRAGMA foreign_keys = ON;');
+  // Production B안은 행정구역 master가 비어 있으면 직접예약을 막는다.
+  // 회귀 테스트에서는 예약 흐름 자체를 검증할 수 있도록 테스트 전용 master 존재 상태만 만든다.
+  db.prepare(`INSERT OR IGNORE INTO administrative_areas(code,name,level,parent_code,is_current)
+              VALUES('TEST-AREA-ROOT','테스트지역','sido',NULL,1)`).run();
   pricing = await import('../src/lib/pricing.ts');
   specialDays = await import('../src/lib/special-days.ts');
   calendar = await import('../src/lib/calendar.ts');
@@ -100,6 +104,8 @@ function resetOperationalData() {
     DELETE FROM reservations;
     DELETE FROM calendar_days;
   `);
+  db.prepare(`INSERT OR IGNORE INTO administrative_areas(code,name,level,parent_code,is_current)
+              VALUES('TEST-AREA-ROOT','테스트지역','sido',NULL,1)`).run();
   setSetting('deposit_amount', '50000');
   setSetting('bank_name', '테스트은행');
   setSetting('bank_account_number', '1234567890');
@@ -235,6 +241,19 @@ test('P0-5 40평 이상은 상담 전환 대상이며 예약 생성 API가 거�
   assert.equal(res.body.consultReason, 'size_40_plus');
 });
 
+
+test('B안 행정구역 master 미임포트 상태에서는 직접 예약 API를 차단한다', async () => {
+  db.exec('DELETE FROM administrative_areas;');
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(
+    fullyAgreedReservationBody({
+      customerPhone: '010-4000-0003', desiredDate: '2026-12-28',
+    })
+  ));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'REGION_MASTER_NOT_READY');
+  assert.match(res.body.error, /행정구역|상담/);
+});
+
 // [위험 보존] 정식 가격표 밖의 특수 케이스(기준가 확정 불가)는
 // 여전히 최종금액 없이 계좌 단계로 진입할 수 없어야 한다.
 test('P0-5(negative) 기준가가 확정되지 않은 예약은 최종금액 없이 계좌 단계로 진입할 수 없다', async () => {
@@ -264,18 +283,48 @@ test('P1-1 quote API는 40평 선택에서 actualPyeong 39를 거부한다', asy
 });
 
 test('P1-2 사이청소 예약 API는 퇴거/입주 시간을 서버에서 필수 검증한다', async () => {
-  const res = await reservationsRoute.POST(makeReq(validReservationBody({ serviceType: '사이청소' })));
+  const res = await reservationsRoute.POST(makeReq(validReservationBody({ serviceType: '사이청소', timeSlot: 'all_day' })));
   assert.equal(res.status, 400);
   assert.match(res.body.error, /퇴거|입주|시간/);
 });
 
 test('P1-2 사이청소 예약 API는 퇴거 완료보다 이른 입주 시간을 거부한다', async () => {
   const res = await reservationsRoute.POST(makeReq(validReservationBody({
-    serviceType: '사이청소',
+    serviceType: '사이청소', timeSlot: 'all_day',
     moveOutTime: '2026-12-15T14:00',
     moveInTime: '2026-12-15T13:00',
   })));
   assert.equal(res.status, 400);
+});
+
+
+test('P1-2 사이청소는 오전/오후 슬롯으로 직접 접수할 수 없다', async () => {
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'morning',
+    customerPhone: '010-4100-0001', desiredDate: '2027-01-11',
+    moveOutTime: '2027-01-11T09:00', moveInTime: '2027-01-11T17:00',
+  })));
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'BETWEEN_CLEANING_ALL_DAY_REQUIRED');
+});
+
+test('P1-2 일반 청소는 all_day 슬롯으로 접수할 수 없다', async () => {
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    serviceType: '입주청소', houseTypeKey: '24평', timeSlot: 'all_day',
+    customerPhone: '010-4100-0002', desiredDate: '2027-01-12',
+  })));
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'TIME_SLOT_REQUIRED');
+});
+
+test('P1-2 사이청소 퇴거/입주 시간은 선택 날짜와 같은 날이어야 한다', async () => {
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
+    customerPhone: '010-4100-0003', desiredDate: '2027-01-13',
+    moveOutTime: '2027-01-12T23:00', moveInTime: '2027-01-13T10:00',
+  })));
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /같은 날짜|예약 날짜/);
 });
 
 test('P1-3 awaiting_deposit에서 awaiting_admin_check으로 일반 상태 API 우회 전이를 막는다', async () => {
@@ -305,8 +354,9 @@ test('P1-4 비활성 옵션은 quote에서 선택 자체를 거부한다', async
 
 test('[정책 변경] 예약 snapshot에 서비스별 가격과 휴일 가산금이 보존된다', async () => {
   const { reservation } = await createReservationWithDepositAccount({
-    serviceType: '사이청소', houseTypeKey: '24평',
+    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
     customerPhone: '010-7100-0001', desiredDate: '2027-08-15',
+    moveOutTime: '2027-08-15T09:00', moveInTime: '2027-08-15T17:00',
   });
   const row = db.prepare(
     `SELECT product_key, base_price_snapshot, holiday_surcharge_snapshot, total_amount_snapshot
@@ -553,8 +603,9 @@ test('34평 예약은 선입금 확인 후 자기 슬롯 점유 때문에 최종
 
 test('34평 사이청소 snapshot은 독립 가격 기준으로 보존된다', async () => {
   const { reservation } = await createReservationWithDepositAccount({
-    serviceType: '사이청소', houseTypeKey: '34평',
+    serviceType: '사이청소', houseTypeKey: '34평', timeSlot: 'all_day',
     customerPhone: '010-7200-0001', desiredDate: '2027-08-17',
+    moveOutTime: '2027-08-17T09:00', moveInTime: '2027-08-17T17:00',
   });
   const priceRow = db.prepare(
     `SELECT base_price FROM price_rules WHERE service_type='사이청소' AND product_key='34평'`
@@ -668,7 +719,7 @@ test('비활성 옵션은 quote를 거치지 않은 직접 예약 API에서도 �
 test('사이청소 시간은 extra_notes가 아니라 정식 컬럼에 저장된다', async () => {
   const res = await reservationsRoute.POST(makeReqWithFreshIp(
     fullyAgreedReservationBody({
-      serviceType: '사이청소', houseTypeKey: '24평',
+      serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
       customerPhone: '010-7300-0001', desiredDate: '2027-08-20',
       moveOutTime: '2027-08-20T09:00', moveInTime: '2027-08-20T17:00',
     })
@@ -690,7 +741,7 @@ test('사이청소 예약은 해당 날짜의 오전·오후를 함께 막는다
   const date = '2027-08-21';
   await reservationsRoute.POST(makeReqWithFreshIp(
     fullyAgreedReservationBody({
-      serviceType: '사이청소', houseTypeKey: '24평',
+      serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
       customerPhone: '010-7300-0002', desiredDate: date,
       moveOutTime: `${date}T09:00`, moveInTime: `${date}T17:00`,
     })
@@ -701,14 +752,13 @@ test('사이청소 예약은 해당 날짜의 오전·오후를 함께 막는다
   assert.equal(view.morning.blockedByAllDay, true);
 });
 
-test('관리자 재개방으로 사이청소 보호 슬롯을 다시 열 수 있다', async () => {
+test('관리자 재개방으로 사이청소 보호 슬롯을 기본 capacity에서도 다시 열 수 있다', async () => {
   const date = '2027-08-22';
-  // 사이청소 all_day 예약이 슬롯 capacity를 소진하지 않도록 여유를 준다
-  await calendar.setCalendarDay(date, 'available', 2, null, 'morning');
-  await calendar.setCalendarDay(date, 'available', 2, null, 'afternoon');
+  await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
+  await calendar.setCalendarDay(date, 'available', 1, null, 'afternoon');
   await reservationsRoute.POST(makeReqWithFreshIp(
     fullyAgreedReservationBody({
-      serviceType: '사이청소', houseTypeKey: '24평',
+      serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
       customerPhone: '010-7300-0003', desiredDate: date,
       moveOutTime: `${date}T09:00`, moveInTime: `${date}T13:00`,
     })
@@ -720,6 +770,35 @@ test('관리자 재개방으로 사이청소 보호 슬롯을 다시 열 수 있
   assert.equal(view.morning.effectiveStatus, 'closed', '오전은 여전히 보호');
   assert.equal(view.afternoon.effectiveStatus, 'available', '오후는 재개방');
   assert.equal(view.afternoon.reopened, true);
+});
+
+
+test('기존 일반 예약이 있는 날짜에는 사이청소 all_day 접수를 막는다', async () => {
+  const date = '2027-08-24';
+  await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
+  await calendar.setCalendarDay(date, 'available', 1, null, 'afternoon');
+  await createReservationWithDepositAccount({
+    customerPhone: '010-7300-0010', desiredDate: date, timeSlot: 'morning',
+  });
+
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
+    customerPhone: '010-7300-0011', desiredDate: date,
+    moveOutTime: `${date}T10:00`, moveInTime: `${date}T18:00`,
+  })));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'DATE_FULLY_BOOKED');
+});
+
+test('사이청소 예약 자체는 관리자가 오전/오후 슬롯으로 변환할 수 없다', async () => {
+  const date = '2027-08-25';
+  await calendar.setCalendarDay(date, 'available', 2, null, 'morning');
+  await calendar.setCalendarDay(date, 'available', 2, null, 'afternoon');
+  const created = await createBetweenCleaning(date, '010-7300-0012');
+  await assert.rejects(
+    () => reservations.changeReservationSlot(created.id, date, 'morning', '관리자', null),
+    /all_day|재개방/
+  );
 });
 
 test('실제 예약 점유는 재개방 override보다 우선한다', async () => {
@@ -3407,7 +3486,7 @@ test('내부 service key "사이청소"는 변경되지 않는다', async () => 
   // 예약 저장도 내부 key 유지 (사이청소는 all_day 슬롯)
   const res = await reservationsRoute.POST(makeReqWithFreshIp(
     fullyAgreedReservationBody({
-      serviceType: '사이청소', houseTypeKey: '24평',
+      serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
       customerPhone: '010-9800-0002', desiredDate: '2027-07-25',
       moveOutTime: '2027-07-25T09:00', moveInTime: '2027-07-25T17:00',
     })
@@ -4039,12 +4118,36 @@ test('예약금과 잔금 snapshot도 가격표 변경에 영향받지 않는다
   }
 });
 
+test('서비스별 예약금 snapshot은 가격표 변경 전에 생성된 값을 계좌 안내에 사용한다', async () => {
+  const date = '2027-09-18';
+  const original = db.prepare(
+    `SELECT deposit_amount FROM price_rules WHERE service_type='사이청소' AND product_key='24평'`
+  ).get();
+  const { reservation } = await reservations.createReservation(fullyAgreedReservationBody({
+    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
+    customerPhone: '010-7500-0010', desiredDate: date,
+    moveOutTime: `${date}T09:00`, moveInTime: `${date}T17:00`,
+  }));
+  try {
+    db.prepare(
+      `UPDATE price_rules SET deposit_amount=99000 WHERE service_type='사이청소' AND product_key='24평'`
+    ).run();
+    await reservations.revealDepositAccount(reservation.id);
+    const payment = db.prepare(`SELECT amount FROM payments WHERE reservation_id=?`).get(reservation.id);
+    assert.equal(payment.amount, original.deposit_amount, '생성 시점 예약금 snapshot을 사용해야 한다');
+  } finally {
+    db.prepare(
+      `UPDATE price_rules SET deposit_amount=? WHERE service_type='사이청소' AND product_key='24평'`
+    ).run(original.deposit_amount);
+  }
+});
+
 // --- 사이청소 all_day / reopen 전체 계약 ---
 
 async function createBetweenCleaning(date, phone) {
   const res = await reservationsRoute.POST(makeReqWithFreshIp(
     fullyAgreedReservationBody({
-      serviceType: '사이청소', houseTypeKey: '24평',
+      serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
       customerPhone: phone, desiredDate: date,
       moveOutTime: `${date}T09:00`, moveInTime: `${date}T17:00`,
     })

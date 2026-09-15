@@ -121,10 +121,16 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
                   : reservation.time_slot === "afternoon"
                     ? "오후"
                     : reservation.time_slot === "all_day"
-                      ? "시간 미지정 (구형 예약)"
+                      ? "사이청소 종일 보호"
                       : reservation.time_slot || "-"
               }
             />
+            {reservation.service_type === "사이청소" && (
+              <>
+                <Field label="퇴거 완료 예정" value={formatReservationDateTime(reservation.move_out_time)} />
+                <Field label="새 입주 예정" value={formatReservationDateTime(reservation.move_in_time)} />
+              </>
+            )}
             <Field label="진입 경로" value={reservation.entry_route === "calendar" ? "캘린더 클릭" : "바로 예약하기"} />
             <Field
               label="추가사항"
@@ -192,13 +198,28 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
         </div>
 
         <div className="space-y-5">
-          {/* 시간대 변경 */}
-          <SlotChangePanel
-            reservationId={Number(id)}
-            currentDate={reservation.desired_date ?? ""}
-            currentSlot={reservation.time_slot}
-            onDone={load}
-          />
+          {/* 일반 예약은 시간대 변경, 사이청소는 all_day 유지 + 슬롯 재개방만 사용 */}
+          {reservation.service_type !== "사이청소" ? (
+            <SlotChangePanel
+              reservationId={Number(id)}
+              currentDate={reservation.desired_date ?? ""}
+              currentSlot={reservation.time_slot}
+              onDone={load}
+            />
+          ) : (
+            <div className="rounded-2xl border border-[var(--line)] bg-white p-5">
+              <p className="text-sm font-semibold">사이청소 일정 보호</p>
+              <p className="mt-1.5 text-xs leading-relaxed text-[var(--ink-soft)]">
+                이 예약은 all_day 상태를 유지합니다. 퇴거·입주 시간을 확인한 뒤 실제로 비는 오전/오후 슬롯만 별도 재개방해주세요.
+              </p>
+              <Link
+                href="/admin/slot-reopen"
+                className="mt-4 block w-full rounded-lg border border-[var(--navy)] px-3 py-2.5 text-center text-sm font-semibold text-[var(--navy)] hover:bg-[var(--sand-deep)]"
+              >
+                슬롯 재개방 관리
+              </Link>
+            </div>
+          )}
 
           {/* 최종 견적금액 입력 (40평 이상 또는 상담 후 확정 항목이 있는 경우) */}
           <FinalTotalPanel
@@ -321,6 +342,12 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
       </div>
     </div>
   );
+}
+
+function formatReservationDateTime(value: string | null): string {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("ko-KR");
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {

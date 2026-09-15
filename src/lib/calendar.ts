@@ -38,19 +38,21 @@ async function toSlotView(
 ): Promise<CalendarDayView> {
   const capacity = slotRow?.capacity ?? await defaultCapacity();
   const adminStatus: CalendarStatus = allDayRow?.status ?? slotRow?.status ?? "available";
-  const bookedCount = await calendarRepo.countActiveReservationsOnSlot(date, timeSlot);
-  const remaining = Math.max(capacity - bookedCount, 0);
-  let effectiveStatus: CalendarStatus = adminStatus;
-  if (adminStatus === "available" && remaining <= 0) effectiveStatus = "closed";
 
-  // 사이청소(all_day) 보호 — 범위 조회(getSlotCalendarRange)와 동일 규칙.
-  // 관리자가 재개방한 슬롯만 다시 열리며, 실제 예약 점유가 우선한다.
-  const [blockedSet, override] = await Promise.all([
+  // all_day 예약은 날짜 보호용이다. 관리자가 슬롯을 재개방한 경우에는
+  // 그 all_day 예약 자체가 오전/오후 capacity를 소진한 것으로 계산하지 않는다.
+  const [bookedCount, directBookedCount, blockedSet, override] = await Promise.all([
+    calendarRepo.countActiveReservationsOnSlot(date, timeSlot),
+    calendarRepo.countDirectActiveReservationsOnSlot(date, timeSlot),
     calendarRepo.findAllDayBlockedDates(date, date),
     calendarRepo.findReopenOverride(date, timeSlot),
   ]);
   const blockedByAllDay = blockedSet.has(date);
   const reopened = override?.is_open === 1;
+  const capacityBookedCount = blockedByAllDay && reopened ? directBookedCount : bookedCount;
+  const remaining = Math.max(capacity - capacityBookedCount, 0);
+  let effectiveStatus: CalendarStatus = adminStatus;
+  if (adminStatus === "available" && remaining <= 0) effectiveStatus = "closed";
   if (blockedByAllDay && !reopened) effectiveStatus = "closed";
 
   return {
@@ -141,18 +143,20 @@ export async function getSlotCalendarRange(startDate: string, endDate: string): 
   ): CalendarDayView {
     const capacity = slotRow?.capacity ?? defaultCap;
     const adminStatus: CalendarStatus = allDayRow?.status ?? slotRow?.status ?? "available";
+    const directBookedCount = activeCounts.get(`${date}|${timeSlot}`) ?? 0;
     const bookedCount = bookedOn(date, timeSlot);
-    const remaining = Math.max(capacity - bookedCount, 0);
-    let effectiveStatus: CalendarStatus = adminStatus;
-    if (adminStatus === "available" && remaining <= 0) effectiveStatus = "closed";
 
     // ── 사이청소 all_day 보호 ────────────────────────────────────────────
-    // 사이청소는 종일 작업이므로 해당 날짜의 오전·오후를 기본적으로 막는다.
-    // 관리자가 수동 재개방(override)한 슬롯만 다시 열린다.
-    // 단, 실제 예약 점유(remaining <= 0)는 override보다 우선한다.
+    // all_day는 실제 작업시간과 별개의 날짜 보호 플래그다.
+    // 관리자가 재개방한 슬롯은 all_day 예약을 capacity에서 제외하되,
+    // 해당 오전/오후에 들어온 실제 예약은 그대로 capacity를 소진한다.
     const blockedByAllDay = allDayBlocked.has(date);
     const override = reopenOverrides.get(`${date}|${timeSlot}`);
     const reopened = override?.is_open === 1;
+    const capacityBookedCount = blockedByAllDay && reopened ? directBookedCount : bookedCount;
+    const remaining = Math.max(capacity - capacityBookedCount, 0);
+    let effectiveStatus: CalendarStatus = adminStatus;
+    if (adminStatus === "available" && remaining <= 0) effectiveStatus = "closed";
     if (blockedByAllDay && !reopened) {
       effectiveStatus = "closed";
     }

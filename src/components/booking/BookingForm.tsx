@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   SERVICE_TYPES,
   HOUSE_TYPES_FIXED,
@@ -22,25 +22,17 @@ import { bookingMaxDate, isWithinBookingWindow, outOfWindowMessage } from "@/lib
 import { callApi } from "@/lib/error-messages";
 
 /**
- * 단계형 예약 폼.
+ * 고객 예약 4단계.
+ * 1 서비스 → 2 날짜 → 3 고객정보 → 4 확인·동의 → 예약 선금 안내
  *
- * 흐름:
- *   1 서비스/주택유형/평형
- *   2 날짜/시간
- *   3 추가 서비스 / 현장정보 / 반려동물
- *   4 고객정보 (이름·연락처·작업지역)
- *   5 개인정보 동의 + 서비스 3종 동의
- *   6 최종 확인
- *   → 자동예약 가능 건만 예약금/계좌 확인
- *   → 상담 전환 건(40평 이상 / 반려동물 있음)은 상담접수 완료로 종료
- *
- * 금액은 서버가 단일 원천에서 계산한다. 클라이언트는 계산하지 않는다.
+ * 사이청소는 오전/오후를 선택하지 않고 날짜 + 퇴거/입주 시간으로 접수한다.
+ * 신규 사이청소의 time_slot은 all_day로 저장되어 해당 날짜를 우선 보호한다.
  */
-
 interface Quote {
   basePrice: number;
   estimatedTotal: number;
   depositAmount: number;
+  estimatedBalance: number;
   priceConfirmed: boolean;
   notice: string;
   consultRequired: boolean;
@@ -50,20 +42,27 @@ interface Quote {
   optionBreakdown: { key: string; label: string; price: number; isConsult: boolean }[];
 }
 
-type Step = 1 | 2 | 3 | 4 | 5 | 6;
+type Step = 1 | 2 | 3 | 4;
+type BookingTimeSlot = "" | "morning" | "afternoon" | "all_day";
 type Result =
   | { kind: "deposit"; info: DepositAccountInfo }
   | { kind: "consultation"; code: string; notice: string };
 
-const STEP_LABELS = ["서비스", "날짜", "현장정보", "고객정보", "동의", "확인"];
+const STEP_LABELS = ["서비스", "날짜", "고객정보", "확인·동의"];
 
-export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSlot | null }) {
+interface BookingFormProps {
+  selectedSlot: SelectedSlot | null;
+  selectedDate?: string | null;
+  onServiceChange?: (serviceType: string) => void;
+}
+
+export default function BookingForm({ selectedSlot, selectedDate, onServiceChange }: BookingFormProps) {
   const [step, setStep] = useState<Step>(1);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
 
-  // 1단계
+  // 1단계 — 서비스
   const [serviceType, setServiceType] = useState<string>(SERVICE_TYPES[0]);
   const [houseTypeKey, setHouseTypeKey] = useState("");
   const [isApartment, setIsApartment] = useState(false);
@@ -72,30 +71,26 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
   const [jipjeongriPackage, setJipjeongriPackage] = useState("1p4h");
   const [jipjeongriSpaces, setJipjeongriSpaces] = useState<string[]>([]);
 
-  // 2단계
-  const [desiredDate, setDesiredDate] = useState(selectedSlot?.date ?? "");
-  const [timeSlot, setTimeSlot] = useState<string>(selectedSlot?.timeSlot ?? "");
-  const [today, setToday] = useState("");
-  // 예약 가능 최대일 — booking-window 단일 원천
-  const maxDate = bookingMaxDate();
-
-  // 3단계
-  const [occupancyStatus, setOccupancyStatus] = useState<OccupancyStatus>("before_move_in");
+  // 2단계 — 날짜/시간
+  const [desiredDate, setDesiredDate] = useState(selectedDate ?? selectedSlot?.date ?? "");
+  const [timeSlot, setTimeSlot] = useState<BookingTimeSlot>(selectedSlot?.timeSlot ?? "");
   const [moveOutTime, setMoveOutTime] = useState("");
   const [moveInTime, setMoveInTime] = useState("");
-  const [extraNotes, setExtraNotes] = useState("");
+  const [today, setToday] = useState("");
+  const maxDate = bookingMaxDate();
 
-  // 4단계
+  // 3단계 — 고객정보 + 기존 현장정보 통합
+  const [occupancyStatus, setOccupancyStatus] = useState<OccupancyStatus>("before_move_in");
+  const [extraNotes, setExtraNotes] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerEmail, setCustomerEmail] = useState("");
   const [region, setRegion] = useState<RegionValue>(EMPTY_REGION);
+  const [regionMasterImported, setRegionMasterImported] = useState<boolean | null>(null);
+  const [manualAreaText, setManualAreaText] = useState("");
   const [address, setAddress] = useState("");
 
-  // 상담 전환 전용 동의 (서비스 3종과 분리)
-  const [consultPrivacyAgreed, setConsultPrivacyAgreed] = useState(false);
-
-  // 5단계
+  // 4단계 — 확인/동의
   const [privacyAgreed, setPrivacyAgreed] = useState(false);
   const [agreement, setAgreement] = useState<AgreementState>({
     corePrinciplesAgreed: false,
@@ -106,20 +101,27 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
   // 견적
   const [quote, setQuote] = useState<Quote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
+  const [quoteError, setQuoteError] = useState(false);
 
   const resolvedKey = isApartment
     ? apartmentSize === 40 ? "40평" : `${apartmentSize}평`
     : houseTypeKey;
-  const entryRoute = selectedSlot ? "calendar" : "direct";
+  const entryRoute = selectedSlot || selectedDate ? "calendar" : "direct";
   const is40Plus = resolvedKey === "40평";
+  const regionConsultRequired = region.serviceAvailable === false || regionMasterImported === false;
+  const consultRequired = quote?.consultRequired === true || regionConsultRequired;
 
-  // selectedSlot 동기화
-  const [prevSlot, setPrevSlot] = useState(selectedSlot);
-  if (selectedSlot !== prevSlot) {
-    setPrevSlot(selectedSlot);
-    setDesiredDate(selectedSlot?.date ?? "");
-    setTimeSlot(selectedSlot?.timeSlot ?? "");
-  }
+  useEffect(() => {
+    if (serviceType === "사이청소") {
+      if (!selectedDate) return;
+      setDesiredDate(selectedDate);
+      setTimeSlot("all_day");
+      return;
+    }
+    if (!selectedSlot) return;
+    setDesiredDate(selectedSlot.date);
+    setTimeSlot(selectedSlot.timeSlot);
+  }, [selectedSlot, selectedDate, serviceType]);
 
   useEffect(() => {
     let cancelled = false;
@@ -130,206 +132,283 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
     return () => { cancelled = true; };
   }, []);
 
-  // 서버 견적 조회 — 금액 계산은 전적으로 서버가 한다
-  const fetchQuote = useCallback(async () => {
-    if (serviceType !== "집정리" && !resolvedKey) { setQuote(null); return; }
-    try {
-      const res = await fetch("/api/quote", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          serviceType,
-          houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
-          jipjeongriPackage: serviceType === "집정리" ? jipjeongriPackage : undefined,
-          actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
-          entryRoute,
-          desiredDate: desiredDate || undefined,
-          timeSlot: timeSlot || undefined,
-        }),
-      });
-      const data = await res.json();
-      setQuote(res.ok ? data.quote : null);
-    } catch {
-      setQuote(null);
-    } finally {
-      setQuoteLoading(false);
-    }
-  }, [serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot]);
-
-  // 견적은 입력이 바뀔 때마다 서버에서 다시 받아온다.
-  // effect 내 동기 setState 경고를 피하기 위해 microtask로 넘긴다.
+  // 최신 견적 요청만 화면 상태를 갱신한다.
+  // 이전 요청은 abort하여 서비스/평형을 빠르게 바꿀 때 오래된 응답이 덮어쓰지 않게 한다.
   useEffect(() => {
-    let cancelled = false;
-    void Promise.resolve().then(() => { if (!cancelled) void fetchQuote(); });
-    return () => { cancelled = true; };
-  }, [fetchQuote]);
+    const hasProduct = serviceType === "집정리" || !!resolvedKey;
+    if (!hasProduct) {
+      void Promise.resolve().then(() => {
+        setQuote(null);
+        setQuoteError(false);
+        setQuoteLoading(false);
+      });
+      return;
+    }
 
-  const consultRequired = quote?.consultRequired === true;
+    const controller = new AbortController();
+    void Promise.resolve().then(async () => {
+      if (controller.signal.aborted) return;
+      setQuoteError(false);
+      setQuoteLoading(true);
+      try {
+        const res = await fetch("/api/quote", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            serviceType,
+            houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
+            jipjeongriPackage: serviceType === "집정리" ? jipjeongriPackage : undefined,
+            actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
+            entryRoute,
+            desiredDate: desiredDate || undefined,
+            timeSlot: serviceType === "사이청소" ? "all_day" : timeSlot || undefined,
+          }),
+        });
+        const data = await res.json();
+        if (controller.signal.aborted) return;
+        if (!res.ok) {
+          setQuote(null);
+          setQuoteError(true);
+          return;
+        }
+        setQuote(data.quote ?? null);
+        setQuoteError(!data.quote);
+      } catch {
+        if (controller.signal.aborted) return;
+        setQuote(null);
+        setQuoteError(true);
+      } finally {
+        if (!controller.signal.aborted) setQuoteLoading(false);
+      }
+    });
+
+    return () => controller.abort();
+  }, [serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot]);
 
   function toggle(list: string[], v: string) {
     return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
   }
 
+  function selectService(nextService: string) {
+    onServiceChange?.(nextService);
+    setServiceType(nextService);
+    setDesiredDate("");
+    setMoveOutTime("");
+    setMoveInTime("");
+    setHouseTypeKey("");
+    setIsApartment(false);
+    setError(null);
+    if (nextService === "사이청소") {
+      setTimeSlot("all_day");
+    } else {
+      setTimeSlot(selectedSlot?.timeSlot ?? "");
+    }
+  }
+
+  function betweenCleaningDateTime(time: string): string | undefined {
+    if (!desiredDate || !time) return undefined;
+    return `${desiredDate}T${time}`;
+  }
+
   function validateStep(s: Step): string | null {
     if (s === 1) {
-      if (serviceType === "집정리") return null;
-      if (!resolvedKey) return "주택유형을 선택해주세요.";
-      if (is40Plus && !actualPyeong) return "공급면적을 입력해주세요.";
+      if (serviceType !== "집정리") {
+        if (!resolvedKey) return "주택유형을 선택해주세요.";
+        if (is40Plus && !actualPyeong) return "공급면적을 입력해주세요.";
+      }
+      if (quoteLoading) return "가격 정보를 확인 중입니다. 잠시만 기다려주세요.";
+      if (!quote) return "가격 정보를 불러온 후 진행해주세요.";
       return null;
     }
+
     if (s === 2) {
       if (!desiredDate) return "희망 날짜를 선택해주세요.";
       if (today && desiredDate < today) return "과거 날짜는 선택할 수 없습니다.";
       if (!isWithinBookingWindow(desiredDate)) return outOfWindowMessage();
-      if (!timeSlot) return "오전 또는 오후를 선택해주세요.";
-      return null;
-    }
-    if (s === 3) {
+
       if (serviceType === "사이청소") {
         if (!moveOutTime) return "기존 거주자 퇴거 완료 예정시간을 입력해주세요.";
         if (!moveInTime) return "새 입주자 입주 예정시간을 입력해주세요.";
+        if (moveOutTime >= moveInTime) {
+          return "새 입주자 입주 예정시간은 퇴거 완료 예정시간보다 이후여야 합니다.";
+        }
+        return null;
+      }
+
+      if (timeSlot !== "morning" && timeSlot !== "afternoon") {
+        return "오전 또는 오후를 선택해주세요.";
       }
       return null;
     }
-    if (s === 4) {
+
+    if (s === 3) {
       if (!customerName.trim()) return "예약자명을 입력해주세요.";
       if (!customerPhone.trim()) return "연락처를 입력해주세요.";
+      if (regionMasterImported === false) {
+        if (!manualAreaText.trim()) return "상담을 위해 희망 작업지역을 입력해주세요.";
+        return null;
+      }
       if (!region.sidoCode) return "시/도를 선택해주세요.";
-      // 세종시처럼 시/군/구 단계가 없는 지역은 읍/면/동만 선택하면 된다
       if (!region.sigunguCode && !region.dongCode) return "지역을 선택해주세요.";
       if (region.sigunguCode && !region.dongCode) return "읍/면/동을 선택해주세요.";
-      if (region.serviceAvailable === false) {
-        return "선택하신 지역은 직접 예약이 어렵습니다. 상담 접수로 진행해주세요.";
-      }
-      // 상담 전환 건은 여기서 접수되므로 개인정보 동의를 실제로 받아야 한다.
-      if (consultRequired) {
-        if (!consultPrivacyAgreed) return "상담을 위한 개인정보 수집·이용에 동의해주세요.";
-      }
       return null;
     }
-    if (s === 5) {
-      if (!privacyAgreed) return "개인정보 수집·이용에 동의해주세요.";
-      if (!agreement.corePrinciplesAgreed) return "안내 핵심 원칙에 동의해주세요.";
-      if (!agreement.serviceTermsAgreed) return "청소 서비스 이용 안내에 동의해주세요.";
-      if (!agreement.additionalChargeAgreed) return "견적 및 추가요금 안내에 동의해주세요.";
-      return null;
-    }
+
+    if (!privacyAgreed) return "개인정보 수집·이용에 동의해주세요.";
+    if (consultRequired) return null;
+    if (!agreement.corePrinciplesAgreed) return "안내 핵심 원칙에 동의해주세요.";
+    if (!agreement.serviceTermsAgreed) return "청소 서비스 이용 안내에 동의해주세요.";
+    if (!agreement.additionalChargeAgreed) return "견적 및 추가요금 안내에 동의해주세요.";
     return null;
   }
 
-  function next() {
+  async function next() {
     const v = validateStep(step);
-    if (v) { setError(v); return; }
+    if (v) {
+      setError(v);
+      return;
+    }
     setError(null);
-    // 상담 전환 건은 동의 단계를 거치지 않고 고객정보까지만 받는다
-    if (consultRequired && step === 4) { void submitConsultation(); return; }
-    setStep((s) => Math.min(s + 1, 6) as Step);
+
+    if (step < 4) {
+      setStep((s) => Math.min(s + 1, 4) as Step);
+      return;
+    }
+
+    if (consultRequired) await submitConsultation();
+    else await submitReservation();
   }
-  function prev() { setError(null); setStep((s) => Math.max(s - 1, 1) as Step); }
+
+  function prev() {
+    setError(null);
+    setStep((s) => Math.max(s - 1, 1) as Step);
+  }
 
   async function submitConsultation() {
-    // 클라이언트에서 동의하지 않은 값을 true로 만들어 보내지 않는다.
-    if (!consultPrivacyAgreed) {
+    if (!privacyAgreed) {
       setError("상담을 위한 개인정보 수집·이용에 동의해주세요.");
       return;
     }
     setSubmitting(true);
     setError(null);
-    {
-      const outcome = await callApi<{ requestCode: string; notice: string }>("/api/consultations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customerName, customerPhone,
-          areaSido: region.sidoName, areaSigungu: region.sigunguName, areaDong: region.dongName,
-          areaSidoCode: region.sidoCode || undefined,
-          areaSigunguCode: region.sigunguCode || undefined,
-          areaDongCode: region.dongCode || undefined,
-          address: address || undefined,
-          serviceType,
-          houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
-          actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
-          preferredDate: desiredDate || undefined,
-          preferredTimeSlot: timeSlot || undefined,
-          // 40평과 반려동물이 동시에 해당하면 40평을 주 사유로 하되,
-          // petMeta로 반려동물 정보를 함께 보존한다.
-          reason: is40Plus ? "size_40_plus" : "manual",
-          extraNotes: extraNotes || undefined,
-          privacyAgreed: consultPrivacyAgreed,
-        }),
-      });
-      if (outcome.kind !== "success") { setError(outcome.message); setSubmitting(false); return; }
-      setResult({ kind: "consultation", code: outcome.data.requestCode, notice: outcome.data.notice });
+
+    const consultationNotes = extraNotes.trim() ||
+      (regionConsultRequired
+        ? "서비스 가능지역 확인이 필요한 온라인 예약 건입니다."
+        : "온라인 예약 과정에서 상담이 필요한 건입니다.");
+
+    const outcome = await callApi<{ requestCode: string; notice: string }>("/api/consultations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customerName,
+        customerPhone,
+        areaSido: region.sidoName,
+        areaSigungu: region.sigunguName,
+        areaDong: region.dongName,
+        areaText: regionMasterImported === false ? manualAreaText.trim() : undefined,
+        address: address || undefined,
+        serviceType,
+        houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
+        actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
+        preferredDate: desiredDate || undefined,
+        preferredTimeSlot: serviceType === "사이청소" ? "all_day" : timeSlot || undefined,
+        reason: is40Plus ? "size_40_plus" : quote?.consultRequired ? "price_unconfirmed" : "manual",
+        extraNotes: consultationNotes,
+        jipjeongriInfo: serviceType === "집정리"
+          ? [jipjeongriPackage, ...jipjeongriSpaces].filter(Boolean).join(", ")
+          : undefined,
+        privacyAgreed,
+      }),
+    });
+
+    if (outcome.kind !== "success") {
+      setError(outcome.message);
       setSubmitting(false);
+      return;
     }
+    setResult({ kind: "consultation", code: outcome.data.requestCode, notice: outcome.data.notice });
+    setSubmitting(false);
   }
 
   async function submitReservation() {
     setSubmitting(true);
     setError(null);
-    {
-      const meta: Record<string, unknown> = {};
-      if (serviceType === "사이청소") { meta.moveOutTime = moveOutTime; meta.moveInTime = moveInTime; }
-      if (serviceType === "집정리") { meta.jipjeongriPackage = jipjeongriPackage; meta.jipjeongriSpaces = jipjeongriSpaces; }
 
-      const outcome = await callApi<{ reservation: { reservation_code: string } }>("/api/reservations", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          customerName, customerPhone,
-          customerEmail: customerEmail || undefined,
-          serviceType,
-          region: `${region.sidoName} ${region.sigunguName}`.trim(),
-          address: address || [region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" "),
-          areaSido: region.sidoName, areaSigungu: region.sigunguName, areaDong: region.dongName,
-          areaSidoCode: region.sidoCode || undefined,
-          areaSigunguCode: region.sigunguCode || undefined,
-          areaDongCode: region.dongCode || undefined,
-          houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
-          actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
-          jipjeongriPackage: serviceType === "집정리" ? jipjeongriPackage : undefined,
-          occupancyStatus,
-          desiredDate, timeSlot, entryRoute,
-          extraNotes: extraNotes + (Object.keys(meta).length ? `\n[내부메타] ${JSON.stringify(meta)}` : ""),
-          depositorName: customerName,
-          privacyAgreed,
-          corePrinciplesAgreed: agreement.corePrinciplesAgreed,
-          serviceTermsAgreed: agreement.serviceTermsAgreed,
-          additionalChargeAgreed: agreement.additionalChargeAgreed,
-        }),
+    const reservationTimeSlot: BookingTimeSlot = serviceType === "사이청소" ? "all_day" : timeSlot;
+    const outcome = await callApi<{ reservation: { reservation_code: string } }>("/api/reservations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        customerName,
+        customerPhone,
+        customerEmail: customerEmail || undefined,
+        serviceType,
+        region: `${region.sidoName} ${region.sigunguName}`.trim(),
+        address: address || [region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" "),
+        areaSido: region.sidoName,
+        areaSigungu: region.sigunguName,
+        areaDong: region.dongName,
+        areaSidoCode: region.sidoCode || undefined,
+        areaSigunguCode: region.sigunguCode || undefined,
+        areaDongCode: region.dongCode || undefined,
+        houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
+        actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
+        jipjeongriPackage: serviceType === "집정리" ? jipjeongriPackage : undefined,
+        occupancyStatus:
+          serviceType === "사이청소" || serviceType === "집정리" ? undefined : occupancyStatus,
+        desiredDate,
+        timeSlot: reservationTimeSlot,
+        entryRoute,
+        moveOutTime: serviceType === "사이청소" ? betweenCleaningDateTime(moveOutTime) : undefined,
+        moveInTime: serviceType === "사이청소" ? betweenCleaningDateTime(moveInTime) : undefined,
+        extraNotes: extraNotes || undefined,
+        depositorName: customerName,
+        privacyAgreed,
+        corePrinciplesAgreed: agreement.corePrinciplesAgreed,
+        serviceTermsAgreed: agreement.serviceTermsAgreed,
+        additionalChargeAgreed: agreement.additionalChargeAgreed,
+        clientEstimatedTotal: quote?.priceConfirmed ? quote.estimatedTotal : undefined,
+      }),
+    });
+
+    if (
+      outcome.kind === "serverError" &&
+      outcome.status === 409 &&
+      outcome.body?.code === "CONSULT_REQUIRED"
+    ) {
+      const b = outcome.body as { requestCode?: string; notice?: string; error?: string };
+      setResult({
+        kind: "consultation",
+        code: b.requestCode ?? "-",
+        notice: b.notice ?? b.error ?? "",
       });
-
-      // 서버가 상담 전환으로 판정한 경우 — 기존 흐름 유지
-      if (
-        outcome.kind === "serverError" &&
-        outcome.status === 409 &&
-        outcome.body?.code === "CONSULT_REQUIRED"
-      ) {
-        const b = outcome.body as { requestCode?: string; notice?: string; error?: string };
-        setResult({
-          kind: "consultation",
-          code: b.requestCode ?? "-",
-          notice: b.notice ?? b.error ?? "",
-        });
-        setSubmitting(false);
-        return;
-      }
-      if (outcome.kind !== "success") { setError(outcome.message); setSubmitting(false); return; }
-
-      // 계좌정보는 별도 엔드포인트에서만 받는다
-      const code = outcome.data.reservation.reservation_code;
-      const acc = await callApi<DepositAccountInfo>(`/api/reservations/${code}/deposit-account`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ phone: customerPhone }),
-      });
-      if (acc.kind !== "success") { setError(acc.message); setSubmitting(false); return; }
-      setResult({ kind: "deposit", info: acc.data });
       setSubmitting(false);
+      return;
     }
+
+    if (outcome.kind !== "success") {
+      setError(outcome.message);
+      setSubmitting(false);
+      return;
+    }
+
+    const code = outcome.data.reservation.reservation_code;
+    const acc = await callApi<DepositAccountInfo>(`/api/reservations/${code}/deposit-account`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phone: customerPhone }),
+    });
+    if (acc.kind !== "success") {
+      setError(acc.message);
+      setSubmitting(false);
+      return;
+    }
+    setResult({ kind: "deposit", info: acc.data });
+    setSubmitting(false);
   }
 
-  // ── 결과 화면 ───────────────────────────────────────────────────────────
   if (result?.kind === "deposit") return <DepositAccountPanel info={result.info} />;
   if (result?.kind === "consultation") {
     return (
@@ -342,10 +421,8 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
     );
   }
 
-  // ── 단계형 폼 ───────────────────────────────────────────────────────────
   return (
     <div className="rounded-[var(--radius-card)] border border-[var(--line)] bg-white p-5 shadow-sm md:p-8">
-      {/* 진행 표시 */}
       <ol className="mb-6 flex items-center gap-1 overflow-x-auto pb-1">
         {STEP_LABELS.map((label, i) => {
           const n = (i + 1) as Step;
@@ -366,14 +443,14 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
         })}
       </ol>
 
-      {/* 상담 전환 안내 */}
-      {consultRequired && quote?.consultNotice && (
+      {consultRequired && (quote?.consultNotice || regionConsultRequired) && (
         <div className="mb-5 rounded-xl bg-[#FBE9D3] p-4 text-sm leading-relaxed text-[var(--amber)]">
-          {quote.consultNotice}
+          {regionConsultRequired
+            ? "선택하신 지역은 직접 예약이 어려워 상담 접수로 진행됩니다."
+            : quote?.consultNotice}
         </div>
       )}
 
-      {/* ── 1단계 ── */}
       {step === 1 && (
         <div className="space-y-5">
           <div>
@@ -381,7 +458,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               {SERVICE_TYPES.map((s) => (
                 <button key={s} type="button"
-                  onClick={() => { setServiceType(s); setHouseTypeKey(""); setIsApartment(false); }}
+                  onClick={() => selectService(s)}
                   className={`min-h-[48px] rounded-xl border text-sm font-medium transition ${
                     serviceType === s ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
                   {serviceLabel(s)}
@@ -463,7 +540,6 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
             </>
           )}
 
-          {/* 선택 즉시 가격 표시 — 마지막 단계까지 기다리지 않는다 */}
           {(resolvedKey || serviceType === "집정리") && (
             <div className="rounded-2xl border-2 border-[var(--mint)] bg-[var(--mint-soft)] p-5">
               {quoteLoading ? (
@@ -473,71 +549,112 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
                   <p className="text-xs font-semibold text-[var(--mint)]">
                     {serviceLabel(serviceType)} · {resolvedKey === "40평" ? "40평 이상" : resolvedKey || "집정리"}
                   </p>
-                  <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">
-                    {quote.displayPriceLabel}
-                  </p>
+                  <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">{quote.displayPriceLabel}</p>
                   <p className="mt-2 text-xs text-[var(--ink-soft)]">{VAT_NOTICE}</p>
-                  {quote.consultRequired && quote.consultNotice && (
-                    <p className="mt-2 text-xs leading-relaxed text-[var(--amber)]">
-                      {quote.consultNotice}
-                    </p>
-                  )}
-                  {!quote.consultRequired && (
-                    <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">
-                      날짜를 선택하면 최종 예약금액이 확정됩니다.
-                    </p>
+                  {quote.consultRequired && quote.consultNotice ? (
+                    <p className="mt-2 text-xs leading-relaxed text-[var(--amber)]">{quote.consultNotice}</p>
+                  ) : (
+                    <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">날짜를 선택하면 최종 예약금액이 확정됩니다.</p>
                   )}
                 </>
+              ) : quoteError ? (
+                <p className="text-sm text-[var(--ink-soft)]">가격 정보를 불러올 수 없습니다. 다시 선택해주세요.</p>
               ) : (
-                <p className="text-sm text-[var(--ink-soft)]">가격 정보를 불러올 수 없습니다.</p>
+                <p className="text-sm text-[var(--ink-soft)]">가격 정보를 확인 중입니다.</p>
               )}
             </div>
           )}
         </div>
       )}
 
-      {/* ── 2단계 ── */}
       {step === 2 && (
         <div className="space-y-5">
           <div>
             <label className="mb-1.5 block text-sm font-semibold">희망 날짜 <span className="text-xs text-[var(--rose)]">*필수</span></label>
             <input type="date" value={desiredDate} min={today} max={maxDate} onChange={(e) => setDesiredDate(e.target.value)}
               className="w-full rounded-lg border border-[var(--line)] px-3.5 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
-            <p className="mt-1.5 text-xs text-[var(--ink-soft)]">
-              오늘부터 {maxDate}까지 예약할 수 있습니다.
-            </p>
-          </div>
-          <div>
-            <label className="mb-1.5 block text-sm font-semibold">시간대 <span className="text-xs text-[var(--rose)]">*필수</span></label>
-            <div className="flex gap-3">
-              {(["morning", "afternoon"] as const).map((s) => (
-                <button key={s} type="button" onClick={() => setTimeSlot(s)}
-                  className={`min-h-[52px] flex-1 rounded-xl border text-sm font-medium ${
-                    timeSlot === s ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
-                  {s === "morning" ? "오전" : "오후"}
-                </button>
-              ))}
-            </div>
+            <p className="mt-1.5 text-xs text-[var(--ink-soft)]">오늘부터 {maxDate}까지 예약할 수 있습니다.</p>
           </div>
 
-          {/* 날짜 선택 후 최종 예약금액 (휴일 가산금 반영) */}
+          {serviceType === "사이청소" ? (
+            <div className="space-y-3">
+              <div className="rounded-xl bg-[var(--mint-soft)] p-4 text-xs leading-relaxed text-[var(--mint)]">
+                사이청소는 오전/오후를 선택하지 않습니다. 퇴거 완료 후 새 입주 전까지의 실제 작업 가능 시간을 입력해주세요.
+                접수되면 해당 날짜는 우선 보호되며, 확인 후 관리자가 남는 시간대를 다시 열 수 있습니다.
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="mb-1.5 block text-sm font-semibold">퇴거 완료 예정시간 <span className="text-xs text-[var(--rose)]">*필수</span></label>
+                  <input type="time" value={moveOutTime} onChange={(e) => setMoveOutTime(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
+                </div>
+                <div>
+                  <label className="mb-1.5 block text-sm font-semibold">새 입주 예정시간 <span className="text-xs text-[var(--rose)]">*필수</span></label>
+                  <input type="time" value={moveInTime} onChange={(e) => setMoveInTime(e.target.value)}
+                    className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div>
+              <label className="mb-1.5 block text-sm font-semibold">시간대 <span className="text-xs text-[var(--rose)]">*필수</span></label>
+              <div className="flex gap-3">
+                {(["morning", "afternoon"] as const).map((s) => (
+                  <button key={s} type="button" onClick={() => setTimeSlot(s)}
+                    className={`min-h-[52px] flex-1 rounded-xl border text-sm font-medium ${
+                      timeSlot === s ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
+                    {s === "morning" ? "오전" : "오후"}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {desiredDate && quote && !quote.consultRequired && (
             <div className="rounded-2xl border border-[var(--line)] bg-white p-5">
               <p className="text-xs font-semibold text-[var(--ink-soft)]">최종 예약금액</p>
-              <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">
-                {quote.estimatedTotal.toLocaleString("ko-KR")}원
-              </p>
+              <p className="mt-1.5 font-display text-2xl font-bold text-[var(--ink)]">{quote.estimatedTotal.toLocaleString("ko-KR")}원</p>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+                <SummaryRow label="예약 선금" value={`${quote.depositAmount.toLocaleString("ko-KR")}원`} />
+                <SummaryRow label="잔금" value={`${quote.estimatedBalance.toLocaleString("ko-KR")}원`} />
+              </div>
               <p className="mt-2 text-xs text-[var(--ink-soft)]">{VAT_NOTICE}</p>
             </div>
           )}
         </div>
       )}
 
-      {/* ── 3단계 ── */}
       {step === 3 && (
-        <div className="space-y-5">
-          {serviceType !== "집정리" && (
-            <div>
+        <div className="grid gap-5 md:grid-cols-2">
+          <Field label="예약자명" required value={customerName} onChange={setCustomerName} />
+          <Field label="연락처" required value={customerPhone} onChange={setCustomerPhone} placeholder="010-0000-0000" />
+          <div className="md:col-span-2">
+            <RegionSelect
+              value={region}
+              onChange={setRegion}
+              onImportedChange={setRegionMasterImported}
+            />
+          </div>
+          {regionMasterImported === false && (
+            <div className="md:col-span-2 space-y-3 rounded-xl border border-[#E8C89B] bg-[#FFF7EA] p-4 text-sm leading-relaxed text-[var(--ink-soft)]">
+              <div>
+                <p className="font-semibold text-[var(--ink)]">현재는 상담 접수로 전환됩니다.</p>
+                <p className="mt-1">행정구역 데이터가 준비되기 전에는 직접 예약을 열지 않습니다. 이 4단계 안에서 상담 접수까지 완료할 수 있습니다.</p>
+              </div>
+              <Field
+                label="희망 작업지역"
+                required
+                value={manualAreaText}
+                onChange={setManualAreaText}
+                placeholder="예: 서울 강남구 역삼동"
+              />
+            </div>
+          )}
+          <div className="md:col-span-2"><Field label="상세 주소 (선택)" value={address} onChange={setAddress} /></div>
+          <div className="md:col-span-2"><Field label="이메일 (선택)" value={customerEmail} onChange={setCustomerEmail} type="email" /></div>
+
+          {serviceType !== "사이청소" && serviceType !== "집정리" && (
+            <div className="md:col-span-2">
               <label className="mb-2 block text-sm font-semibold">입주 상태</label>
               <div className="flex flex-wrap gap-2">
                 {(Object.entries(OCCUPANCY_STATUS_LABEL) as [OccupancyStatus, string][]).map(([k, v]) => (
@@ -551,28 +668,7 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
             </div>
           )}
 
-          {serviceType === "사이청소" && (
-            <div className="space-y-3">
-              <div className="rounded-xl bg-[var(--mint-soft)] p-4 text-xs leading-relaxed text-[var(--mint)]">
-                기존 거주자가 나간 뒤 새 입주자가 같은 날 들어오는 경우, 퇴거와 입주 사이 시간에
-                진행하는 청소입니다. 작업 가능 시간을 확인하기 위해 두 시각을 입력해주세요.
-              </div>
-              <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <label className="mb-1.5 block text-sm font-semibold">기존 거주자 퇴거 완료 예정시간</label>
-                <input type="datetime-local" value={moveOutTime} onChange={(e) => setMoveOutTime(e.target.value)}
-                  className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
-              </div>
-              <div>
-                <label className="mb-1.5 block text-sm font-semibold">새 입주자 입주 예정시간</label>
-                <input type="datetime-local" value={moveInTime} onChange={(e) => setMoveInTime(e.target.value)}
-                  className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
-              </div>
-              </div>
-            </div>
-          )}
-
-          <div>
+          <div className="md:col-span-2">
             <label className="mb-1.5 block text-sm font-semibold">기타 요청사항</label>
             <textarea value={extraNotes} onChange={(e) => setExtraNotes(e.target.value)} rows={3}
               className="w-full rounded-lg border border-[var(--line)] px-3.5 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
@@ -580,37 +676,51 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
         </div>
       )}
 
-      {/* ── 4단계 ── */}
       {step === 4 && (
-        <div className="grid gap-5 md:grid-cols-2">
-          <Field label="예약자명" required value={customerName} onChange={setCustomerName} />
-          <Field label="연락처" required value={customerPhone} onChange={setCustomerPhone} placeholder="010-0000-0000" />
-          <div className="md:col-span-2"><RegionSelect value={region} onChange={setRegion} /></div>
-          <div className="md:col-span-2"><Field label="상세 주소 (선택)" value={address} onChange={setAddress} /></div>
-          <div className="md:col-span-2"><Field label="이메일 (선택)" value={customerEmail} onChange={setCustomerEmail} type="email" /></div>
-
-          {/* 상담 전환 건은 이 단계에서 접수되므로 동의를 실제로 받는다 */}
-          {consultRequired && (
-            <div className="space-y-4 md:col-span-2">
-
-              <label className="flex cursor-pointer items-start gap-3 rounded-2xl bg-[var(--sand-deep)] p-4">
-                <input type="checkbox" checked={consultPrivacyAgreed}
-                  onChange={(e) => setConsultPrivacyAgreed(e.target.checked)}
-                  className="mt-0.5 h-5 w-5 shrink-0 rounded" />
-                <span className="text-sm leading-relaxed">
-                  <span className="font-medium text-[var(--rose)]">[필수]</span> 상담 안내를 위한 개인정보
-                  수집·이용에 동의합니다.{" "}
-                  <a href="/privacy" target="_blank" className="text-[var(--mint)] underline">개인정보처리방침</a>
-                </span>
-              </label>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── 5단계 ── */}
-      {step === 5 && (
         <div className="space-y-5">
+          <div className="rounded-2xl border-2 border-[var(--mint)] bg-[var(--mint-soft)] p-5">
+            <p className="mb-2 text-sm font-bold text-[var(--mint)]">예약 내용 확인</p>
+            {quoteLoading ? (
+              <p className="text-sm text-[var(--ink-soft)]">견적 계산 중...</p>
+            ) : quote ? (
+              <>
+                <p className="font-display text-2xl font-bold text-[var(--ink)]">{quote.displayPriceLabel}</p>
+                {!consultRequired && (
+                  <dl className="mt-3 space-y-1.5 text-sm">
+                    <SummaryRow label="총 예약금액" value={`${quote.estimatedTotal.toLocaleString("ko-KR")}원`} />
+                    <SummaryRow label="예약 선금" value={`${quote.depositAmount.toLocaleString("ko-KR")}원`} />
+                    <SummaryRow label="남은 잔금" value={`${quote.estimatedBalance.toLocaleString("ko-KR")}원`} />
+                  </dl>
+                )}
+                <p className="mt-2 text-xs text-[var(--ink-soft)]">{VAT_NOTICE}</p>
+                <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">{EXTRA_SERVICE_NOTICE}</p>
+              </>
+            ) : quoteError ? (
+              <p className="text-sm text-[var(--ink-soft)]">가격 정보를 불러올 수 없습니다. 다시 선택해주세요.</p>
+            ) : (
+              <p className="text-sm text-[var(--ink-soft)]">가격 정보를 확인 중입니다.</p>
+            )}
+          </div>
+
+          <dl className="space-y-1.5 rounded-2xl border border-[var(--line)] p-5 text-sm">
+            <SummaryRow label="청소 종류" value={serviceLabel(serviceType)} />
+            {serviceType !== "집정리" && <SummaryRow label="주택유형" value={resolvedKey === "40평" ? "40평 이상" : resolvedKey} />}
+            <SummaryRow label="희망 날짜" value={desiredDate} />
+            {serviceType === "사이청소" ? (
+              <>
+                <SummaryRow label="퇴거 완료" value={moveOutTime} />
+                <SummaryRow label="새 입주" value={moveInTime} />
+              </>
+            ) : (
+              <SummaryRow label="시간대" value={timeSlot === "morning" ? "오전" : "오후"} />
+            )}
+            <SummaryRow label="예약자" value={customerName} />
+            <SummaryRow label="작업 장소" value={regionMasterImported === false ? manualAreaText : [region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} />
+            {serviceType !== "사이청소" && serviceType !== "집정리" && (
+              <SummaryRow label="입주 상태" value={OCCUPANCY_STATUS_LABEL[occupancyStatus]} />
+            )}
+          </dl>
+
           <div className="rounded-2xl border border-[var(--line)] p-4">
             <label className="flex cursor-pointer items-start gap-3">
               <input type="checkbox" checked={privacyAgreed} onChange={(e) => setPrivacyAgreed(e.target.checked)}
@@ -622,44 +732,12 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
             </label>
           </div>
 
-          <AgreementSection value={agreement} onChange={setAgreement} />
-        </div>
-      )}
-
-      {/* ── 6단계 ── */}
-      {step === 6 && (
-        <div className="space-y-5">
-          <div className="rounded-2xl border-2 border-[var(--mint)] bg-[var(--mint-soft)] p-5">
-            <p className="mb-2 text-sm font-bold text-[var(--mint)]">Clyn Clean 자동견적</p>
-            {quoteLoading ? (
-              <p className="text-sm text-[var(--ink-soft)]">견적 계산 중...</p>
-            ) : quote ? (
-              <>
-                <p className="font-display text-2xl font-bold text-[var(--ink)]">
-                  예상 견적 {quote.displayPriceLabel}
-                </p>
-                <p className="mt-2 text-xs text-[var(--ink-soft)]">{VAT_NOTICE}</p>
-                <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">{EXTRA_SERVICE_NOTICE}</p>
-              </>
-            ) : (
-              <p className="text-sm text-[var(--ink-soft)]">견적을 불러올 수 없습니다.</p>
-            )}
-          </div>
-
-          <dl className="space-y-1.5 rounded-2xl border border-[var(--line)] p-5 text-sm">
-            <SummaryRow label="청소 종류" value={serviceLabel(serviceType)} />
-            {serviceType !== "집정리" && <SummaryRow label="주택유형" value={resolvedKey === "40평" ? "40평 이상" : resolvedKey} />}
-            <SummaryRow label="희망 날짜" value={desiredDate} />
-            <SummaryRow label="시간대" value={timeSlot === "morning" ? "오전" : "오후"} />
-            <SummaryRow label="예약자" value={customerName} />
-            <SummaryRow label="작업 장소" value={[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} />
-          </dl>
+          {!consultRequired && <AgreementSection value={agreement} onChange={setAgreement} />}
         </div>
       )}
 
       {error && <div className="mt-4 rounded-lg bg-[#FBEAE5] px-4 py-3 text-sm text-[var(--rose)]">{error}</div>}
 
-      {/* 네비게이션 */}
       <div className="mt-6 flex gap-3">
         {step > 1 && (
           <button type="button" onClick={prev}
@@ -667,21 +745,20 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
             이전
           </button>
         )}
-        {step < 6 ? (
-          <button type="button" onClick={next} disabled={submitting}
-            className="min-h-[52px] flex-1 rounded-full bg-[var(--navy)] text-sm font-semibold text-white transition hover:bg-[var(--navy-deep)] disabled:opacity-50">
-            {submitting ? "처리 중..." : consultRequired && step === 4 ? "상담 접수하기" : "다음"}
-          </button>
-        ) : (
-          <button type="button" onClick={submitReservation} disabled={submitting}
-            className="min-h-[52px] flex-1 rounded-full bg-[var(--navy)] text-sm font-semibold text-white transition hover:bg-[var(--navy-deep)] disabled:opacity-50">
-            {submitting ? "접수 중..." : "예약 신청 완료"}
-          </button>
-        )}
+        <button type="button" onClick={() => void next()} disabled={submitting}
+          className="min-h-[52px] flex-1 rounded-full bg-[var(--navy)] text-sm font-semibold text-white transition hover:bg-[var(--navy-deep)] disabled:opacity-50">
+          {submitting
+            ? (consultRequired ? "상담 접수 중..." : "예약 접수 중...")
+            : step < 4
+              ? "다음"
+              : consultRequired
+                ? "상담 접수하기"
+                : "예약 신청 및 선금 안내"}
+        </button>
       </div>
-      {step === 6 && (
+      {step === 4 && !consultRequired && (
         <p className="mt-2 text-center text-xs text-[var(--ink-soft)]">
-          신청 후 예약금 입금 계좌를 안내드립니다. 입금 확인 후 담당자가 예약을 확정합니다.
+          신청 완료 후 같은 화면에서 예약 선금 입금 계좌를 바로 안내드립니다.
         </p>
       )}
     </div>
@@ -689,8 +766,12 @@ export default function BookingForm({ selectedSlot }: { selectedSlot: SelectedSl
 }
 
 function Field({ label, value, onChange, placeholder, type = "text", required }: {
-  label: string; value: string; onChange: (v: string) => void;
-  placeholder?: string; type?: string; required?: boolean;
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  type?: string;
+  required?: boolean;
 }) {
   return (
     <div>

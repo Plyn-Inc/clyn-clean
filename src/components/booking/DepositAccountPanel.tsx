@@ -14,6 +14,8 @@ export interface DepositAccountInfo {
   workArea: string;
   desiredDate: string | null;
   timeSlot: string;
+  moveOutTime: string | null;
+  moveInTime: string | null;
   totalAmount: number | null;
   depositAmount: number | null;
   balanceAmount: number | null;
@@ -36,7 +38,22 @@ export default function DepositAccountPanel({ info }: { info: DepositAccountInfo
     }
   }
 
-  const slotLabel = info.timeSlot === "morning" ? "오전" : info.timeSlot === "afternoon" ? "오후" : "-";
+  const formatTime = (value: string | null) => {
+    if (!value) return null;
+    const match = value.match(/T(\d{2}:\d{2})/);
+    return match?.[1] ?? value.slice(0, 5);
+  };
+  const moveOutLabel = formatTime(info.moveOutTime);
+  const moveInLabel = formatTime(info.moveInTime);
+  const slotLabel = info.timeSlot === "all_day"
+    ? moveOutLabel && moveInLabel
+      ? `퇴거 ${moveOutLabel} ~ 입주 ${moveInLabel}`
+      : "사이청소 종일 보호"
+    : info.timeSlot === "morning"
+      ? "오전"
+      : info.timeSlot === "afternoon"
+        ? "오후"
+        : "-";
 
   return (
     <div className="rounded-[var(--radius-card)] border border-[var(--line)] bg-white p-6 shadow-sm md:p-8">

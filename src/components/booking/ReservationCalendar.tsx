@@ -61,12 +61,18 @@ const SLOT_SELECTED = "ring-2 ring-[var(--navy)] ring-offset-1";
 
 export default function ReservationCalendar({
   onSelectSlot,
+  onSelectDate,
   onSelectConsultDate,
   selectedSlot,
+  selectedDate,
+  dateOnly = false,
 }: {
   onSelectSlot: (slot: SelectedSlot) => void;
+  onSelectDate?: (date: string) => void;
   onSelectConsultDate: (date: string) => void;
   selectedSlot?: SelectedSlot | null;
+  selectedDate?: string | null;
+  dateOnly?: boolean;
 }) {
   const todayKST = useMemo(() => toKSTDateString(new Date()), []);
   // 예약 가능 범위 — booking-window 단일 원천
@@ -216,6 +222,15 @@ export default function ReservationCalendar({
             const isSelMorning = selectedSlot?.date === dateStr && selectedSlot.timeSlot === "morning";
             const isSelAfternoon = selectedSlot?.date === dateStr && selectedSlot.timeSlot === "afternoon";
             const day = days[dateStr];
+            const dateSelectable = Boolean(!day?.allDayBlocked && morning?.selectable && afternoon?.selectable);
+            const dateConsultRequired = Boolean(morning?.consultRequired || afternoon?.consultRequired);
+            const dateKnown = Boolean(morning && afternoon);
+            const dateStatus: PublicSlotStatus = dateSelectable
+              ? "예약가능"
+              : morning?.publicStatus === "예약진행 중" || afternoon?.publicStatus === "예약진행 중"
+                ? "예약진행 중"
+                : "예약완료";
+            const isSelDate = selectedDate === dateStr;
             // 날짜 숫자 색으로 토/일/공휴일을 구분한다 (가격 문구 없음)
             // 일요일·공휴일은 빨강, 토요일은 파랑. 나머지는 기본색.
             const dateColor = day?.isHoliday || day?.isSunday
@@ -254,31 +269,55 @@ export default function ReservationCalendar({
                   )}
                 </div>
 
-                <button
-                  type="button"
-                  disabled={!morning || (!morning.selectable && !morning.consultRequired)}
-                  onClick={() => handleSlotClick(dateStr, "morning", morning)}
-                  aria-label={`${dateStr} 오전 ${morning?.publicStatus ?? "정보 없음"}`}
-                  className={`mb-0.5 min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${morning ? SLOT_STYLE[morning.publicStatus] : SLOT_UNKNOWN} ${isSelMorning ? SLOT_SELECTED : ""}`}
-                >
-                  오전
-                  <span className="block text-[9px] opacity-80">
-                    {!morning ? "-" : morning.consultRequired ? "상담" : SHORT_LABEL[morning.publicStatus]}
-                  </span>
-                </button>
+                {dateOnly ? (
+                  <button
+                    type="button"
+                    disabled={!dateKnown || (!dateSelectable && !dateConsultRequired)}
+                    onClick={() => {
+                      if (dateConsultRequired) {
+                        onSelectConsultDate(dateStr);
+                        return;
+                      }
+                      if (!dateSelectable) return;
+                      onSelectDate?.(dateStr);
+                    }}
+                    aria-label={`${dateStr} ${dateStatus}`}
+                    className={`min-h-[54px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${dateKnown ? SLOT_STYLE[dateStatus] : SLOT_UNKNOWN} ${isSelDate ? SLOT_SELECTED : ""}`}
+                  >
+                    {"날짜"}
+                    <span className="block text-[9px] opacity-80">
+                      {!dateKnown ? "-" : dateConsultRequired ? "상담" : dateSelectable ? SHORT_LABEL[dateStatus] : SHORT_LABEL[dateStatus]}
+                    </span>
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      disabled={!morning || (!morning.selectable && !morning.consultRequired)}
+                      onClick={() => handleSlotClick(dateStr, "morning", morning)}
+                      aria-label={`${dateStr} 오전 ${morning?.publicStatus ?? "정보 없음"}`}
+                      className={`mb-0.5 min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${morning ? SLOT_STYLE[morning.publicStatus] : SLOT_UNKNOWN} ${isSelMorning ? SLOT_SELECTED : ""}`}
+                    >
+                      {"오전"}
+                      <span className="block text-[9px] opacity-80">
+                        {!morning ? "-" : morning.consultRequired ? "상담" : SHORT_LABEL[morning.publicStatus]}
+                      </span>
+                    </button>
 
-                <button
-                  type="button"
-                  disabled={!afternoon || (!afternoon.selectable && !afternoon.consultRequired)}
-                  onClick={() => handleSlotClick(dateStr, "afternoon", afternoon)}
-                  aria-label={`${dateStr} 오후 ${afternoon?.publicStatus ?? "정보 없음"}`}
-                  className={`min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${afternoon ? SLOT_STYLE[afternoon.publicStatus] : SLOT_UNKNOWN} ${isSelAfternoon ? SLOT_SELECTED : ""}`}
-                >
-                  오후
-                  <span className="block text-[9px] opacity-80">
-                    {!afternoon ? "-" : afternoon.consultRequired ? "상담" : SHORT_LABEL[afternoon.publicStatus]}
-                  </span>
-                </button>
+                    <button
+                      type="button"
+                      disabled={!afternoon || (!afternoon.selectable && !afternoon.consultRequired)}
+                      onClick={() => handleSlotClick(dateStr, "afternoon", afternoon)}
+                      aria-label={`${dateStr} 오후 ${afternoon?.publicStatus ?? "정보 없음"}`}
+                      className={`min-h-[36px] w-full rounded-md py-1 text-[10px] font-medium leading-tight transition ${afternoon ? SLOT_STYLE[afternoon.publicStatus] : SLOT_UNKNOWN} ${isSelAfternoon ? SLOT_SELECTED : ""}`}
+                    >
+                      {"오후"}
+                      <span className="block text-[9px] opacity-80">
+                        {!afternoon ? "-" : afternoon.consultRequired ? "상담" : SHORT_LABEL[afternoon.publicStatus]}
+                      </span>
+                    </button>
+                  </>
+                )}
               </div>
             );
           })}
