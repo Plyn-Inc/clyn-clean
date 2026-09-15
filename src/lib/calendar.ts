@@ -30,6 +30,42 @@ async function defaultCapacity(): Promise<number> {
   return Number.isFinite(v) && v > 0 ? v : 1;
 }
 
+/**
+ * 재개방 override는 사이청소 보호를 선택적으로 완화하는 보조 기능이다.
+ * 이 조회가 실패했을 때 캘린더 전체를 500으로 만들지 않고, override가 없는
+ * 것으로 처리한다. 그러면 all_day 보호는 그대로 유지되어 과예약 방향으로
+ * 실패하지 않는다(fail-closed).
+ */
+async function safeFindReopenOverride(
+  date: string,
+  timeSlot: "morning" | "afternoon"
+): Promise<calendarRepo.SlotReopenOverrideRow | undefined> {
+  try {
+    return await calendarRepo.findReopenOverride(date, timeSlot);
+  } catch (error) {
+    console.error(
+      "[calendar] slot reopen override 조회 실패; 재개방 없이 계속합니다.",
+      error instanceof Error ? error.message : error
+    );
+    return undefined;
+  }
+}
+
+async function safeFindReopenOverridesInRange(
+  startDate: string,
+  endDate: string
+): Promise<Map<string, calendarRepo.SlotReopenOverrideRow>> {
+  try {
+    return await calendarRepo.findReopenOverridesInRange(startDate, endDate);
+  } catch (error) {
+    console.error(
+      "[calendar] slot reopen override 범위 조회 실패; 재개방 없이 계속합니다.",
+      error instanceof Error ? error.message : error
+    );
+    return new Map();
+  }
+}
+
 async function toSlotView(
   date: string,
   timeSlot: "morning" | "afternoon",
@@ -45,7 +81,7 @@ async function toSlotView(
     calendarRepo.countActiveReservationsOnSlot(date, timeSlot),
     calendarRepo.countDirectActiveReservationsOnSlot(date, timeSlot),
     calendarRepo.findAllDayBlockedDates(date, date),
-    calendarRepo.findReopenOverride(date, timeSlot),
+    safeFindReopenOverride(date, timeSlot),
   ]);
   const blockedByAllDay = blockedSet.has(date);
   const reopened = override?.is_open === 1;
@@ -113,7 +149,7 @@ export async function getSlotCalendarRange(startDate: string, endDate: string): 
     // 사이청소(all_day) 예약이 점유한 날짜 — 해당 날짜의 오전·오후를 보호한다
     calendarRepo.findAllDayBlockedDates(startDate, endDate),
     // 관리자가 수동 재개방한 슬롯 (실제 예약 점유가 override보다 우선)
-    calendarRepo.findReopenOverridesInRange(startDate, endDate),
+    safeFindReopenOverridesInRange(startDate, endDate),
   ]);
 
   const byDate = new Map<string, calendarRepo.CalendarDayRow[]>();

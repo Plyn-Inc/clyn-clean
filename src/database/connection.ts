@@ -136,6 +136,8 @@ const LIVENESS_CACHE_MS = 5000;
 
 declare global {
   var __cleaningReservationPgCheckedAt: number | undefined;
+  /** 콜드스타트 동시 쿼리가 여러 postgres client를 만들지 않도록 초기화를 공유한다. */
+  var __cleaningReservationPgInitPromise: Promise<PostgresClient> | undefined;
 }
 
 export class DatabaseTimeoutError extends Error {
@@ -330,19 +332,37 @@ async function getPostgresClient(): Promise<PostgresClient> {
     await destroyClient(cached, "stale-connection");
   }
 
-  const mod = await import("postgres");
-  const postgres = mod.default as unknown as (url: string, opts: unknown) => unknown;
-  const client = createPostgresClient(postgres);
-
-  if (!(await isAlive(client))) {
-    await destroyClient(client, "new-client-unreachable");
-    // 연결 수립 실패 — query가 DB에 전달되지 않았다
-    throw new DatabaseConnectError("데이터베이스에 연결하지 못했습니다.");
+  // 콜드스타트에서 calendar처럼 여러 query가 동시에 시작돼도 postgres client는
+  // 한 번만 만든다. max:1 설정만으로는 client 생성 자체의 동시성을 막지 못한다.
+  if (global.__cleaningReservationPgInitPromise) {
+    return global.__cleaningReservationPgInitPromise;
   }
 
-  global.__cleaningReservationPg = client;
-  global.__cleaningReservationPgCheckedAt = Date.now();
-  return client;
+  const initPromise = (async (): Promise<PostgresClient> => {
+    const mod = await import("postgres");
+    const postgres = mod.default as unknown as (url: string, opts: unknown) => unknown;
+    const client = createPostgresClient(postgres);
+
+    if (!(await isAlive(client))) {
+      await destroyClient(client, "new-client-unreachable");
+      // 연결 수립 실패 — query가 DB에 전달되지 않았다
+      throw new DatabaseConnectError("데이터베이스에 연결하지 못했습니다.");
+    }
+
+    global.__cleaningReservationPg = client;
+    global.__cleaningReservationPgCheckedAt = Date.now();
+    return client;
+  })();
+
+  global.__cleaningReservationPgInitPromise = initPromise;
+  try {
+    return await initPromise;
+  } finally {
+    // 성공/실패 어느 쪽이든 다음 cold-init 시도를 막지 않도록 잠금을 해제한다.
+    if (global.__cleaningReservationPgInitPromise === initPromise) {
+      global.__cleaningReservationPgInitPromise = undefined;
+    }
+  }
 }
 
 /**

@@ -329,15 +329,6 @@ export default function ReservationCalendar({
         <Legend color="bg-[#E3F5EE]" label="예약가능" />
         <Legend color="bg-[#FBE9D3]" label="예약진행 중" />
         <Legend color="bg-[#EEF0F3]" label="예약완료" />
-        <span className="flex items-center gap-1.5">
-          <span className="text-[#D14343]">●</span> 일요일 · 공휴일
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="text-[#2E90D9]">●</span> 토요일
-        </span>
-        <span className="flex items-center gap-1.5">
-          <span className="inline-block h-1.5 w-1.5 rounded-full bg-[#2E90D9]" /> 손없는날
-        </span>
       </div>
     </div>
   );

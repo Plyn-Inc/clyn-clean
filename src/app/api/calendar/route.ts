@@ -6,6 +6,30 @@ import { getSpecialDayRange } from "@/lib/special-days-store";
 import { getSpecialDayMeta as getStaticSpecialDayMeta, isYearSupported as isStaticSpecialDaySupported } from "@/lib/special-days";
 import { bookingMinDate, bookingMaxDate } from "@/lib/booking-window";
 
+async function safeSpecialDayRange(start: string, end: string) {
+  try {
+    return await getSpecialDayRange(start, end);
+  } catch (error) {
+    console.error(
+      "[calendar] 특수일 보조 조회 실패; 기본 날짜 정보로 계속합니다.",
+      error instanceof Error ? error.message : error
+    );
+    return new Map();
+  }
+}
+
+async function safeConfirmedRange(start: string, end: string) {
+  try {
+    return await aggregateConfirmedReservationsInRange(start, end);
+  } catch (error) {
+    console.error(
+      "[calendar] 예약완료 라벨 집계 실패; 점유 상태를 보수적으로 표시합니다.",
+      error instanceof Error ? error.message : error
+    );
+    return new Map();
+  }
+}
+
 /**
  * 공개 캘린더 API.
  *
@@ -34,8 +58,8 @@ export async function GET(req: NextRequest) {
   // 범위 조회 3종을 한 번씩만 수행한다 (날짜 수에 비례하는 쿼리 없음)
   const [days, specialMap, confirmedMap] = await Promise.all([
     getSlotCalendarRange(clampedStart, clampedEnd),
-    getSpecialDayRange(clampedStart, clampedEnd),
-    aggregateConfirmedReservationsInRange(clampedStart, clampedEnd),
+    safeSpecialDayRange(clampedStart, clampedEnd),
+    safeConfirmedRange(clampedStart, clampedEnd),
   ]);
 
   // 내부 수치(capacity/remaining/bookedCount)를 제거하고 공개상태만 노출한다.
