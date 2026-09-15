@@ -28,42 +28,50 @@ export default function AdminServiceAreasPage() {
   const [syncing, setSyncing] = useState(false);
   const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
-  function load() {
-    fetch("/api/admin/service-areas")
-      .then((r) => r.json())
-      .then((d) => {
-        setRows(d.serviceAreas ?? []);
-        setSidoList(d.sidoList ?? []);
-        setImported(d.areaImported === true);
-        setAreaCount(d.areaCount ?? 0);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
+  async function load() {
+    setLoading(true);
+    setMsg(null);
+    try {
+      const regionRes = await fetch("/api/regions", { cache: "no-store" });
+      if (!regionRes.ok) throw new Error(`행정구역 목록 조회 실패 (${regionRes.status})`);
+      const regionData = await regionRes.json();
+      setSidoList(regionData.areas ?? []);
+      setImported(regionData.imported === true);
+      setAreaCount(regionData.areaCount ?? 0);
+
+      if (regionData.imported === true) {
+        const adminRes = await fetch("/api/admin/service-areas", { cache: "no-store" });
+        if (!adminRes.ok) throw new Error(`서비스 지역 설정 조회 실패 (${adminRes.status})`);
+        const adminData = await adminRes.json();
+        setRows(adminData.serviceAreas ?? []);
+        setAreaCount(adminData.areaCount ?? regionData.areaCount ?? 0);
+      } else {
+        setRows([]);
+      }
+    } catch (error) {
+      setMsg({
+        type: "err",
+        text: error instanceof Error ? `지역 목록을 불러오지 못했습니다. ${error.message}` : "지역 목록을 불러오지 못했습니다.",
+      });
+    } finally {
+      setLoading(false);
+    }
   }
 
   useEffect(() => {
-    let cancelled = false;
-    void Promise.resolve().then(async () => {
-      try {
-        const d = await fetch("/api/admin/service-areas").then((r) => r.json());
-        if (cancelled) return;
-        setRows(d.serviceAreas ?? []);
-        setSidoList(d.sidoList ?? []);
-        setImported(d.areaImported === true);
-        setAreaCount(d.areaCount ?? 0);
-        setLoading(false);
-      } catch {
-        if (!cancelled) setLoading(false);
-      }
-    });
-    return () => { cancelled = true; };
+    void load();
   }, []);
 
   async function pickSido(code: string) {
     setSido(code);
     setSigunguList([]);
     if (!code) return;
-    const d = await fetch(`/api/regions?parent=${encodeURIComponent(code)}`).then((r) => r.json());
+    const res = await fetch(`/api/regions?parent=${encodeURIComponent(code)}`, { cache: "no-store" });
+    if (!res.ok) {
+      setMsg({ type: "err", text: `지역 목록을 불러오지 못했습니다. (${res.status})` });
+      return;
+    }
+    const d = await res.json();
     setSigunguList(d.areas ?? []);
   }
 
@@ -74,7 +82,7 @@ export default function AdminServiceAreasPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sigunguCode, isEnabled }),
     });
-    if (res.ok) { setMsg({ type: "ok", text: "저장했습니다." }); load(); }
+    if (res.ok) { setMsg({ type: "ok", text: "저장했습니다." }); await load(); }
     else setMsg({ type: "err", text: "저장 실패" });
   }
 
@@ -89,7 +97,7 @@ export default function AdminServiceAreasPage() {
         type: "ok",
         text: `공식 행정구역 ${Number(data.areaCount ?? 0).toLocaleString("ko-KR")}건을 불러왔습니다.`,
       });
-      load();
+      await load();
     } catch (error) {
       setMsg({ type: "err", text: error instanceof Error ? error.message : "공식 행정구역 동기화 실패" });
     } finally {

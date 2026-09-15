@@ -3,27 +3,28 @@ import { requireAdminApiSession } from "@/lib/session";
 import {
   listServiceAreas,
   setServiceArea,
-  listByLevel,
   countAreas,
 } from "@/database/repositories/region-repository";
+
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 /** 서비스 가능지역 목록 + 행정구역 임포트 상태 */
 export async function GET() {
   const guard = await requireAdminApiSession();
   if ("response" in guard) return guard.response;
 
-  const [areas, sidoList, total] = await Promise.all([
-    listServiceAreas(),
-    listByLevel("sido"),
-    countAreas(),
-  ]);
+  const areas = await listServiceAreas();
+  const total = await countAreas();
 
-  return NextResponse.json({
-    serviceAreas: areas,
-    sidoList,
-    areaImported: total > 0,
-    areaCount: total,
-  });
+  return NextResponse.json(
+    {
+      serviceAreas: areas,
+      areaImported: total > 0,
+      areaCount: total,
+    },
+    { headers: { "Cache-Control": "no-store, max-age=0" } }
+  );
 }
 
 export async function POST(req: NextRequest) {

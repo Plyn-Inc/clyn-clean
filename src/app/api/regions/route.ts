@@ -6,6 +6,9 @@ import {
   enabledServiceAreaCodes,
   findArea,
 } from "@/database/repositories/region-repository";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 
 /**
  * 행정구역 계층 조회 (고객 예약폼용).
@@ -28,8 +31,8 @@ export async function GET(req: NextRequest) {
     // 행정구역 master가 아직 임포트되지 않았다.
     // 임의 데이터를 만들지 않고 상태를 그대로 알린다.
     return NextResponse.json(
-      { areas: [], imported: false, notice: "행정구역 데이터가 준비되지 않았습니다." },
-      { status: 200 }
+      { areas: [], imported: false, areaCount: 0, notice: "행정구역 데이터가 준비되지 않았습니다." },
+      { status: 200, headers: { "Cache-Control": "no-store, max-age=0" } }
     );
   }
 
@@ -41,6 +44,7 @@ export async function GET(req: NextRequest) {
 
   return NextResponse.json({
     imported: true,
+    areaCount: total,
     areas: areas.map((a) => ({
       code: a.code,
       name: a.name,
@@ -53,5 +57,5 @@ export async function GET(req: NextRequest) {
             ? enabled.has(parentArea.code)
             : null,
     })),
-  });
+  }, { headers: { "Cache-Control": "no-store, max-age=0" } });
 }
