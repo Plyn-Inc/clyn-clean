@@ -4,6 +4,7 @@ import {
   listChildren,
   countAreas,
   enabledServiceAreaCodes,
+  findArea,
 } from "@/database/repositories/region-repository";
 
 /**
@@ -32,7 +33,10 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  const areas = parent ? await listChildren(parent) : await listByLevel("sido");
+  const [areas, parentArea] = await Promise.all([
+    parent ? listChildren(parent) : listByLevel("sido"),
+    parent ? findArea(parent) : Promise.resolve(undefined),
+  ]);
   const enabled = await enabledServiceAreaCodes();
 
   return NextResponse.json({
@@ -41,8 +45,13 @@ export async function GET(req: NextRequest) {
       code: a.code,
       name: a.name,
       level: a.level,
-      // 시/군/구만 서비스 가능 여부를 판단한다
-      serviceAvailable: a.level === "sigungu" ? enabled.has(a.code) : null,
+      // 일반 지역은 시/군/구 코드로, 세종처럼 시군구 단계가 없으면 시/도 코드로 판정한다.
+      serviceAvailable:
+        a.level === "sigungu"
+          ? enabled.has(a.code)
+          : a.level === "eupmyeondong" && parentArea?.level === "sido"
+            ? enabled.has(parentArea.code)
+            : null,
     })),
   });
 }

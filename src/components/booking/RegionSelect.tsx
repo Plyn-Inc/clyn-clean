@@ -41,14 +41,10 @@ export default function RegionSelect({
   value,
   onChange,
   onImportedChange,
-  manualValue = "",
-  onManualChange,
 }: {
   value: RegionValue;
   onChange: (next: RegionValue) => void;
   onImportedChange?: (imported: boolean) => void;
-  manualValue?: string;
-  onManualChange?: (value: string) => void;
 }) {
   const [sidoList, setSidoList] = useState<AreaOption[]>([]);
   const [midList, setMidList] = useState<AreaOption[]>([]);
@@ -110,9 +106,10 @@ export default function RegionSelect({
     if (mid.level === "eupmyeondong") {
       onChange({
         ...value,
-        sigunguCode: "", sigunguName: "",
+        // 세종처럼 시/군/구 단계가 없는 지역은 시/도 자체를 서비스지역 key로 사용한다.
+        sigunguCode: value.sidoCode, sigunguName: value.sidoName,
         dongCode: mid.code, dongName: mid.name,
-        serviceAvailable: null,
+        serviceAvailable: mid.serviceAvailable,
       });
       return;
     }
@@ -146,18 +143,21 @@ export default function RegionSelect({
     return (
       <div>
         <label className="mb-1.5 block text-sm font-semibold">
-          작업 지역 <span className="text-xs text-[var(--rose)]">*필수</span>
+          작업 장소 <span className="text-xs text-[var(--rose)]">*필수</span>
         </label>
-        <input
-          type="text"
-          value={manualValue}
-          onChange={(e) => onManualChange?.(e.target.value)}
-          placeholder="예: 서울 강남구 역삼동"
-          autoComplete="street-address"
-          className="min-h-[44px] w-full rounded-lg border border-[var(--line)] px-3.5 text-sm focus:border-[var(--mint)] focus:outline-none"
-        />
-        <p className="mt-1.5 text-xs text-[var(--ink-soft)]">
-          지역을 먼저 입력해주세요. 서비스 가능 여부는 상담 접수 시 우선 확인합니다.
+        <div className="grid gap-2 sm:grid-cols-3">
+          <select disabled className="min-h-[44px] w-full rounded-lg border border-[var(--line)] bg-[var(--sand-deep)] px-3 text-sm text-[var(--ink-soft)]">
+            <option>시/도 선택</option>
+          </select>
+          <select disabled className="min-h-[44px] w-full rounded-lg border border-[var(--line)] bg-[var(--sand-deep)] px-3 text-sm text-[var(--ink-soft)]">
+            <option>시/군/구 선택</option>
+          </select>
+          <select disabled className="min-h-[44px] w-full rounded-lg border border-[var(--line)] bg-[var(--sand-deep)] px-3 text-sm text-[var(--ink-soft)]">
+            <option>읍/면/동 선택</option>
+          </select>
+        </div>
+        <p className="mt-1.5 text-xs text-[var(--amber)]">
+          공식 행정구역 목록을 준비 중입니다. 잠시 후 다시 시도해주세요.
         </p>
       </div>
     );
@@ -172,6 +172,7 @@ export default function RegionSelect({
         <select
           value={value.sidoCode}
           onChange={(e) => void pickSido(e.target.value)}
+          disabled={imported !== true}
           className="min-h-[44px] w-full rounded-lg border border-[var(--line)] px-3 text-sm focus:border-[var(--mint)] focus:outline-none"
         >
           <option value="">시/도 선택</option>

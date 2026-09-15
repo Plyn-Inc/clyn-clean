@@ -99,20 +99,17 @@ test('가격 오류 문구는 현재 견적 요청이 실제 실패한 경우에
   assert.match(src, /quoteError \? \([^]*가격 정보를 불러올 수 없습니다/);
 });
 
-test('행정구역 master 미임포트 시 4단계 안에서 직접예약 대신 상담접수로 전환한다', () => {
+test('행정구역 master 미임포트 시 자유입력이나 상담 우회 없이 목록형 지역선택을 잠근다', () => {
   const form = read('src/components/booking/BookingForm.tsx');
   const region = read('src/components/booking/RegionSelect.tsx');
-  const consultationApi = read('src/app/api/consultations/route.ts');
   assert.match(region, /onImportedChange\?: \(imported: boolean\) => void/);
   assert.match(region, /onImportedChange\?\.\(false\)/);
   assert.match(form, /const \[regionMasterImported, setRegionMasterImported\] = useState<boolean \| null>\(null\)/);
-  assert.match(form, /const \[manualAreaText, setManualAreaText\] = useState\(""\)/);
   assert.match(form, /regionMasterImported === false/);
-  assert.match(form, /manualAreaText/);
-  assert.doesNotMatch(form, /href="\/consultation"/);
-  assert.doesNotMatch(form, /현재는 상담 접수로 전환됩니다/);
-  assert.match(consultationApi, /areaText: z\.string\(\)\.trim\(\)\.max\(100\)\.optional\(\)/);
-  assert.match(consultationApi, /hasStructuredArea[^]*hasManualArea/);
+  assert.doesNotMatch(form, /manualAreaText/);
+  assert.doesNotMatch(region, /manualValue|onManualChange|placeholder="예: 서울 강남구 역삼동"/);
+  assert.match(region, /imported === false[^]*시\/도 선택[^]*시\/군\/구 선택[^]*읍\/면\/동 선택/);
+  assert.match(form, /공식 행정구역 목록을 준비 중입니다/);
 });
 
 test('예약 API도 행정구역 master 미임포트 상태의 직접예약을 거부한다', () => {
@@ -190,16 +187,17 @@ test('기본가격은 공개 가격표를 한 번 캐시해 즉시 표시하고 
   assert.match(src, /desiredDate \? \(quote \?\? baseCatalogQuote\) : baseCatalogQuote/);
 });
 
-test('행정구역 master 미임포트 시에도 첫 화면은 지역 입력부터 보여주고 상담 경고를 선노출하지 않는다', () => {
+test('행정구역 master 미임포트 시에도 첫 화면은 3단 목록 UI를 유지하고 자유입력을 만들지 않는다', () => {
   const form = read('src/components/booking/BookingForm.tsx');
   const region = read('src/components/booking/RegionSelect.tsx');
-  assert.match(region, /manualValue\?: string/);
-  assert.match(region, /onManualChange\?: \(value: string\) => void/);
-  assert.match(region, /작업 지역/);
-  assert.match(region, /placeholder="예: 서울 강남구 역삼동"/);
-  assert.doesNotMatch(region, /지역 선택을 준비 중입니다/);
+  assert.doesNotMatch(region, /manualValue|onManualChange/);
+  assert.doesNotMatch(region, /<input[^>]+type="text"/);
+  assert.match(region, /작업 장소/);
+  assert.match(region, /시\/도 선택/);
+  assert.match(region, /시\/군\/구 선택/);
+  assert.match(region, /읍\/면\/동 선택/);
   assert.match(form, /const showRegionConsultNotice =/);
-  assert.match(form, /regionMasterImported === false && Boolean\(manualAreaText\.trim\(\)\)/);
+  assert.match(form, /const showRegionConsultNotice = region\.serviceAvailable === false/);
   assert.match(form, /showRegionConsultNotice/);
   assert.doesNotMatch(form, /현재는 상담 접수로 전환됩니다/);
 });

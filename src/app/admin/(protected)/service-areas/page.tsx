@@ -25,6 +25,7 @@ export default function AdminServiceAreasPage() {
   const [sido, setSido] = useState("");
   const [sigunguList, setSigunguList] = useState<AreaOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
   const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
   function load() {
@@ -77,9 +78,30 @@ export default function AdminServiceAreasPage() {
     else setMsg({ type: "err", text: "저장 실패" });
   }
 
+  async function syncOfficialAreas() {
+    setSyncing(true);
+    setMsg(null);
+    try {
+      const res = await fetch("/api/admin/service-areas/sync", { method: "POST" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error || "공식 행정구역 동기화 실패");
+      setMsg({
+        type: "ok",
+        text: `공식 행정구역 ${Number(data.areaCount ?? 0).toLocaleString("ko-KR")}건을 불러왔습니다.`,
+      });
+      load();
+    } catch (error) {
+      setMsg({ type: "err", text: error instanceof Error ? error.message : "공식 행정구역 동기화 실패" });
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   if (loading) return <p className="text-sm text-[var(--ink-soft)]">불러오는 중...</p>;
 
   const enabledCodes = new Set(rows.filter((r) => r.is_enabled === 1).map((r) => r.sigungu_code));
+  const directDongMode = sigunguList.length > 0 && sigunguList[0]?.level === "eupmyeondong";
+  const selectedSido = sidoList.find((item) => item.code === sido);
 
   return (
     <div className="max-w-3xl space-y-6">
@@ -93,18 +115,20 @@ export default function AdminServiceAreasPage() {
 
       {!imported && (
         <div className="rounded-xl bg-[#FBE9D3] p-4 text-sm leading-relaxed text-[var(--amber)]">
-          <p className="font-semibold">행정구역 데이터 임포트가 필요합니다.</p>
+          <p className="font-semibold">공식 행정구역 데이터를 먼저 불러와주세요.</p>
           <p className="mt-1.5">
-            행정안전부 행정구역 코드 데이터가 아직 등록되지 않았습니다.
+            행정표준코드관리시스템(code.go.kr)의 법정동 전체자료가 아직 등록되지 않았습니다.
             임포트 전에는 고객 예약폼의 지역 선택이 동작하지 않으며,
             서비스 지역 검증도 적용되지 않습니다.
           </p>
-          <p className="mt-1.5 text-xs">
-            등록 방법: 공식 행정구역 파일(CSV 또는 JSON)을 받아 아래 명령으로 임포트합니다.
-            <br />
-            <code>node scripts/import-administrative-areas.mjs &lt;파일&gt; --dry-run</code> 으로 먼저 검증한 뒤
-            <code>--dry-run</code> 없이 실행하세요.
-          </p>
+          <button
+            type="button"
+            onClick={() => void syncOfficialAreas()}
+            disabled={syncing}
+            className="mt-3 rounded-lg bg-[var(--navy)] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
+          >
+            {syncing ? "공식 행정구역 불러오는 중..." : "공식 행정구역 불러오기"}
+          </button>
         </div>
       )}
 
@@ -116,10 +140,22 @@ export default function AdminServiceAreasPage() {
 
       {imported && (
         <section className="rounded-2xl border border-[var(--line)] bg-white p-5">
-          <p className="text-sm font-semibold">지역 추가 / 변경</p>
-          <p className="mt-1 text-xs text-[var(--ink-soft)]">
-            등록된 행정구역 {areaCount.toLocaleString("ko-KR")}건
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-semibold">지역 추가 / 변경</p>
+              <p className="mt-1 text-xs text-[var(--ink-soft)]">
+                등록된 행정구역 {areaCount.toLocaleString("ko-KR")}건
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => void syncOfficialAreas()}
+              disabled={syncing}
+              className="rounded-lg border border-[var(--line)] px-3 py-2 text-xs font-medium disabled:opacity-50"
+            >
+              {syncing ? "동기화 중..." : "공식 데이터 새로고침"}
+            </button>
+          </div>
           <select
             value={sido}
             onChange={(e) => void pickSido(e.target.value)}
@@ -131,7 +167,24 @@ export default function AdminServiceAreasPage() {
             ))}
           </select>
 
-          {sigunguList.length > 0 && (
+          {directDongMode && sido && selectedSido && (
+            <div className="mt-4 grid gap-2 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => void toggle(sido, !enabledCodes.has(sido))}
+                className={`flex items-center justify-between rounded-xl border px-4 py-3 text-sm transition ${
+                  enabledCodes.has(sido)
+                    ? "border-[var(--mint)] bg-[var(--mint-soft)] text-[var(--mint)]"
+                    : "border-[var(--line)] text-[var(--ink-soft)]"
+                }`}
+              >
+                <span className="font-medium">{selectedSido.name}</span>
+                <span className="text-xs">{enabledCodes.has(sido) ? "예약 가능" : "상담 전환"}</span>
+              </button>
+            </div>
+          )}
+
+          {!directDongMode && sigunguList.length > 0 && (
             <div className="mt-4 grid gap-2 sm:grid-cols-2">
               {sigunguList.map((g) => {
                 const on = enabledCodes.has(g.code);

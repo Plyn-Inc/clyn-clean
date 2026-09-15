@@ -97,9 +97,9 @@ const reservationSchema = z.object({
   /** @deprecated 반려동물 상담 전환 폐지 */
   petMeta: z.record(z.string(), z.unknown()).nullable().optional(),
   // --- 행정구역 code ---
-  areaSidoCode: z.string().max(20).optional(),
-  areaSigunguCode: z.string().max(20).optional(),
-  areaDongCode: z.string().max(20).optional(),
+  areaSidoCode: z.string().trim().min(1, "작업지역 시/도 코드를 확인해주세요.").max(20),
+  areaSigunguCode: z.string().trim().min(1, "작업지역 시/군/구 코드를 확인해주세요.").max(20),
+  areaDongCode: z.string().trim().min(1, "작업지역 읍/면/동 코드를 확인해주세요.").max(20),
 });
 
 export async function POST(req: NextRequest) {
@@ -270,7 +270,7 @@ export async function POST(req: NextRequest) {
       { status: 409 }
     );
   }
-  if (data.areaSigunguCode && !(await isServiceArea(data.areaSigunguCode))) {
+  if (!(await isServiceArea(data.areaSigunguCode))) {
     return NextResponse.json(
       {
         error:

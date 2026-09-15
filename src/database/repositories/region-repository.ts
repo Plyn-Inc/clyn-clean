@@ -1,4 +1,4 @@
-import { execute, queryRow, queryRows } from "../connection";
+import { execute, queryRow, queryRows, withTransaction } from "../connection";
 
 export type AreaLevel = "sido" | "sigungu" | "eupmyeondong";
 
@@ -74,6 +74,48 @@ export function upsertArea(area: {
        updated_at = datetime('now')`,
     [area.code, area.name, area.level, area.parentCode, area.isCurrent === false ? 0 : 1]
   );
+}
+
+/**
+ * 공식 행정구역 master를 원자적으로 교체한다.
+ *
+ * 기존 행을 삭제하지 않고 is_current=0으로 내려 service_areas FK를 보존한다.
+ * 신규/현행 행은 상위 레벨부터 batch upsert한다.
+ */
+export async function replaceAdministrativeAreaMaster(
+  areas: Array<{
+    code: string;
+    name: string;
+    level: AreaLevel;
+    parentCode: string | null;
+  }>
+): Promise<void> {
+  const levelOrder: Record<AreaLevel, number> = { sido: 0, sigungu: 1, eupmyeondong: 2 };
+  const sorted = [...areas].sort(
+    (a, b) => levelOrder[a.level] - levelOrder[b.level] || a.code.localeCompare(b.code)
+  );
+  const batchSize = 150; // SQLite parameter limit도 넘지 않도록 5 params × 150 = 750
+
+  await withTransaction(async () => {
+    await execute("UPDATE administrative_areas SET is_current = 0, updated_at = datetime('now')");
+
+    for (let i = 0; i < sorted.length; i += batchSize) {
+      const batch = sorted.slice(i, i + batchSize);
+      const values = batch.map(() => "(?, ?, ?, ?, 1, datetime('now'))").join(", ");
+      const params = batch.flatMap((area) => [area.code, area.name, area.level, area.parentCode]);
+      await execute(
+        `INSERT INTO administrative_areas (code, name, level, parent_code, is_current, updated_at)
+         VALUES ${values}
+         ON CONFLICT (code) DO UPDATE SET
+           name = EXCLUDED.name,
+           level = EXCLUDED.level,
+           parent_code = EXCLUDED.parent_code,
+           is_current = 1,
+           updated_at = datetime('now')`,
+        params
+      );
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -102,7 +102,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   // 1단계 — 지역
   const [region, setRegion] = useState<RegionValue>(EMPTY_REGION);
   const [regionMasterImported, setRegionMasterImported] = useState<boolean | null>(null);
-  const [manualAreaText, setManualAreaText] = useState("");
 
   // 3단계 — 고객정보 + 기존 현장정보 통합
   const [occupancyStatus, setOccupancyStatus] = useState<OccupancyStatus>("before_move_in");
@@ -132,8 +131,8 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     : houseTypeKey;
   const entryRoute = selectedSlot || selectedDate ? "calendar" : "direct";
   const is40Plus = resolvedKey === "40평";
-  const regionConsultRequired = region.serviceAvailable === false || regionMasterImported === false;
-  const showRegionConsultNotice = region.serviceAvailable === false || (regionMasterImported === false && Boolean(manualAreaText.trim()));
+  const regionConsultRequired = region.serviceAvailable === false;
+  const showRegionConsultNotice = region.serviceAvailable === false;
   const regionReadyForPricing = regionMasterImported === true && Boolean(region.sidoCode) && Boolean(region.sigunguCode || region.dongCode) && region.serviceAvailable !== false;
   const productKeyForPricing = serviceType === "집정리" ? jipjeongriPackage : resolvedKey;
   const catalogItem = priceCatalog.find((item) => item.serviceType === serviceType && item.productKey === productKeyForPricing);
@@ -273,12 +272,11 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     if (s === 1) {
       if (regionMasterImported === null) return "지역 정보를 확인 중입니다. 잠시만 기다려주세요.";
       if (regionMasterImported === false) {
-        if (!manualAreaText.trim()) return "상담을 위해 희망 작업지역을 입력해주세요.";
-      } else {
-        if (!region.sidoCode) return "시/도를 선택해주세요.";
-        if (!region.sigunguCode && !region.dongCode) return "지역을 선택해주세요.";
-        if (region.sigunguCode && !region.dongCode) return "읍/면/동을 선택해주세요.";
+        return "공식 행정구역 목록을 준비 중입니다. 관리자에서 행정구역 동기화를 완료해주세요.";
       }
+      if (!region.sidoCode) return "시/도를 선택해주세요.";
+      if (!region.sigunguCode && !region.dongCode) return "지역을 선택해주세요.";
+      if (!region.dongCode) return "읍/면/동을 선택해주세요.";
       if (serviceType !== "집정리") {
         if (!resolvedKey) return "주택유형을 선택해주세요.";
         if (is40Plus && !actualPyeong) return "공급면적을 입력해주세요.";
@@ -368,7 +366,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         areaSido: region.sidoName,
         areaSigungu: region.sigunguName,
         areaDong: region.dongName,
-        areaText: regionMasterImported === false ? manualAreaText.trim() : undefined,
         address: address || undefined,
         serviceType,
         houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
@@ -519,8 +516,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               value={region}
               onChange={setRegion}
               onImportedChange={setRegionMasterImported}
-              manualValue={manualAreaText}
-              onManualChange={setManualAreaText}
             />
           </div>
           <div>
@@ -773,7 +768,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               <SummaryRow label="시간대" value={timeSlot === "morning" ? "오전" : "오후"} />
             )}
             <SummaryRow label="예약자" value={customerName} />
-            <SummaryRow label="작업 장소" value={regionMasterImported === false ? manualAreaText : [region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} />
+            <SummaryRow label="작업 장소" value={[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} />
             {serviceType !== "사이청소" && serviceType !== "집정리" && (
               <SummaryRow label="입주 상태" value={OCCUPANCY_STATUS_LABEL[occupancyStatus]} />
             )}
