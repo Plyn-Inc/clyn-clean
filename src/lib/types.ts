@@ -2,13 +2,12 @@
 // 도메인 타입 정의
 // ---------------------------------------------------------------------------
 
-export type CalendarStatus = "available" | "closed" | "consult_required" | "off";
+export type CalendarStatus = "available" | "closed" | "consult_required";
 
 export const CALENDAR_STATUS_LABEL: Record<CalendarStatus, string> = {
   available: "예약 가능",
-  closed: "예약 마감",
+  closed: "예약 불가",
   consult_required: "상담 필요",
-  off: "휴무",
 };
 
 export type TimeSlot = "all_day" | "morning" | "afternoon" | "after_16" | "negotiable";
@@ -462,7 +461,7 @@ export function toPublicSlotStatus(params: {
   remaining: number;
   hasConfirmed: boolean;
 }): PublicSlotStatus {
-  if (params.effectiveStatus === "off" || params.effectiveStatus === "consult_required") {
+  if (params.effectiveStatus === "closed" || params.effectiveStatus === "consult_required") {
     return "예약완료";
   }
   if (params.remaining > 0) return "예약가능";

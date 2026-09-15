@@ -3359,7 +3359,7 @@ test('capacity 0 / 마감 / 가능 상태가 월 조회에서도 정확하다', 
   const calendarRoute = await import('../src/app/api/calendar/route.ts');
   await calendar.setCalendarDay('2027-07-20', 'available', 0, null, 'morning');   // capacity 0
   await calendar.setCalendarDay('2027-07-21', 'available', 2, null, 'morning');   // 여유
-  await calendar.setCalendarDay('2027-07-22', 'off', 1, null, 'morning');         // 관리자 마감
+  await calendar.setCalendarDay('2027-07-22', 'closed', 1, null, 'morning');      // 관리자 예약 불가
 
   const res = await calendarRoute.GET({ url: 'http://localhost/api/calendar?start=2027-07-20&end=2027-07-22' });
   const body = await res.json();

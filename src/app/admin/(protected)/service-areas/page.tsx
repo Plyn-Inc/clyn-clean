@@ -11,12 +11,7 @@ interface ServiceAreaRow {
 interface Sido { code: string; name: string }
 interface AreaOption { code: string; name: string; level: string }
 
-/**
- * 서비스 가능지역 관리.
- *
- * 시/군/구 단위로 직접 예약 허용 여부를 지정한다.
- * 비활성 지역 고객은 예약 대신 상담 접수로 전환된다.
- */
+/** 시/군/구 체크박스로 직접예약 가능지역을 관리한다. */
 export default function AdminServiceAreasPage() {
   const [rows, setRows] = useState<ServiceAreaRow[]>([]);
   const [sidoList, setSidoList] = useState<Sido[]>([]);
@@ -37,16 +32,16 @@ export default function AdminServiceAreasPage() {
       const regionData = await regionRes.json();
       setSidoList(regionData.areas ?? []);
       setImported(regionData.imported === true);
-      setAreaCount(regionData.areaCount ?? 0);
 
       if (regionData.imported === true) {
         const adminRes = await fetch("/api/admin/service-areas", { cache: "no-store" });
         if (!adminRes.ok) throw new Error(`서비스 지역 설정 조회 실패 (${adminRes.status})`);
         const adminData = await adminRes.json();
         setRows(adminData.serviceAreas ?? []);
-        setAreaCount(adminData.areaCount ?? regionData.areaCount ?? 0);
+        setAreaCount(adminData.areaCount ?? 0);
       } else {
         setRows([]);
+        setAreaCount(0);
       }
     } catch (error) {
       setMsg({
@@ -58,21 +53,19 @@ export default function AdminServiceAreasPage() {
     }
   }
 
-  useEffect(() => {
-    void load();
-  }, []);
+  useEffect(() => { void load(); }, []);
 
   async function pickSido(code: string) {
     setSido(code);
     setSigunguList([]);
     if (!code) return;
-    const res = await fetch(`/api/regions?parent=${encodeURIComponent(code)}`, { cache: "no-store" });
+    const res = await fetch(`/api/regions?parent=${encodeURIComponent(code)}`, { cache: "force-cache" });
     if (!res.ok) {
       setMsg({ type: "err", text: `지역 목록을 불러오지 못했습니다. (${res.status})` });
       return;
     }
-    const d = await res.json();
-    setSigunguList(d.areas ?? []);
+    const data = await res.json();
+    setSigunguList(data.areas ?? []);
   }
 
   async function toggle(sigunguCode: string, isEnabled: boolean) {
@@ -82,8 +75,22 @@ export default function AdminServiceAreasPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ sigunguCode, isEnabled }),
     });
-    if (res.ok) { setMsg({ type: "ok", text: "저장했습니다." }); await load(); }
-    else setMsg({ type: "err", text: "저장 실패" });
+    if (!res.ok) {
+      setMsg({ type: "err", text: "저장 실패" });
+      return;
+    }
+
+    const name = sigunguList.find((item) => item.code === sigunguCode)?.name
+      ?? sidoList.find((item) => item.code === sigunguCode)?.name
+      ?? null;
+    setRows((prev) => {
+      const existing = prev.find((row) => row.sigungu_code === sigunguCode);
+      if (existing) {
+        return prev.map((row) => row.sigungu_code === sigunguCode ? { ...row, is_enabled: isEnabled ? 1 : 0 } : row);
+      }
+      return [...prev, { sigungu_code: sigunguCode, name, is_enabled: isEnabled ? 1 : 0, admin_note: null }];
+    });
+    setMsg({ type: "ok", text: "저장했습니다." });
   }
 
   async function syncOfficialAreas() {
@@ -93,10 +100,7 @@ export default function AdminServiceAreasPage() {
       const res = await fetch("/api/admin/service-areas/sync", { method: "POST" });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error || "공식 행정구역 동기화 실패");
-      setMsg({
-        type: "ok",
-        text: `공식 행정구역 ${Number(data.areaCount ?? 0).toLocaleString("ko-KR")}건을 불러왔습니다.`,
-      });
+      setMsg({ type: "ok", text: `공식 행정구역 ${Number(data.areaCount ?? 0).toLocaleString("ko-KR")}건을 불러왔습니다.` });
       await load();
     } catch (error) {
       setMsg({ type: "err", text: error instanceof Error ? error.message : "공식 행정구역 동기화 실패" });
@@ -116,19 +120,13 @@ export default function AdminServiceAreasPage() {
       <div>
         <h1 className="font-display text-xl font-bold">서비스 가능지역</h1>
         <p className="mt-1.5 text-sm leading-relaxed text-[var(--ink-soft)]">
-          직접 예약을 받을 시/군/구를 지정합니다. 지정하지 않은 지역의 고객은
-          예약 대신 상담 접수로 안내됩니다.
+          시/도를 선택한 뒤 직접 예약을 받을 시/군/구만 체크합니다. 체크하지 않은 지역은 상담 접수로 안내됩니다.
         </p>
       </div>
 
       {!imported && (
         <div className="rounded-xl bg-[#FBE9D3] p-4 text-sm leading-relaxed text-[var(--amber)]">
           <p className="font-semibold">공식 행정구역 데이터를 먼저 불러와주세요.</p>
-          <p className="mt-1.5">
-            행정표준코드관리시스템(code.go.kr)의 법정동 전체자료가 아직 등록되지 않았습니다.
-            임포트 전에는 고객 예약폼의 지역 선택이 동작하지 않으며,
-            서비스 지역 검증도 적용되지 않습니다.
-          </p>
           <button
             type="button"
             onClick={() => void syncOfficialAreas()}
@@ -150,10 +148,8 @@ export default function AdminServiceAreasPage() {
         <section className="rounded-2xl border border-[var(--line)] bg-white p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <p className="text-sm font-semibold">지역 추가 / 변경</p>
-              <p className="mt-1 text-xs text-[var(--ink-soft)]">
-                등록된 행정구역 {areaCount.toLocaleString("ko-KR")}건
-              </p>
+              <p className="text-sm font-semibold">예약 가능지역 체크</p>
+              <p className="mt-1 text-xs text-[var(--ink-soft)]">등록된 행정구역 {areaCount.toLocaleString("ko-KR")}건</p>
             </div>
             <button
               type="button"
@@ -164,85 +160,49 @@ export default function AdminServiceAreasPage() {
               {syncing ? "동기화 중..." : "공식 데이터 새로고침"}
             </button>
           </div>
+
           <select
             value={sido}
             onChange={(e) => void pickSido(e.target.value)}
             className="mt-3 w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm sm:w-64"
           >
             <option value="">시/도 선택</option>
-            {sidoList.map((s) => (
-              <option key={s.code} value={s.code}>{s.name}</option>
-            ))}
+            {sidoList.map((item) => <option key={item.code} value={item.code}>{item.name}</option>)}
           </select>
 
           {directDongMode && sido && selectedSido && (
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              <button
-                type="button"
-                onClick={() => void toggle(sido, !enabledCodes.has(sido))}
-                className={`flex items-center justify-between rounded-xl border px-4 py-3 text-sm transition ${
-                  enabledCodes.has(sido)
-                    ? "border-[var(--mint)] bg-[var(--mint-soft)] text-[var(--mint)]"
-                    : "border-[var(--line)] text-[var(--ink-soft)]"
-                }`}
-              >
-                <span className="font-medium">{selectedSido.name}</span>
-                <span className="text-xs">{enabledCodes.has(sido) ? "예약 가능" : "상담 전환"}</span>
-              </button>
-            </div>
+            <label className="mt-4 flex cursor-pointer items-center gap-3 rounded-xl border border-[var(--line)] px-4 py-3 text-sm">
+              <input
+                type="checkbox"
+                checked={enabledCodes.has(sido)}
+                onChange={(e) => void toggle(sido, e.target.checked)}
+                className="h-5 w-5 accent-[var(--navy)]"
+              />
+              <span className="font-medium">{selectedSido.name}</span>
+            </label>
           )}
 
           {!directDongMode && sigunguList.length > 0 && (
             <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              {sigunguList.map((g) => {
-                const on = enabledCodes.has(g.code);
-                return (
-                  <button
-                    key={g.code}
-                    onClick={() => void toggle(g.code, !on)}
-                    className={`flex items-center justify-between rounded-xl border px-4 py-3 text-sm transition ${
-                      on
-                        ? "border-[var(--mint)] bg-[var(--mint-soft)] text-[var(--mint)]"
-                        : "border-[var(--line)] text-[var(--ink-soft)]"
-                    }`}
-                  >
-                    <span className="font-medium">{g.name}</span>
-                    <span className="text-xs">{on ? "예약 가능" : "상담 전환"}</span>
-                  </button>
-                );
-              })}
+              {sigunguList.map((g) => (
+                <label key={g.code} className="flex cursor-pointer items-center gap-3 rounded-xl border border-[var(--line)] px-4 py-3 text-sm hover:bg-[var(--sand-deep)]">
+                  <input
+                    type="checkbox"
+                    checked={enabledCodes.has(g.code)}
+                    onChange={(e) => void toggle(g.code, e.target.checked)}
+                    className="h-5 w-5 accent-[var(--navy)]"
+                  />
+                  <span className="font-medium">{g.name}</span>
+                </label>
+              ))}
             </div>
+          )}
+
+          {sido && sigunguList.length === 0 && (
+            <p className="mt-4 text-sm text-[var(--ink-soft)]">해당 시/도의 하위 행정구역을 불러오는 중이거나 등록된 목록이 없습니다.</p>
           )}
         </section>
       )}
-
-      <section>
-        <p className="mb-3 text-sm font-semibold">
-          예약 가능 지역 ({rows.filter((r) => r.is_enabled === 1).length})
-        </p>
-        {rows.filter((r) => r.is_enabled === 1).length === 0 ? (
-          <p className="text-sm text-[var(--ink-soft)]">
-            지정된 지역이 없습니다. 지역을 지정하지 않으면 모든 고객이 상담으로 안내됩니다.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {rows.filter((r) => r.is_enabled === 1).map((r) => (
-              <div key={r.sigungu_code} className="flex items-center justify-between rounded-xl border border-[var(--line)] bg-white px-4 py-3">
-                <div>
-                  <p className="text-sm font-medium">{r.name ?? r.sigungu_code}</p>
-                  <p className="text-xs text-[var(--ink-soft)]">{r.sigungu_code}</p>
-                </div>
-                <button
-                  onClick={() => void toggle(r.sigungu_code, false)}
-                  className="rounded-lg border border-[var(--line)] px-3 py-2 text-xs font-medium"
-                >
-                  해제
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
     </div>
   );
 }

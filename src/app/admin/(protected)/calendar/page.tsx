@@ -24,10 +24,9 @@ interface DaySlotView {
 }
 
 const STATUS_BG: Record<CalendarStatus, string> = {
-  available: "bg-[var(--mint-soft)] text-[var(--mint)]",
-  closed: "bg-[var(--sand-deep)] text-[#A3A096]",
-  consult_required: "bg-[#FBE9D3] text-[var(--amber)]",
-  off: "bg-[#F0EDE9] text-[#CFCDC2]",
+  available: "bg-[var(--mint-soft)] text-[var(--mint)] ring-1 ring-inset ring-[#B7E7D8]",
+  closed: "bg-[#FDE2E2] text-[#B42318] ring-1 ring-inset ring-[#F2A7A7]",
+  consult_required: "bg-[#FFF0D9] text-[#A15C00] ring-1 ring-inset ring-[#F2C078]",
 };
 
 type SlotTarget = "all_day" | "morning" | "afternoon";

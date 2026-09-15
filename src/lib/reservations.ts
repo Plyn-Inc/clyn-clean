@@ -41,16 +41,13 @@ export class DateFullyBookedError extends Error {
 }
 
 export class DateNotAvailableError extends Error {
-  code: "DATE_NOT_AVAILABLE" | "DATE_CONSULT_REQUIRED" | "DATE_OFF";
+  code: "DATE_NOT_AVAILABLE" | "DATE_CONSULT_REQUIRED";
   constructor(date: string, status: string) {
     let message = `${date}는 예약을 접수할 수 없는 날짜입니다.`;
     let code: DateNotAvailableError["code"] = "DATE_NOT_AVAILABLE";
     if (status === "consult_required") {
       message = `${date}는 상담 후 예약이 필요한 날짜입니다. 문의하기를 이용해주세요.`;
       code = "DATE_CONSULT_REQUIRED";
-    } else if (status === "off") {
-      message = `${date}는 휴무일입니다.`;
-      code = "DATE_OFF";
     }
     super(message);
     this.code = code;
@@ -654,7 +651,7 @@ export async function revealDepositAccount(
         : await reservationRepo.countActiveReservationsOnSlotExcluding(
             reservation.desired_date, slot, reservationId
           );
-      if (slotView.status === "off" || slotView.status === "consult_required") {
+      if (slotView.status === "closed" || slotView.status === "consult_required") {
         throw new DepositAccountError(
           `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"}은 현재 예약을 받을 수 없습니다.`,
           "SLOT_UNAVAILABLE"
@@ -889,12 +886,11 @@ export async function confirmReservation(
           reservation.desired_date, slot, reservationId
         );
 
-    // 달력 자체가 off(휴무) 또는 상담필요인 경우만 차단
-    // "closed"는 자기 예약이 포함된 카운트 기준이므로 여기서 판단하지 않음
-    const calStatus = slotView.status; // DB에 저장된 원본 상태
-    if (calStatus === "off") {
+    // 달력의 관리자 원본 상태가 예약 불가 또는 상담 필요면 차단한다.
+    const calStatus = slotView.status;
+    if (calStatus === "closed") {
       throw new Error(
-        `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"} 시간대는 휴무일입니다. 날짜/시간대를 변경해주세요.`
+        `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"} 시간대는 예약 불가 상태입니다. 날짜/시간대를 변경해주세요.`
       );
     }
     if (calStatus === "consult_required") {
@@ -1043,8 +1039,8 @@ export async function changeReservationSlot(
     const view = await getDaySlotView(newDate);
     const slotView = newTimeSlot === "morning" ? view.morning : view.afternoon;
 
-    if (slotView.effectiveStatus === "off") {
-      throw new DateNotAvailableError(newDate, "off");
+    if (slotView.effectiveStatus === "closed") {
+      throw new DateNotAvailableError(newDate, "closed");
     }
     if (slotView.effectiveStatus === "consult_required") {
       throw new DateNotAvailableError(newDate, "consult_required");

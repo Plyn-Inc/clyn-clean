@@ -3,7 +3,7 @@ import { requireAdminApiSession } from "@/lib/session";
 import { getSlotCalendarRange, setCalendarDay } from "@/lib/calendar";
 import type { CalendarStatus, TimeSlot } from "@/lib/types";
 
-const VALID_STATUSES: CalendarStatus[] = ["available", "closed", "consult_required", "off"];
+const VALID_STATUSES: CalendarStatus[] = ["available", "closed", "consult_required"];
 const VALID_SLOTS: TimeSlot[] = ["all_day", "morning", "afternoon"];
 
 export async function GET(req: NextRequest) {

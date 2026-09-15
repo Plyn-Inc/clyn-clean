@@ -70,12 +70,12 @@ test('고객 지역 선택은 자유입력 fallback 없이 시도-시군구-읍�
   assert.match(form, /regionMasterImported === false[^]*행정구역/);
 });
 
-test('관리자 서비스지역 화면은 공식 master 동기화 버튼과 시군구 ON OFF를 제공한다', () => {
+test('관리자 서비스지역 화면은 공식 master 동기화와 시군구 체크박스를 제공한다', () => {
   const page = read('src/app/admin/(protected)/service-areas/page.tsx');
   assert.match(page, /공식 행정구역 불러오기/);
   assert.match(page, /\/api\/admin\/service-areas\/sync/);
-  assert.match(page, /예약 가능/);
-  assert.match(page, /상담 전환/);
+  assert.match(page, /type="checkbox"/);
+  assert.match(page, /예약 가능지역 체크/);
 });
 
 test('공식 master 동기화는 code.go.kr 법정동 전체자료를 직접 사용한다', () => {
@@ -120,8 +120,10 @@ test('시군구 단계가 없는 지역은 시도 자체를 관리자 서비스�
 
   assert.match(page, /const directDongMode =/);
   assert.match(page, /directDongMode[^]*toggle\(sido,/);
-  assert.match(region, /sigunguCode: value\.sidoCode, sigunguName: value\.sidoName/);
-  assert.match(api, /a\.level === "eupmyeondong" && parentArea\?\.level === "sido"[^]*enabled\.has\(parentArea\.code\)/);
+  assert.match(region, /sigunguCode:\s*value\.sidoCode[^]*sigunguName:\s*value\.sidoName/);
+  assert.match(region, /fetchServiceAvailability\(value\.sidoCode\)/);
+  assert.match(api, /searchParams\.get\("availability"\)/);
+  assert.match(api, /isServiceArea\(availability\)/);
 });
 
 test('직접예약 API는 구조화된 지역 코드를 필수로 받아 서비스지역 OFF 우회를 막는다', () => {
