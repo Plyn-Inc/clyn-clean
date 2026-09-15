@@ -77,9 +77,10 @@ export interface ReservationReadiness {
 }
 
 export async function checkReservationReadiness(): Promise<ReservationReadiness> {
-  const [pricing, bank] = await Promise.all([getPricingSettings(), getBankSettings()]);
+  // 예약금은 서비스/상품별 price_rules.deposit_amount를 사용한다.
+  // legacy settings.deposit_amount 값은 예약 가능 여부를 막는 조건으로 사용하지 않는다.
+  const bank = await getBankSettings();
   const missing: string[] = [];
-  if (!(pricing.depositAmount > 0)) missing.push("예약금 금액");
   if (!bank.bankName) missing.push("입금 은행명");
   if (!bank.accountNumber) missing.push("입금 계좌번호");
   if (!bank.accountHolder) missing.push("예금주");

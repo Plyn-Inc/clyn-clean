@@ -49,6 +49,73 @@ export function listChildren(parentCode: string): Promise<AdministrativeArea[]> 
   );
 }
 
+
+/** 고객 예약용: 예약 가능으로 체크된 시/군/구가 하나라도 있는 시/도만 반환 */
+export function listAvailableSidos(): Promise<AdministrativeArea[]> {
+  return queryRows<AdministrativeArea>(
+    `SELECT s.*
+       FROM administrative_areas s
+      WHERE s.level = 'sido'
+        AND s.is_current = 1
+        AND (
+          EXISTS (
+            SELECT 1
+              FROM service_areas sa
+             WHERE sa.sigungu_code = s.code
+               AND sa.is_enabled = 1
+          )
+          OR EXISTS (
+            SELECT 1
+              FROM administrative_areas g
+              JOIN service_areas sa
+                ON sa.sigungu_code = g.code
+               AND sa.is_enabled = 1
+             WHERE g.parent_code = s.code
+               AND g.is_current = 1
+          )
+        )
+      ORDER BY s.code ASC`
+  );
+}
+
+/**
+ * 고객 예약용 하위지역 조회.
+ * - 시/도 아래에서는 예약 가능으로 체크된 시/군/구만 반환한다.
+ * - 세종처럼 시/도 자체가 서비스지역 key인 경우 그 하위 읍/면/동을 반환한다.
+ * - 예약 가능한 시/군/구 아래에서는 읍/면/동 전체를 반환한다.
+ */
+export function listAvailableChildren(parentCode: string): Promise<AdministrativeArea[]> {
+  return queryRows<AdministrativeArea>(
+    `SELECT child.*
+       FROM administrative_areas child
+      WHERE child.parent_code = ?
+        AND child.is_current = 1
+        AND (
+          (
+            child.level = 'sigungu'
+            AND EXISTS (
+              SELECT 1
+                FROM service_areas sa
+               WHERE sa.sigungu_code = child.code
+                 AND sa.is_enabled = 1
+            )
+          )
+          OR
+          (
+            child.level = 'eupmyeondong'
+            AND EXISTS (
+              SELECT 1
+                FROM service_areas sa
+               WHERE sa.sigungu_code = ?
+                 AND sa.is_enabled = 1
+            )
+          )
+        )
+      ORDER BY child.code ASC`,
+    [parentCode, parentCode]
+  );
+}
+
 export function findArea(code: string): Promise<AdministrativeArea | undefined> {
   return queryRow<AdministrativeArea>(
     "SELECT * FROM administrative_areas WHERE code = ?",

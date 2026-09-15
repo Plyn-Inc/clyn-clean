@@ -6,8 +6,8 @@ import { useCallback, useEffect, useState } from "react";
  * 행정구역 계층 선택.
  *
  * - 시/도 → 시/군/구 → 읍/면/동 순으로 필요한 단계만 지연 조회한다.
- * - 행정구역 계층은 module cache + HTTP cache를 사용해 반복 조회를 피한다.
- * - 서비스 가능 여부는 시/군/구를 선택하는 순간 별도 no-store 요청으로 확인한다.
+ * - 공개 API는 예약 가능지역만 반환하며, module cache로 같은 화면 안의 반복 조회를 피한다.
+ * - 고객 API 자체가 예약 가능지역만 반환하므로 노출된 지역은 모두 직접예약 가능하다.
  * - 세종특별자치시처럼 시/군/구 단계가 없는 지역은 시/도 자체를 서비스지역 key로 사용한다.
  */
 export interface RegionValue {
@@ -66,7 +66,7 @@ export default function RegionSelect({
     }
 
     const url = parent ? `/api/regions?parent=${encodeURIComponent(parent)}` : "/api/regions";
-    const res = await fetch(url, { cache: "force-cache" });
+    const res = await fetch(url, { cache: "no-store" });
     if (!res.ok) throw new Error("regions fetch failed");
     const data = (await res.json()) as { areas?: AreaOption[]; imported?: boolean };
     const nextImported = data.imported !== false;
@@ -76,13 +76,6 @@ export default function RegionSelect({
     onImportedChange?.(nextImported);
     return nextAreas;
   }, [onImportedChange]);
-
-  const fetchServiceAvailability = useCallback(async (code: string): Promise<boolean> => {
-    const res = await fetch(`/api/regions?availability=${encodeURIComponent(code)}`, { cache: "no-store" });
-    if (!res.ok) throw new Error("service area fetch failed");
-    const data = (await res.json()) as { serviceAvailable?: boolean };
-    return data.serviceAvailable === true;
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -122,29 +115,25 @@ export default function RegionSelect({
     setLoading(true);
     try {
       if (mid.level === "eupmyeondong") {
-        const serviceAvailable = await fetchServiceAvailability(value.sidoCode);
         onChange({
           ...value,
           sigunguCode: value.sidoCode,
           sigunguName: value.sidoName,
           dongCode: mid.code,
           dongName: mid.name,
-          serviceAvailable,
+          serviceAvailable: true,
         });
         return;
       }
 
-      const [children, serviceAvailable] = await Promise.all([
-        fetchAreas(code),
-        fetchServiceAvailability(code),
-      ]);
+      const children = await fetchAreas(code);
       onChange({
         ...value,
         sigunguCode: code,
         sigunguName: mid.name,
         dongCode: "",
         dongName: "",
-        serviceAvailable,
+        serviceAvailable: true,
       });
       setDongList(children);
     } finally {
@@ -215,11 +204,6 @@ export default function RegionSelect({
 
       {loading && <p className="mt-1.5 text-xs text-[var(--ink-soft)]">지역 목록을 불러오는 중...</p>}
 
-      {value.serviceAvailable === false && (
-        <div className="mt-2 rounded-lg bg-[#FBE9D3] px-3 py-2.5 text-xs leading-relaxed text-[var(--amber)]">
-          선택하신 지역은 현재 직접 예약이 어렵습니다. 상담 접수를 남겨주시면 담당자가 확인 후 안내드립니다.
-        </div>
-      )}
 
       <p className="mt-1.5 text-xs text-[var(--ink-soft)]">상세 주소는 예약 확정 후 담당자가 별도로 확인합니다.</p>
     </div>

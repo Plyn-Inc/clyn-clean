@@ -1,24 +1,24 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  listByLevel,
-  listChildren,
+  listAvailableSidos,
+  listAvailableChildren,
   isServiceArea,
+  countAreas,
 } from "@/database/repositories/region-repository";
 
 export const dynamic = "force-dynamic";
 
-const REGION_CACHE_CONTROL = "public, max-age=300, s-maxage=3600, stale-while-revalidate=86400";
 const NO_STORE = "no-store, max-age=0";
 
 /**
  * 행정구역 계층 조회 (고객 예약폼용).
  *
- * GET /api/regions                         -> 시/도 목록
- * GET /api/regions?parent=<code>           -> 해당 구역의 하위 목록
+ * GET /api/regions                         -> 예약 가능한 시/도가 있는 목록
+ * GET /api/regions?parent=<code>           -> 예약 가능 지역만 포함한 하위 목록
  * GET /api/regions?availability=<code>     -> 해당 시/군/구 직접예약 가능 여부
  *
- * 행정구역 master는 자주 변하지 않으므로 계층 목록은 CDN/브라우저 캐시를 허용한다.
- * 서비스 가능 여부는 관리자 설정 직후 바로 반영되어야 하므로 별도 no-store 조회한다.
+ * 고객에게는 관리자에서 예약 가능으로 체크한 지역만 반환한다.
+ * 관리자 변경이 즉시 반영되도록 HTTP 캐시는 사용하지 않고, 반복 조회 방지는 클라이언트 세션 캐시가 담당한다.
  */
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -32,8 +32,8 @@ export async function GET(req: NextRequest) {
   }
 
   const parent = searchParams.get("parent");
-  const areas = parent ? await listChildren(parent) : await listByLevel("sido");
-  const imported = parent ? true : areas.length > 0;
+  const areas = parent ? await listAvailableChildren(parent) : await listAvailableSidos();
+  const imported = parent ? true : (areas.length > 0 || (await countAreas()) > 0);
 
   return NextResponse.json(
     {
@@ -46,6 +46,6 @@ export async function GET(req: NextRequest) {
       })),
       ...(imported ? {} : { notice: "행정구역 데이터가 준비되지 않았습니다." }),
     },
-    { headers: { "Cache-Control": REGION_CACHE_CONTROL } }
+    { headers: { "Cache-Control": NO_STORE } }
   );
 }
