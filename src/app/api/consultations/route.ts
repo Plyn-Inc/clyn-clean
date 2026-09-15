@@ -29,7 +29,7 @@ const schema = z.object({
   areaSigungu: z.string().trim().max(30).optional(),
   areaDong: z.string().trim().max(30).optional(),
   areaText: z.string().trim().max(100).optional(),
-  address: z.string().trim().max(200).optional(),
+  address: z.string().trim().min(1, "상세 주소를 입력해주세요.").max(200),
   serviceType: z.enum(SERVICE_TYPES as unknown as [string, ...string[]]).optional(),
   houseTypeKey: z.string().max(20).optional(),
   actualPyeong: z.number().positive().max(1000).optional(),
@@ -37,7 +37,7 @@ const schema = z.object({
   preferredTimeSlot: z.enum(["morning", "afternoon", "all_day"]).optional(),
   reason: z.enum(["size_40_plus", "pet", "price_unconfirmed", "manual"]).optional(),
   petMeta: z.record(z.string(), z.unknown()).nullable().optional(),
-  extraNotes: z.string().max(2000).optional(),
+  extraNotes: z.string().max(1000).optional(),
   /** 집정리 상담 전용 — 정리 공간/물품 정보 (평형 대체) */
   jipjeongriInfo: z.string().max(1000).optional(),
   privacyAgreed: z.boolean().refine((v) => v === true, "개인정보 수집·이용에 동의해주세요."),
@@ -68,7 +68,7 @@ export async function POST(req: NextRequest) {
   }
 
   // ── 필수정보 서버 검증 (클라이언트 검증에 의존하지 않는다) ──────────────
-  // 공통 필수: 이름 · 연락처 · 작업지역 · 희망일 · 상담내용 · 개인정보 동의
+  // 공통 필수: 이름 · 연락처 · 작업지역 · 상세주소 · 희망일 · 개인정보 동의
   const hasStructuredArea = isValidWorkArea({
     sido: data.areaSido,
     sigungu: data.areaSigungu,
@@ -93,9 +93,6 @@ export async function POST(req: NextRequest) {
       { error: outOfWindowMessage(), code: "OUT_OF_BOOKING_WINDOW" },
       { status: 400 }
     );
-  }
-  if (!data.extraNotes?.trim()) {
-    return NextResponse.json({ error: "상담 내용을 입력해주세요." }, { status: 400 });
   }
   if (!data.serviceType) {
     return NextResponse.json({ error: "청소 종류를 선택해주세요." }, { status: 400 });
@@ -128,7 +125,7 @@ export async function POST(req: NextRequest) {
     const mergedNotes = [areaNote, data.extraNotes, serviceNote].filter(Boolean).join("\n").trim();
     const created = await createConsultation({
       ...data,
-      address: data.address || data.areaText,
+      address: data.address,
       extraNotes: mergedNotes,
     });
     // 상담접수는 캘린더 슬롯을 점유하지 않는다. payment도 만들지 않는다.

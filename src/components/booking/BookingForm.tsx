@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type HTMLAttributes } from "react";
 import {
   SERVICE_TYPES,
   HOUSE_TYPES_FIXED,
@@ -20,6 +20,7 @@ import RegionSelect, { EMPTY_REGION, type RegionValue } from "./RegionSelect";
 import DepositAccountPanel, { type DepositAccountInfo } from "./DepositAccountPanel";
 import { bookingMaxDate, isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
 import { callApi } from "@/lib/error-messages";
+import { formatPhoneInput, isValidKoreanPhone } from "@/lib/utils";
 
 /**
  * 고객 예약 4단계.
@@ -108,7 +109,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [extraNotes, setExtraNotes] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
-  const [customerEmail, setCustomerEmail] = useState("");
   const [address, setAddress] = useState("");
 
   // 4단계 — 확인/동의
@@ -311,6 +311,9 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     if (s === 3) {
       if (!customerName.trim()) return "예약자명을 입력해주세요.";
       if (!customerPhone.trim()) return "연락처를 입력해주세요.";
+      if (!isValidKoreanPhone(customerPhone)) return "연락처 형식을 확인해주세요.";
+      if (!address.trim()) return "상세 주소를 입력해주세요.";
+      if (extraNotes.length > 1000) return "기타 요청사항은 1000자 이내로 입력해주세요.";
       return null;
     }
 
@@ -366,7 +369,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         areaSido: region.sidoName,
         areaSigungu: region.sigunguName,
         areaDong: region.dongName,
-        address: address || undefined,
+        address: address.trim(),
         serviceType,
         houseTypeKey: serviceType === "집정리" ? undefined : resolvedKey || undefined,
         actualPyeong: actualPyeong ? Number(actualPyeong) : undefined,
@@ -401,10 +404,9 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
       body: JSON.stringify({
         customerName,
         customerPhone,
-        customerEmail: customerEmail || undefined,
         serviceType,
         region: `${region.sidoName} ${region.sigunguName}`.trim(),
-        address: address || [region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" "),
+        address: address.trim(),
         areaSido: region.sidoName,
         areaSigungu: region.sigunguName,
         areaDong: region.dongName,
@@ -421,7 +423,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         entryRoute,
         moveOutTime: serviceType === "사이청소" ? betweenCleaningDateTime(moveOutTime) : undefined,
         moveInTime: serviceType === "사이청소" ? betweenCleaningDateTime(moveInTime) : undefined,
-        extraNotes: extraNotes || undefined,
+        extraNotes: extraNotes.trim() || undefined,
         depositorName: customerName,
         privacyAgreed,
         corePrinciplesAgreed: agreement.corePrinciplesAgreed,
@@ -702,9 +704,15 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
       {step === 3 && (
         <div className="grid gap-5 md:grid-cols-2">
           <Field label="예약자명" required value={customerName} onChange={setCustomerName} />
-          <Field label="연락처" required value={customerPhone} onChange={setCustomerPhone} placeholder="010-0000-0000" />
-          <div className="md:col-span-2"><Field label="상세 주소 (선택)" value={address} onChange={setAddress} /></div>
-          <div className="md:col-span-2"><Field label="이메일 (선택)" value={customerEmail} onChange={setCustomerEmail} type="email" /></div>
+          <Field
+            label="연락처"
+            required
+            value={customerPhone}
+            onChange={(v) => setCustomerPhone(formatPhoneInput(v))}
+            placeholder="010-0000-0000"
+            inputMode="tel"
+          />
+          <div className="md:col-span-2"><Field label="상세 주소" required value={address} onChange={setAddress} /></div>
 
           {serviceType !== "사이청소" && serviceType !== "집정리" && (
             <div className="md:col-span-2">
@@ -722,9 +730,19 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
           )}
 
           <div className="md:col-span-2">
-            <label className="mb-1.5 block text-sm font-semibold">기타 요청사항</label>
-            <textarea value={extraNotes} onChange={(e) => setExtraNotes(e.target.value)} rows={3}
-              className="w-full rounded-lg border border-[var(--line)] px-3.5 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
+            <label className="mb-1.5 block text-sm font-semibold">기타 요청사항 <span className="font-normal text-[var(--ink-soft)]">(선택)</span></label>
+            <textarea
+              value={extraNotes}
+              onChange={(e) => setExtraNotes(e.target.value)}
+              rows={4}
+              maxLength={1000}
+              placeholder="예: 반려동물이 있었음, 곰팡이·스티커 자국, 오염이 심한 공간, 특별히 확인할 부분 등"
+              className="w-full rounded-lg border border-[var(--line)] px-3.5 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none"
+            />
+            <div className="mt-1 flex items-center justify-between gap-3 text-xs text-[var(--ink-soft)]">
+              <span>필요한 내용만 적어주세요. 최대 1000자까지 입력할 수 있습니다.</span>
+              <span className="shrink-0">{extraNotes.length} / 1000자</span>
+            </div>
           </div>
         </div>
       )}
@@ -818,20 +836,21 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   );
 }
 
-function Field({ label, value, onChange, placeholder, type = "text", required }: {
+function Field({ label, value, onChange, placeholder, type = "text", required, inputMode }: {
   label: string;
   value: string;
   onChange: (v: string) => void;
   placeholder?: string;
   type?: string;
   required?: boolean;
+  inputMode?: HTMLAttributes<HTMLInputElement>["inputMode"];
 }) {
   return (
     <div>
       <label className="mb-1.5 block text-sm font-semibold">
         {label} {required && <span className="text-xs text-[var(--rose)]">*필수</span>}
       </label>
-      <input type={type} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+      <input type={type} inputMode={inputMode} value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
         className="w-full rounded-lg border border-[var(--line)] px-3.5 py-2.5 text-sm focus:border-[var(--mint)] focus:outline-none" />
     </div>
   );

@@ -125,6 +125,27 @@ export function isValidKoreanPhone(raw: string): boolean {
   return /^01[0-9]\d{7,8}$/.test(d) || /^0(2|[3-6][1-5])\d{6,8}$/.test(d);
 }
 
+/**
+ * 연락처 입력 중 숫자만 허용하면서 하이픈을 자동 삽입한다.
+ * 휴대폰은 010-1234-5678, 서울은 02-1234-5678, 그 외 지역번호는 031-1234-5678 형태로 맞춘다.
+ */
+export function formatPhoneInput(raw: string): string {
+  const d = normalizePhone(raw).slice(0, 11);
+  if (!d) return "";
+
+  if (d.startsWith("02")) {
+    if (d.length <= 2) return d;
+    if (d.length <= 5) return `${d.slice(0, 2)}-${d.slice(2)}`;
+    if (d.length <= 9) return `${d.slice(0, 2)}-${d.slice(2, 5)}-${d.slice(5)}`;
+    return `${d.slice(0, 2)}-${d.slice(2, 6)}-${d.slice(6)}`;
+  }
+
+  if (d.length <= 3) return d;
+  if (d.length <= 6) return `${d.slice(0, 3)}-${d.slice(3)}`;
+  if (d.length <= 10) return `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}`;
+  return `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}`;
+}
+
 /** 010-1234-5678 형태로 표시용 포맷 */
 export function formatPhone(raw: string): string {
   const d = normalizePhone(raw);
