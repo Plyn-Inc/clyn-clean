@@ -120,6 +120,116 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
   );
 }
 
+
+
+export interface InsertReservationBundlePostgresParams {
+  reservation: CreateReservationRow;
+  payment: {
+    amount: number;
+    depositorName: string;
+    dueDate: string;
+  };
+  historyDetail: string;
+}
+
+/**
+ * PostgreSQL production booking write.
+ *
+ * Vercel/Supabase 환경에서 explicit BEGIN 자체가 실패해 insert에 도달하지 못하는
+ * 경로를 피하기 위해 예약 + pending payment + 관리자 이력을 한 statement로 저장한다.
+ * PostgreSQL의 단일 statement는 원자적이므로 세 CTE 중 하나가 실패하면 전체가 반영되지 않는다.
+ * SQLite에서는 이 함수를 호출하지 않고 기존 withTransaction 경로를 사용한다.
+ */
+export async function insertReservationBundlePostgres(
+  params: InsertReservationBundlePostgresParams
+): Promise<{ reservationId: number; paymentId: number; logId: number }> {
+  const row = params.reservation;
+  const result = await queryRow<{
+    reservation_id: number | string;
+    payment_id: number | string;
+    log_id: number | string;
+  }>(
+    `WITH inserted_reservation AS (
+      INSERT INTO reservations (
+        reservation_code, customer_name, customer_phone, customer_email,
+        service_type, region, address, area_pyeong, house_type_key, price_multiplier, house_structure,
+        occupancy_status, desired_date, time_slot, entry_route,
+        extra_options, extra_notes, has_site_photos,
+        base_price_snapshot, extra_price_snapshot, option_breakdown_snapshot, deposit_amount_snapshot, instant_discount_snapshot,
+        estimated_total_snapshot, estimated_balance_snapshot,
+        price_confirmed_snapshot,
+        instant_discount_eligible, instant_discount_applied,
+        privacy_agreed, privacy_agreed_at,
+        area_sido, area_sigungu, area_dong,
+        core_principles_agreed, service_terms_agreed, additional_charge_agreed,
+        agreement_version, agreed_at,
+        has_pet, date_adjustment_applied, date_adjustment_amount,
+        product_key, holiday_surcharge_snapshot, total_amount_snapshot,
+        move_out_time, move_in_time,
+        area_sido_code, area_sigungu_code, area_dong_code,
+        final_confirmed_total, account_revealed_at, reservation_status
+      ) VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
+        ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END,
+        ?, ?, ?,
+        ?, ?, ?,
+        ?, CASE WHEN ? IS NOT NULL THEN CURRENT_TIMESTAMP ELSE NULL END,
+        ?, ?, ?,
+        ?, ?, ?,
+        ?, ?,
+        ?, ?, ?,
+        ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, ?
+      )
+      RETURNING id
+    ), inserted_payment AS (
+      INSERT INTO payments (
+        reservation_id, payment_method, payment_status, amount, depositor_name, payment_due_date
+      )
+      SELECT id, 'manual_bank_transfer', 'pending', ?, ?, ?
+      FROM inserted_reservation
+      RETURNING id, reservation_id
+    ), inserted_log AS (
+      INSERT INTO confirmation_logs (
+        reservation_id, admin_id, admin_name, action, detail, prev_status, next_status
+      )
+      SELECT reservation_id, NULL, '시스템', 'reservation_received', ?, NULL, 'awaiting_deposit'
+      FROM inserted_payment
+      RETURNING id
+    )
+    SELECT
+      (SELECT id FROM inserted_reservation) AS reservation_id,
+      (SELECT id FROM inserted_payment) AS payment_id,
+      (SELECT id FROM inserted_log) AS log_id`,
+    [
+      row.code, row.customerName, row.customerPhone, row.customerEmail,
+      row.serviceType, row.region, row.address, row.areaPyeong, row.houseTypeKey, row.priceMultiplier, row.houseStructure,
+      row.occupancyStatus, row.desiredDate, row.timeSlot, row.entryRoute,
+      row.extraOptions, row.extraNotes, row.hasSitePhotos,
+      row.basePriceSnapshot, row.extraPriceSnapshot, row.optionBreakdownSnapshot, row.depositAmountSnapshot, row.instantDiscountSnapshot,
+      row.estimatedTotalSnapshot, row.estimatedBalanceSnapshot,
+      row.priceConfirmedSnapshot, row.instantDiscountEligible,
+      row.privacyAgreed, row.privacyAgreed,
+      row.areaSido, row.areaSigungu, row.areaDong,
+      row.corePrinciplesAgreed, row.serviceTermsAgreed, row.additionalChargeAgreed,
+      row.agreementVersion, row.agreementVersion,
+      row.hasPet, row.dateAdjustmentApplied, row.dateAdjustmentAmount,
+      row.productKey, row.holidaySurchargeSnapshot, row.totalAmountSnapshot,
+      row.moveOutTime, row.moveInTime,
+      row.areaSidoCode, row.areaSigunguCode, row.areaDongCode,
+      row.finalConfirmedTotal ?? null, row.accountRevealed ? 1 : 0, row.reservationStatus ?? "received",
+      params.payment.amount, params.payment.depositorName, params.payment.dueDate,
+      params.historyDetail,
+    ]
+  );
+
+  if (!result) throw new Error("Atomic booking insert did not return ids.");
+  return {
+    reservationId: Number(result.reservation_id),
+    paymentId: Number(result.payment_id),
+    logId: Number(result.log_id),
+  };
+}
+
 export function setReservationStatusRaw(id: number, status: ReservationStatus): Promise<void> {
   return execute(`UPDATE reservations SET reservation_status = ?, updated_at = datetime('now') WHERE id = ?`, [status, id]);
 }

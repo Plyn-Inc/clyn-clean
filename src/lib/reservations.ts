@@ -1,5 +1,5 @@
 import * as reservationRepo from "@/database/repositories/reservation-repository";
-import { lockReservationSlot, withTransaction } from "@/database/connection";
+import { getDatabaseBackend, lockReservationSlot, withTransaction } from "@/database/connection";
 import { generateReservationCode, addHoursISO, isValidKoreanPhone, isValidWorkArea } from "./utils";
 import { getSlotEffectiveStatus, getDaySlotView } from "./calendar";
 import { checkReservationReadiness } from "./settings";
@@ -451,9 +451,12 @@ export async function createReservationAndDeposit(
   ) {
     throw new Error("견적금액을 확인해주세요.");
   }
+
   const balanceAmount = totalAmount - depositAmount;
   const code = generateReservationCode();
-  const dueHours = Number.isFinite(paymentDueHours) && paymentDueHours > 0 ? paymentDueHours : DEPOSIT_DEADLINE_HOURS;
+  const dueHours = Number.isFinite(paymentDueHours) && paymentDueHours > 0
+    ? paymentDueHours
+    : DEPOSIT_DEADLINE_HOURS;
   const dueDate = addHoursISO(dueHours);
   const keyNum = input.houseTypeKey ? parseInt(input.houseTypeKey, 10) : NaN;
   const resolvedAreaPyeong = input.actualPyeong != null
@@ -464,88 +467,115 @@ export async function createReservationAndDeposit(
         ? keyNum
         : null;
 
+  const reservationRow: reservationRepo.CreateReservationRow = {
+    code,
+    customerName: input.customerName,
+    customerPhone: input.customerPhone,
+    customerEmail: input.customerEmail ?? null,
+    serviceType: input.serviceType,
+    region: input.region,
+    address: input.address,
+    areaPyeong: resolvedAreaPyeong,
+    houseTypeKey: input.houseTypeKey ?? null,
+    priceMultiplier: 1,
+    houseStructure: input.houseStructure ?? null,
+    occupancyStatus: input.occupancyStatus ?? null,
+    desiredDate: input.desiredDate || null,
+    timeSlot: input.timeSlot,
+    entryRoute: input.entryRoute,
+    extraOptions: JSON.stringify(input.extraOptions ?? []),
+    extraNotes: input.extraNotes ?? null,
+    hasSitePhotos: input.hasSitePhotos ? 1 : 0,
+    basePriceSnapshot: Math.round(quote.basePrice),
+    extraPriceSnapshot: 0,
+    optionBreakdownSnapshot: JSON.stringify(quote.optionBreakdown ?? []),
+    depositAmountSnapshot: depositAmount,
+    instantDiscountSnapshot: null,
+    estimatedTotalSnapshot: totalAmount,
+    estimatedBalanceSnapshot: balanceAmount,
+    priceConfirmedSnapshot: 1,
+    instantDiscountEligible: 0,
+    privacyAgreed: 1,
+    areaSido: input.areaSido?.trim() || null,
+    areaSigungu: input.areaSigungu?.trim() || null,
+    areaDong: input.areaDong?.trim() || null,
+    corePrinciplesAgreed: 1,
+    serviceTermsAgreed: 1,
+    additionalChargeAgreed: 1,
+    agreementVersion: AGREEMENT_VERSION,
+    hasPet: input.hasPet ? 1 : 0,
+    dateAdjustmentApplied: 0,
+    dateAdjustmentAmount: 0,
+    productKey: input.serviceType === "집정리"
+      ? input.jipjeongriPackage ?? null
+      : input.houseTypeKey ?? null,
+    holidaySurchargeSnapshot: 0,
+    totalAmountSnapshot: totalAmount,
+    moveOutTime: input.moveOutTime ?? null,
+    moveInTime: input.moveInTime ?? null,
+    areaSidoCode: input.areaSidoCode ?? null,
+    areaSigunguCode: input.areaSigunguCode ?? null,
+    areaDongCode: input.areaDongCode ?? null,
+    finalConfirmedTotal: totalAmount,
+    accountRevealed: true,
+    reservationStatus: "awaiting_deposit",
+  };
+
+  const historyDetail = `고객 예약 접수 / 계좌 안내 — 총 ${totalAmount.toLocaleString("ko-KR")}원 / 예약금 ${depositAmount.toLocaleString("ko-KR")}원`;
+  const depositorName = input.depositorName || input.customerName;
+
   let reservationId = 0;
   let paymentId = 0;
-  let stage: ReservationPersistenceError["stage"] = "transaction";
 
   try {
-    await withTransaction(async () => {
-      stage = "reservation_insert";
-      reservationId = await reservationRepo.insertReservation({
-        code,
-        customerName: input.customerName,
-        customerPhone: input.customerPhone,
-        customerEmail: input.customerEmail ?? null,
-        serviceType: input.serviceType,
-        region: input.region,
-        address: input.address,
-        areaPyeong: resolvedAreaPyeong,
-        houseTypeKey: input.houseTypeKey ?? null,
-        priceMultiplier: 1,
-        houseStructure: input.houseStructure ?? null,
-        occupancyStatus: input.occupancyStatus ?? null,
-        desiredDate: input.desiredDate || null,
-        timeSlot: input.timeSlot,
-        entryRoute: input.entryRoute,
-        extraOptions: JSON.stringify(input.extraOptions ?? []),
-        extraNotes: input.extraNotes ?? null,
-        hasSitePhotos: input.hasSitePhotos ? 1 : 0,
-        basePriceSnapshot: Math.round(quote.basePrice),
-        extraPriceSnapshot: 0,
-        optionBreakdownSnapshot: JSON.stringify(quote.optionBreakdown ?? []),
-        depositAmountSnapshot: depositAmount,
-        instantDiscountSnapshot: null,
-        estimatedTotalSnapshot: totalAmount,
-        estimatedBalanceSnapshot: balanceAmount,
-        priceConfirmedSnapshot: 1,
-        instantDiscountEligible: 0,
-        privacyAgreed: 1,
-        areaSido: input.areaSido?.trim() || null,
-        areaSigungu: input.areaSigungu?.trim() || null,
-        areaDong: input.areaDong?.trim() || null,
-        corePrinciplesAgreed: 1,
-        serviceTermsAgreed: 1,
-        additionalChargeAgreed: 1,
-        agreementVersion: AGREEMENT_VERSION,
-        hasPet: input.hasPet ? 1 : 0,
-        dateAdjustmentApplied: 0,
-        dateAdjustmentAmount: 0,
-        productKey: input.serviceType === "집정리"
-          ? input.jipjeongriPackage ?? null
-          : input.houseTypeKey ?? null,
-        holidaySurchargeSnapshot: 0,
-        totalAmountSnapshot: totalAmount,
-        moveOutTime: input.moveOutTime ?? null,
-        moveInTime: input.moveInTime ?? null,
-        areaSidoCode: input.areaSidoCode ?? null,
-        areaSigunguCode: input.areaSigunguCode ?? null,
-        areaDongCode: input.areaDongCode ?? null,
-        finalConfirmedTotal: totalAmount,
-        accountRevealed: true,
-        reservationStatus: "awaiting_deposit",
+    if (getDatabaseBackend() === "postgres") {
+      // Production: explicit BEGIN을 열지 않는다. 한 PostgreSQL statement가
+      // 예약 + payment + 관리자 이력을 원자적으로 기록한다.
+      const saved = await reservationRepo.insertReservationBundlePostgres({
+        reservation: reservationRow,
+        payment: {
+          amount: depositAmount,
+          depositorName,
+          dueDate,
+        },
+        historyDetail,
       });
+      reservationId = saved.reservationId;
+      paymentId = saved.paymentId;
+    } else {
+      // Local/SQLite: 기존 직렬 transaction을 유지한다.
+      let stage: ReservationPersistenceError["stage"] = "transaction";
+      try {
+        await withTransaction(async () => {
+          stage = "reservation_insert";
+          reservationId = await reservationRepo.insertReservation(reservationRow);
 
-      stage = "payment_insert";
-      paymentId = await reservationRepo.insertPayment({
-        reservationId,
-        amount: depositAmount,
-        depositorName: input.depositorName || input.customerName,
-        dueDate,
-      });
+          stage = "payment_insert";
+          paymentId = await reservationRepo.insertPayment({
+            reservationId,
+            amount: depositAmount,
+            depositorName,
+            dueDate,
+          });
 
-      stage = "history_insert";
-      await reservationRepo.insertLog(
-        reservationId,
-        null,
-        "시스템",
-        "reservation_received",
-        `고객 예약 접수 / 계좌 안내 — 총 ${totalAmount.toLocaleString("ko-KR")}원 / 예약금 ${depositAmount.toLocaleString("ko-KR")}원`,
-        undefined,
-        "awaiting_deposit"
-      );
-    });
+          stage = "history_insert";
+          await reservationRepo.insertLog(
+            reservationId,
+            null,
+            "시스템",
+            "reservation_received",
+            historyDetail,
+            undefined,
+            "awaiting_deposit"
+          );
+        });
+      } catch (error) {
+        throw new ReservationPersistenceError(stage, error);
+      }
+    }
   } catch (error) {
-    throw new ReservationPersistenceError(stage, error);
+    if (error instanceof ReservationPersistenceError) throw error;
+    throw new ReservationPersistenceError("transaction", error);
   }
 
   return {
