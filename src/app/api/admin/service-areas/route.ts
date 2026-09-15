@@ -1,3 +1,5 @@
+import { revalidateTag } from "next/cache";
+import { PUBLIC_REGION_CACHE_TAG } from "@/lib/public-region-cache";
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminApiSession } from "@/lib/session";
 import {
@@ -44,5 +46,6 @@ export async function POST(req: NextRequest) {
     adminNote: body?.adminNote ? String(body.adminNote) : null,
     adminId: session.adminId,
   });
+  revalidateTag(PUBLIC_REGION_CACHE_TAG, { expire: 0 });
   return NextResponse.json({ ok: true });
 }

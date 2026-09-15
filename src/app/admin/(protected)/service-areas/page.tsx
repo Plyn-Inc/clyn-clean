@@ -27,7 +27,7 @@ export default function AdminServiceAreasPage() {
     setLoading(true);
     setMsg(null);
     try {
-      const regionRes = await fetch("/api/regions", { cache: "no-store" });
+      const regionRes = await fetch("/api/admin/regions", { cache: "no-store" });
       if (!regionRes.ok) throw new Error(`행정구역 목록 조회 실패 (${regionRes.status})`);
       const regionData = await regionRes.json();
       setSidoList(regionData.areas ?? []);
@@ -59,7 +59,7 @@ export default function AdminServiceAreasPage() {
     setSido(code);
     setSigunguList([]);
     if (!code) return;
-    const res = await fetch(`/api/regions?parent=${encodeURIComponent(code)}`, { cache: "force-cache" });
+    const res = await fetch(`/api/admin/regions?parent=${encodeURIComponent(code)}`, { cache: "no-store" });
     if (!res.ok) {
       setMsg({ type: "err", text: `지역 목록을 불러오지 못했습니다. (${res.status})` });
       return;
@@ -120,7 +120,7 @@ export default function AdminServiceAreasPage() {
       <div>
         <h1 className="font-display text-xl font-bold">서비스 가능지역</h1>
         <p className="mt-1.5 text-sm leading-relaxed text-[var(--ink-soft)]">
-          시/도를 선택한 뒤 직접 예약을 받을 시/군/구만 체크합니다. 체크하지 않은 지역은 상담 접수로 안내됩니다.
+          시/도를 선택한 뒤 직접 예약을 받을 시/군/구만 체크합니다. 체크한 지역만 고객 예약 화면에 노출됩니다.
         </p>
       </div>
 

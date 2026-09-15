@@ -12,14 +12,17 @@ test('관리자 서비스지역은 카드 토글이 아니라 시군구 체크�
   assert.doesNotMatch(page, /상담 전환<\/span>/);
 });
 
-test('고객 지역목록은 예약 가능지역만 서버에서 필터링하고 화면 안에서 캐시한다', () => {
+test('고객 지역목록은 예약 가능지역만 서버에서 캐시하고 화면 안에서도 재사용한다', () => {
   const region = read('src/components/booking/RegionSelect.tsx');
   const api = read('src/app/api/regions/route.ts');
+  const cache = read('src/lib/public-region-cache.ts');
   assert.match(region, /const areaCache = new Map/);
   assert.doesNotMatch(region, /fetchServiceAvailability/);
-  assert.match(api, /listAvailableSidos/);
-  assert.match(api, /listAvailableChildren/);
-  assert.match(api, /no-store/);
+  assert.match(api, /listCachedAvailableSidos/);
+  assert.match(api, /listCachedAvailableChildren/);
+  assert.match(cache, /listAvailableSidos/);
+  assert.match(cache, /listAvailableChildren/);
+  assert.match(cache, /PUBLIC_REGION_CACHE_TAG/);
 });
 
 test('캘린더 상태는 예약가능 예약불가 상담필요 3개만 사용하고 휴무를 노출하지 않는다', () => {

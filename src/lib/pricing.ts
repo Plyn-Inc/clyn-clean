@@ -1,5 +1,5 @@
 import { execute, queryRows } from "@/database/connection";
-import { getSetting } from "./settings";
+import { getSettings } from "./settings";
 import {
   JIPJEONGRI_PACKAGES,
   DEFAULT_DEPOSIT_BY_HOUSE_TYPE,
@@ -211,19 +211,19 @@ export function getOptionPrices(activeOnly = true): Promise<OptionPrice[]> {
 }
 
 export async function calculateQuote(input: QuoteInput): Promise<QuoteResult> {
-  const [depositRaw, discountRaw, discountEnabledRaw, balanceNoticeRaw] = await Promise.all([
-    getSetting("deposit_amount"),
-    getSetting("instant_discount_amount"),
-    getSetting("instant_discount_enabled"),
-    getSetting("balance_notice"),
+  const settings = await getSettings([
+    "deposit_amount",
+    "instant_discount_amount",
+    "instant_discount_enabled",
+    "balance_notice",
   ]);
-  const fallbackDeposit = Number(depositRaw || 0);
-  const discountAmount = Number(discountRaw || 0);
-  const discountEnabled = discountEnabledRaw === "1";
+  const fallbackDeposit = Number(settings.deposit_amount || 0);
+  const discountAmount = Number(settings.instant_discount_amount || 0);
+  const discountEnabled = settings.instant_discount_enabled === "1";
   // settings.balance_notice에 구 값("잔금은 작업 완료 후 현장에서 안내드립니다." 등)이
   // 남아 있어도 고객 견적에 노출되지 않도록 코드 레벨에서 정화한다.
   // DB migration(20260910150000)과 이중 방어.
-  const balanceNotice = sanitizeCustomerNotice(balanceNoticeRaw);
+  const balanceNotice = sanitizeCustomerNotice(settings.balance_notice);
 
   // ── 상품 키 결정 ────────────────────────────────────────────────────────
   // 집정리는 패키지 키, 그 외는 주거형태/평형 키를 사용한다.

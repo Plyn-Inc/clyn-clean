@@ -1,6 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSlotCalendarRange } from "@/lib/calendar";
-import { releaseExpiredDepositReservations } from "@/lib/reservations";
 import { aggregateConfirmedReservationsInRange } from "@/database/repositories/calendar-repository";
 import { toPublicSlotStatus } from "@/lib/types";
 import { getSpecialDayRange } from "@/lib/special-days-store";
@@ -30,14 +29,6 @@ export async function GET(req: NextRequest) {
   const clampedEnd = end > maxD ? maxD : end < minD ? minD : end;
   if (clampedStart > clampedEnd) {
     return NextResponse.json({ days: [], bookingMinDate: minD, bookingMaxDate: maxD });
-  }
-
-  // 입금기한이 지난 예약을 먼저 만료 처리한다 (별도 스케줄러 없이 lazy 실행).
-  // 실패해도 캘린더 조회 자체는 계속되어야 하므로 예외를 삼킨다.
-  try {
-    await releaseExpiredDepositReservations();
-  } catch (e) {
-    console.error("[calendar] 입금기한 만료 처리 실패", e);
   }
 
   // 범위 조회 3종을 한 번씩만 수행한다 (날짜 수에 비례하는 쿼리 없음)

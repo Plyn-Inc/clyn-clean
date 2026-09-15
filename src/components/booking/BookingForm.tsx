@@ -18,7 +18,7 @@ import type { SelectedSlot } from "./ReservationCalendar";
 import AgreementSection, { type AgreementState } from "./AgreementSection";
 import RegionSelect, { EMPTY_REGION, type RegionValue } from "./RegionSelect";
 import DepositAccountPanel, { type DepositAccountInfo } from "./DepositAccountPanel";
-import { bookingMaxDate, isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
+import { bookingMaxDate, bookingMinDate, isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
 import { callApi } from "@/lib/error-messages";
 import { formatPhoneInput, isValidKoreanPhone } from "@/lib/utils";
 
@@ -97,7 +97,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [timeSlot, setTimeSlot] = useState<BookingTimeSlot>(selectedSlot?.timeSlot ?? "");
   const [moveOutTime, setMoveOutTime] = useState("");
   const [moveInTime, setMoveInTime] = useState("");
-  const [today, setToday] = useState("");
+  const today = bookingMinDate();
   const maxDate = bookingMaxDate();
 
   // 1단계 — 지역
@@ -180,14 +180,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    fetch("/api/reservations")
-      .then((r) => r.json())
-      .then((d) => { if (!cancelled) setToday(d.today ?? ""); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
 
   // 최신 견적 요청만 화면 상태를 갱신한다.
   // 이전 요청은 abort하여 서비스/평형을 빠르게 바꿀 때 오래된 응답이 덮어쓰지 않게 한다.
@@ -277,6 +269,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
       if (!region.sidoCode) return "시/도를 선택해주세요.";
       if (!region.sigunguCode && !region.dongCode) return "지역을 선택해주세요.";
       if (!region.dongCode) return "읍/면/동을 선택해주세요.";
+      if (!address.trim()) return "상세 주소를 입력해주세요.";
       if (serviceType !== "집정리") {
         if (!resolvedKey) return "주택유형을 선택해주세요.";
         if (is40Plus && !actualPyeong) return "공급면적을 입력해주세요.";
@@ -312,7 +305,6 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
       if (!customerName.trim()) return "예약자명을 입력해주세요.";
       if (!customerPhone.trim()) return "연락처를 입력해주세요.";
       if (!isValidKoreanPhone(customerPhone)) return "연락처 형식을 확인해주세요.";
-      if (!address.trim()) return "상세 주소를 입력해주세요.";
       if (extraNotes.length > 1000) return "기타 요청사항은 1000자 이내로 입력해주세요.";
       return null;
     }
@@ -520,6 +512,15 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               onImportedChange={setRegionMasterImported}
             />
           </div>
+          <div className="rounded-xl border border-[var(--line)] bg-white p-4">
+            <p className="text-xs font-semibold text-[var(--ink-soft)]">선택한 지역</p>
+            <p className="mt-1 text-sm font-medium text-[var(--ink)]">
+              {[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" > ") || "지역을 먼저 선택해주세요."}
+            </p>
+            <div className="mt-3">
+              <Field label="상세 주소" required value={address} onChange={setAddress} placeholder="도로명 또는 지번 상세주소" />
+            </div>
+          </div>
           <div>
             <label className="mb-2 block text-sm font-semibold">청소 종류</label>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -712,7 +713,12 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
             placeholder="010-0000-0000"
             inputMode="tel"
           />
-          <div className="md:col-span-2"><Field label="상세 주소" required value={address} onChange={setAddress} /></div>
+          <div className="md:col-span-2 rounded-xl border border-[var(--line)] bg-[var(--sand-deep)] p-4">
+            <p className="text-xs font-semibold text-[var(--ink-soft)]">작업 장소</p>
+            <p className="mt-1 text-sm font-medium text-[var(--ink)]">
+              {[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} {address.trim()}
+            </p>
+          </div>
 
           {serviceType !== "사이청소" && serviceType !== "집정리" && (
             <div className="md:col-span-2">

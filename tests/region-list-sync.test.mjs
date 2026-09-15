@@ -117,12 +117,14 @@ test('시군구 단계가 없는 지역은 시도 자체를 관리자 서비스�
   const page = read('src/app/admin/(protected)/service-areas/page.tsx');
   const region = read('src/components/booking/RegionSelect.tsx');
   const api = read('src/app/api/regions/route.ts');
+  const cache = read('src/lib/public-region-cache.ts');
 
   assert.match(page, /const directDongMode =/);
   assert.match(page, /directDongMode[^]*toggle\(sido,/);
   assert.match(region, /sigunguCode:\s*value\.sidoCode[^]*sigunguName:\s*value\.sidoName/);
   assert.match(region, /sigunguCode:\s*value\.sidoCode[^]*serviceAvailable:\s*true/);
-  assert.match(api, /listAvailableChildren/);
+  assert.match(api, /listCachedAvailableChildren/);
+  assert.match(cache, /listAvailableChildren/);
 });
 
 test('직접예약 API는 구조화된 지역 코드를 필수로 받아 서비스지역 OFF 우회를 막는다', () => {

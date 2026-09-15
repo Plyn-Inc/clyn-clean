@@ -1,3 +1,5 @@
+import { revalidateTag } from "next/cache";
+import { PUBLIC_PRICING_CACHE_TAG } from "@/lib/public-pricing-cache";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 import { requireAdminApiSession } from "@/lib/session";
@@ -149,6 +151,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    revalidateTag(PUBLIC_PRICING_CACHE_TAG, { expire: 0 });
     return NextResponse.json({ ok: true });
   } catch (e) {
     console.error("[price-rules]", e);
@@ -171,6 +174,7 @@ export async function DELETE(req: NextRequest) {
 
   try {
     await deletePriceRule(id);
+    revalidateTag(PUBLIC_PRICING_CACHE_TAG, { expire: 0 });
     return NextResponse.json({ ok: true });
   } catch (e) {
     console.error("[price-rules DELETE]", e);

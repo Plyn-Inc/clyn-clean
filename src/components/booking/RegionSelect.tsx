@@ -66,7 +66,7 @@ export default function RegionSelect({
     }
 
     const url = parent ? `/api/regions?parent=${encodeURIComponent(parent)}` : "/api/regions";
-    const res = await fetch(url, { cache: "no-store" });
+    const res = await fetch(url);
     if (!res.ok) throw new Error("regions fetch failed");
     const data = (await res.json()) as { areas?: AreaOption[]; imported?: boolean };
     const nextImported = data.imported !== false;
@@ -204,8 +204,6 @@ export default function RegionSelect({
 
       {loading && <p className="mt-1.5 text-xs text-[var(--ink-soft)]">지역 목록을 불러오는 중...</p>}
 
-
-      <p className="mt-1.5 text-xs text-[var(--ink-soft)]">상세 주소는 예약 확정 후 담당자가 별도로 확인합니다.</p>
     </div>
   );
 }

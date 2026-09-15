@@ -4,15 +4,18 @@ import fs from 'node:fs';
 
 const read = (p) => fs.readFileSync(p, 'utf8');
 
-test('3단계는 연락처 형식과 상세주소를 다음 단계 전에 검증한다', () => {
+test('1단계는 상세주소를 필수로 받고 3단계는 연락처 형식을 검증한다', () => {
   const form = read('src/components/booking/BookingForm.tsx');
+  const step1 = form.slice(form.indexOf('{step === 1 && ('), form.indexOf('{step === 2 && ('));
+  const step3 = form.slice(form.indexOf('{step === 3 && ('), form.indexOf('{step === 4 && ('));
+  const validate1 = form.slice(form.indexOf('if (s === 1) {'), form.indexOf('if (s === 2) {'));
   assert.match(form, /isValidKoreanPhone\(customerPhone\)/);
   assert.match(form, /연락처 형식을 확인해주세요/);
-  assert.match(form, /if \(!address\.trim\(\)\) return "상세 주소를 입력해주세요\."/);
-  assert.match(form, /<Field label="상세 주소" required/);
+  assert.match(validate1, /if \(!address\.trim\(\)\) return "상세 주소를 입력해주세요\.";/);
+  assert.match(step1, /<Field label="상세 주소" required/);
+  assert.doesNotMatch(step3, /<Field label="상세 주소"/);
   assert.doesNotMatch(form, /상세 주소 \(선택\)/);
 });
-
 test('고객 예약 폼은 이메일을 수집하거나 전송하지 않는다', () => {
   const form = read('src/components/booking/BookingForm.tsx');
   assert.doesNotMatch(form, /customerEmail/);

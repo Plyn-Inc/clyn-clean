@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { DatabaseTimeoutError } from "@/database/connection";
 import { z } from "zod";
 import {
   createReservation,
@@ -127,7 +128,10 @@ export async function POST(req: NextRequest) {
   }
   const parsed = reservationSchema.safeParse(body);
   if (!parsed.success) {
-    return NextResponse.json({ error: parsed.error.issues[0]?.message || "입력값을 확인해주세요." }, { status: 400 });
+    return NextResponse.json(
+      { error: parsed.error.issues[0]?.message || "입력값을 확인해주세요.", code: "VALIDATION_ERROR" },
+      { status: 400 }
+    );
   }
 
   const data = parsed.data;
@@ -199,14 +203,16 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // 관리자에서 OFF한 옵션은 allowlist에 남아 있어도 신규 견적/예약에서 선택할 수 없습니다.
-  const activeOptionKeys = new Set((await getOptionPrices()).map((o) => o.option_key));
-  const inactiveSelected = (data.extraOptions ?? []).find((key) => !activeOptionKeys.has(key));
-  if (inactiveSelected) {
-    return NextResponse.json(
-      { error: "현재 선택할 수 없는 추가 서비스 옵션이 포함되어 있습니다. 옵션을 다시 선택해주세요." },
-      { status: 400 }
-    );
+  // 추가 옵션이 실제로 전달된 경우에만 DB를 조회한다. 현재 고객 UI는 추가옵션을 보내지 않는다.
+  if ((data.extraOptions?.length ?? 0) > 0) {
+    const activeOptionKeys = new Set((await getOptionPrices()).map((o) => o.option_key));
+    const inactiveSelected = data.extraOptions?.find((key) => !activeOptionKeys.has(key));
+    if (inactiveSelected) {
+      return NextResponse.json(
+        { error: "현재 선택할 수 없는 추가 서비스 옵션이 포함되어 있습니다. 옵션을 다시 선택해주세요." },
+        { status: 400 }
+      );
+    }
   }
 
   // 서버에서 할인 자격 직접 계산
@@ -230,6 +236,12 @@ export async function POST(req: NextRequest) {
   } catch (e) {
     if (e instanceof SpecialDayNotSyncedError) {
       return NextResponse.json({ error: e.message, code: e.code }, { status: 400 });
+    }
+    if (e instanceof DatabaseTimeoutError) {
+      return NextResponse.json(
+        { error: "예약 정보를 확인하는 중 데이터베이스 응답이 지연됐습니다. 다시 시도해주세요.", code: "DB_TIMEOUT" },
+        { status: 503 }
+      );
     }
     return NextResponse.json({ error: "현재 견적을 계산할 수 없습니다. 상담을 통해 안내드리겠습니다." }, { status: 400 });
   }
@@ -331,8 +343,8 @@ export async function POST(req: NextRequest) {
     Math.abs(serverQuote.estimatedTotal - data.clientEstimatedTotal) > 100
   ) {
     return NextResponse.json(
-      { error: "견적금액이 일치하지 않습니다. 페이지를 새로고침하고 다시 시도해주세요." },
-      { status: 400 }
+      { error: "견적금액이 일치하지 않습니다. 페이지를 새로고침하고 다시 시도해주세요.", code: "PRICE_CHANGED" },
+      { status: 409 }
     );
   }
 
@@ -346,6 +358,8 @@ export async function POST(req: NextRequest) {
       extraNotes: normalizedExtraNotes || undefined,
       timeSlot: data.timeSlot,
       privacyAgreed: data.privacyAgreed,
+      preparedQuote: serverQuote,
+      instantDiscountEligible: eligible,
     });
 
     // 계좌정보는 이 응답에 포함하지 않는다 (요구사항 14·15).
@@ -361,6 +375,12 @@ export async function POST(req: NextRequest) {
     }
     if (e instanceof DateNotAvailableError) {
       return NextResponse.json({ error: e.message, code: e.code }, { status: 409 });
+    }
+    if (e instanceof DatabaseTimeoutError) {
+      return NextResponse.json(
+        { error: "예약 저장 중 데이터베이스 응답이 지연됐습니다. 다시 시도해주세요.", code: "DB_TIMEOUT" },
+        { status: 503 }
+      );
     }
     console.error(e);
     return NextResponse.json({ error: "예약 처리 중 오류가 발생했습니다." }, { status: 500 });

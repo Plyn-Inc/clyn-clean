@@ -4,6 +4,7 @@ import { generateReservationCode, addHoursISO, isValidKoreanPhone, isValidWorkAr
 import { getSlotEffectiveStatus, getDaySlotView } from "./calendar";
 import { checkReservationReadiness } from "./settings";
 import { calculateQuote, getServiceProductPrice } from "./pricing";
+import type { QuoteResult } from "./pricing";
 import { isAllAgreed, missingAgreements, AGREEMENT_VERSION, isAgreementContentReady } from "./agreement";
 import type {
   Reservation,
@@ -100,6 +101,10 @@ export interface CreateReservationInput {
   corePrinciplesAgreed?: boolean;
   serviceTermsAgreed?: boolean;
   additionalChargeAgreed?: boolean;
+  /** API 계층에서 이미 서버 계산/검증한 견적. 전달되면 transaction 안에서 재조회하지 않는다. */
+  preparedQuote?: QuoteResult;
+  /** API 계층에서 이미 계산한 즉시예약 할인 자격. */
+  instantDiscountEligible?: boolean;
 }
 
 export interface CreateReservationResult {
@@ -249,49 +254,33 @@ export async function createReservation(
       await validateSlotAvailability(input.desiredDate, input.timeSlot);
     }
 
-    // 4. 서버에서 할인 자격 계산
-    const eligible = await computeInstantDiscountEligible(
+    // 4. API 계층에서 계산한 값이 있으면 그대로 재사용한다.
+    // 공개 submit 경로에서는 transaction 안에서 견적/설정 DB 조회를 반복하지 않는다.
+    const eligible = input.instantDiscountEligible ?? await computeInstantDiscountEligible(
       input.entryRoute,
       input.desiredDate,
       input.timeSlot
     );
 
-    // 5. 견적 계산 (신규 형식 — houseTypeKey / jipjeongriPackage 사용)
-    let estimatedTotal: number | null = null;
-    let estimatedBalance: number | null = null;
-    let depositAmountSnap: number | null = null;
-    let extraPriceSnapshot: number | null = null;
-    let optionBreakdownSnapshot: string | null = null;
-    let instantDiscountSnapshot: number | null = null;
-    // base_price_snapshot = 선택한 서비스/상품의 독립 기본가격 snapshot
-    let basePriceSnap: number | null = null;
-    // price_multiplier = 레거시 컬럼 호환용. 독립 가격 모델에서는 항상 1.0
-    let priceMultiplierSnap: number = 1.0;
+    const q = input.preparedQuote ?? await calculateQuote({
+      serviceType: input.serviceType,
+      houseTypeKey: input.houseTypeKey,
+      jipjeongriPackage: input.jipjeongriPackage,
+      actualPyeong: input.actualPyeong ?? (input.areaPyeong ?? undefined),
+      extraOptions: input.extraOptions,
+      instantDiscountEligible: eligible,
+      desiredDate: input.desiredDate,
+      hasPet: input.hasPet,
+    });
 
-    try {
-      const q = await calculateQuote({
-        serviceType: input.serviceType,
-        houseTypeKey: input.houseTypeKey,
-        jipjeongriPackage: input.jipjeongriPackage,
-        actualPyeong: input.actualPyeong ?? (input.areaPyeong ?? undefined),
-        extraOptions: input.extraOptions,
-        instantDiscountEligible: eligible,
-        // snapshot 금액도 서버가 예약일 기준으로 재계산한 값을 저장한다
-        desiredDate: input.desiredDate,
-        hasPet: input.hasPet,
-      });
-      estimatedTotal = q.estimatedTotal;
-      estimatedBalance = q.estimatedBalance;
-      depositAmountSnap = q.depositAmount;
-      extraPriceSnapshot = q.extraTotal;
-      optionBreakdownSnapshot = JSON.stringify(q.optionBreakdown);
-      instantDiscountSnapshot = q.instantDiscount > 0 ? q.instantDiscount : null;
-      // 선택한 서비스/상품의 독립 기본가격 저장
-      basePriceSnap = q.basePrice > 0 ? q.basePrice : null;
-      priceMultiplierSnap = q.multiplier;
-    } catch {
-      /* 가격 미설정 시 null */
-    }
+    const estimatedTotal: number | null = q.estimatedTotal;
+    const estimatedBalance: number | null = q.estimatedBalance;
+    const depositAmountSnap: number | null = q.depositAmount;
+    const extraPriceSnapshot: number | null = q.extraTotal;
+    const optionBreakdownSnapshot: string | null = JSON.stringify(q.optionBreakdown);
+    const instantDiscountSnapshot: number | null = q.instantDiscount > 0 ? q.instantDiscount : null;
+    const basePriceSnap: number | null = q.basePrice > 0 ? q.basePrice : null;
+    const priceMultiplierSnap: number = q.multiplier;
 
     // areaPyeong 결정:
     //   1. actualPyeong이 있으면 우선 (40평 이상 고객이 직접 입력한 실제 평수)
@@ -305,27 +294,10 @@ export async function createReservation(
       : input.areaPyeong != null ? input.areaPyeong
       : pyeongFromKey;
 
-    // 6. DB 저장 (snapshot 값이 위 계산과 일치)
-    // priceConfirmedSnapshot: 40평 이상은 0(미확정), 그 외는 1(확정)
-    let priceConfirmedSnap = 1;
-    let dateAdjApplied = false;
-    let dateAdjAmount = 0;
-    try {
-      const q2 = await calculateQuote({
-        serviceType: input.serviceType,
-        houseTypeKey: input.houseTypeKey,
-        jipjeongriPackage: input.jipjeongriPackage,
-        actualPyeong: input.actualPyeong ?? (input.areaPyeong ?? undefined),
-        instantDiscountEligible: false,
-        // 휴일 가산금 snapshot은 예약일 기준으로 계산되어야 한다
-        desiredDate: input.desiredDate,
-      });
-      priceConfirmedSnap = q2.priceConfirmed ? 1 : 0;
-      dateAdjApplied = q2.dateAdjustmentApplied;
-      dateAdjAmount = q2.dateAdjustmentAmount;
-    } catch {
-      priceConfirmedSnap = 0;
-    }
+    // 6. DB 저장 (같은 서버 견적 snapshot을 한 번만 사용)
+    const priceConfirmedSnap = q.priceConfirmed ? 1 : 0;
+    const dateAdjApplied = q.dateAdjustmentApplied;
+    const dateAdjAmount = q.dateAdjustmentAmount;
 
     reservationId = await reservationRepo.insertReservation({
       code,

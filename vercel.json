@@ -4,6 +4,10 @@
     {
       "path": "/api/cron/special-days",
       "schedule": "0 18 * * *"
+    },
+    {
+      "path": "/api/cron/expired-reservations",
+      "schedule": "0 17 * * *"
     }
   ]
 }

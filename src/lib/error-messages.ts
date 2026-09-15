@@ -24,6 +24,9 @@ const CODE_MESSAGES: Record<string, string> = {
   DATE_FULLY_BOOKED: "선택한 날짜의 예약이 마감되었습니다. 다른 날짜를 선택해주세요.",
   DATE_NOT_AVAILABLE: "선택한 날짜는 예약할 수 없습니다. 다른 날짜를 선택해주세요.",
   SETTINGS_NOT_READY: "예약 접수 준비 중입니다. 잠시 후 다시 시도해주세요.",
+  VALIDATION_ERROR: "입력한 예약 정보를 다시 확인해주세요.",
+  PRICE_CHANGED: "예약금액이 변경되었습니다. 최신 금액을 다시 확인해주세요.",
+  DB_TIMEOUT: "예약 서버 응답이 지연되고 있습니다. 잠시 후 다시 시도해주세요.",
 };
 
 export interface ServerErrorBody {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { listPriceRules } from "@/lib/pricing";
+import { listCachedPublicPriceRules } from "@/lib/public-pricing-cache";
 import { VAT_NOTICE } from "@/lib/types";
 
 /**
@@ -7,7 +7,7 @@ import { VAT_NOTICE } from "@/lib/types";
  * 서비스별 독립 price_rules row를 그대로 사용하며 비활성 상품은 노출하지 않는다.
  */
 export async function GET() {
-  const rules = await listPriceRules();
+  const rules = await listCachedPublicPriceRules();
   const items = rules
     .filter((r) => r.is_active === 1 && (r.product_key ?? r.note) && r.base_price > 0)
     .map((r) => {

@@ -49,7 +49,7 @@ test('예약 도메인은 all_day 공통 lock과 사이청소 양쪽 슬롯 검�
 
 test('예약 선금은 서비스별 예약 생성 snapshot을 우선한다', () => {
   const src = read('src/lib/reservations.ts');
-  assert.match(src, /depositAmountSnap\s*=\s*q\.depositAmount/);
+  assert.match(src, /depositAmountSnap(?::[^=]+)?\s*=\s*q\.depositAmount/);
   assert.match(src, /reservation\.deposit_amount_snapshot/);
   assert.match(src, /getServiceProductPrice\(\s*reservation\.service_type/);
   assert.doesNotMatch(src, /getDepositAmountForHouseType/);
@@ -172,11 +172,13 @@ test('1단계 맨 앞에서 지역을 먼저 선택하고 지역 확인 전에�
   assert.match(src, /if \(!regionReadyForPricing \|\| !hasProduct \|\| !desiredDate\)/);
 });
 
-test('고객정보 단계에서는 지역을 다시 요구하지 않고 상세주소만 받는다', () => {
+test('고객정보 단계에서는 지역과 상세주소를 다시 입력하지 않고 작업 장소를 요약한다', () => {
   const src = read('src/components/booking/BookingForm.tsx');
   const step3 = src.match(/\{step === 3 && \([\s\S]*?\n      \)\}/)?.[0] ?? '';
   assert.doesNotMatch(step3, /<RegionSelect/);
-  assert.match(step3, /상세 주소/);
+  assert.doesNotMatch(step3, /<Field label="상세 주소"/);
+  assert.match(step3, /작업 장소/);
+  assert.match(step3, /address\.trim\(\)/);
 });
 
 test('기본가격은 공개 가격표를 한 번 캐시해 즉시 표시하고 날짜 선택 후에만 최종 quote를 갱신한다', () => {
