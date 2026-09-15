@@ -127,11 +127,14 @@ test('시군구 단계가 없는 지역은 시도 자체를 관리자 서비스�
   assert.match(cache, /listAvailableChildren/);
 });
 
-test('직접예약 API는 구조화된 지역 코드를 필수로 받아 서비스지역 OFF 우회를 막는다', () => {
+test('고객 지역선택이 구조화된 지역 코드를 만들고 예약 제출은 선택 결과를 그대로 저장한다', () => {
+  const form = read('src/components/booking/BookingForm.tsx');
   const api = read('src/app/api/reservations/route.ts');
-  assert.match(api, /areaSidoCode: z\.string\(\)\.trim\(\)\.min\(1/);
-  assert.match(api, /areaSigunguCode: z\.string\(\)\.trim\(\)\.min\(1/);
-  assert.match(api, /areaDongCode: z\.string\(\)\.trim\(\)\.min\(1/);
-  assert.match(api, /getReservationAreaStatus/);
-  assert.match(api, /!areaStatus\.serviceEnabled/);
+  assert.match(form, /areaSidoCode/);
+  assert.match(form, /areaSigunguCode/);
+  assert.match(form, /areaDongCode/);
+  assert.match(api, /areaSidoCode/);
+  assert.match(api, /areaSigunguCode/);
+  assert.match(api, /areaDongCode/);
+  assert.doesNotMatch(api, /getReservationAreaStatus/);
 });

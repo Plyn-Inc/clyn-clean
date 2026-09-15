@@ -34,19 +34,17 @@ test('사이청소 재개방 override 조회 실패만으로 월 캘린더 전�
   assert.match(src, /safeFindReopenOverridesInRange\(startDate, endDate\)/);
 });
 
-test('특수일 보조 조회 실패만으로 공개 캘린더 API 전체가 실패하지 않는다', () => {
+test('공개 캘린더는 DB 특수일 보조 조회를 제거하고 정적 특별일 데이터만 사용한다', () => {
   const src = read('src/app/api/calendar/route.ts');
-  assert.match(src, /async function safeSpecialDayRange/);
-  assert.match(src, /getSpecialDayRange\(start, end\)/);
-  assert.match(src, /return new Map\(\)/);
-  assert.match(src, /safeSpecialDayRange\(clampedStart, clampedEnd\)/);
+  assert.doesNotMatch(src, /getSpecialDayRange/);
+  assert.doesNotMatch(src, /safeSpecialDayRange/);
+  assert.match(src, /getStaticSpecialDayMeta/);
 });
 
-test('예약완료 라벨 보조 집계 실패만으로 공개 캘린더 전체가 실패하지 않는다', () => {
+test('공개 캘린더는 진행/완료 상태를 한 번의 예약 집계로 가져온다', () => {
   const src = read('src/app/api/calendar/route.ts');
-  assert.match(src, /async function safeConfirmedRange/);
-  assert.match(src, /aggregateConfirmedReservationsInRange\(start, end\)/);
-  assert.match(src, /safeConfirmedRange\(clampedStart, clampedEnd\)/);
+  assert.doesNotMatch(src, /aggregateConfirmedReservationsInRange/);
+  assert.match(src, /aggregatePublicReservationStatesInRange/);
 });
 
 test('PostgreSQL 콜드스타트 동시 쿼리는 클라이언트 초기화를 한 번만 공유한다', () => {

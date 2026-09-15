@@ -33,18 +33,21 @@ test('가격 요청은 abort 가능한 최신 요청만 상태를 갱신하고 �
   assert.match(src, /controller\.abort\(\)/);
 });
 
-test('예약 API는 사이청소 all_day 계약을 명시한다', () => {
+test('예약 API는 시간대를 입력값으로 받되 제출 시 서비스별 슬롯 재검증을 하지 않는다', () => {
   const src = read('src/app/api/reservations/route.ts');
   assert.match(src, /z\.enum\(\["morning", "afternoon", "all_day"\]/);
-  assert.match(src, /data\.serviceType === "사이청소"[^]*data\.timeSlot !== "all_day"/);
-  assert.match(src, /data\.serviceType !== "사이청소"[^]*data\.timeSlot === "all_day"/);
+  assert.doesNotMatch(src, /data\.serviceType === "사이청소"[^]*data\.timeSlot !== "all_day"/);
+  assert.doesNotMatch(src, /data\.serviceType !== "사이청소"[^]*data\.timeSlot === "all_day"/);
 });
 
-test('예약 도메인은 all_day 공통 lock과 사이청소 양쪽 슬롯 검증을 사용한다', () => {
+test('신규 예약 저장 경로는 all_day lock이나 슬롯 가용성 재검증을 하지 않는다', () => {
   const src = read('src/lib/reservations.ts');
-  assert.match(src, /timeSlot:\s*"morning" \| "afternoon" \| "all_day"/);
-  assert.match(src, /lockReservationSlot\(input\.desiredDate, "all_day"\)/);
-  assert.match(src, /validateAllDayAvailability\(input\.desiredDate\)/);
+  const start = src.indexOf('export async function createReservationAndDeposit(');
+  const end = src.indexOf('// ---------------------------------------------------------------------------\n// 조회', start);
+  const block = src.slice(start, end);
+  assert.doesNotMatch(block, /lockReservationSlot/);
+  assert.doesNotMatch(block, /validateAllDayAvailability/);
+  assert.doesNotMatch(block, /getDaySlotView/);
 });
 
 test('예약 선금은 서비스별 예약 생성 snapshot을 우선한다', () => {
@@ -82,13 +85,13 @@ test('사이청소 예약은 관리자에서도 all_day를 유지하고 재개�
   assert.match(page, /href="\/admin\/slot-reopen"/);
 });
 
-test('사이청소 퇴거/입주 시간은 선택 날짜와 같은 날이며 도메인에서도 필수 검증한다', () => {
+test('사이청소 퇴거/입주 시간은 UI 단계에서 수집하고 예약 제출 서버는 다시 날짜 검증하지 않는다', () => {
   const api = read('src/app/api/reservations/route.ts');
-  const domain = read('src/lib/reservations.ts');
-  assert.match(api, /data\.moveOutTime\.startsWith\(`\$\{data\.desiredDate\}T`\)/);
-  assert.match(api, /data\.moveInTime\.startsWith\(`\$\{data\.desiredDate\}T`\)/);
-  assert.match(domain, /input\.serviceType === "사이청소"[^]*input\.moveOutTime[^]*input\.moveInTime/);
-  assert.match(domain, /input\.moveOutTime\.startsWith\(`\$\{input\.desiredDate\}T`\)/);
+  const form = read('src/components/booking/BookingForm.tsx');
+  assert.match(form, /moveOutTime/);
+  assert.match(form, /moveInTime/);
+  assert.doesNotMatch(api, /moveOutTime\.startsWith/);
+  assert.doesNotMatch(api, /moveInTime\.startsWith/);
 });
 
 test('가격 오류 문구는 현재 견적 요청이 실제 실패한 경우에만 표시한다', () => {
@@ -112,12 +115,11 @@ test('행정구역 master 미임포트 시 자유입력이나 상담 우회 없�
   assert.match(form, /공식 행정구역 목록을 준비 중입니다/);
 });
 
-test('예약 API도 행정구역 master 미임포트 상태의 직접예약을 거부한다', () => {
+test('예약 제출 API는 이미 선택된 지역을 다시 DB 검증하지 않는다', () => {
   const api = read('src/app/api/reservations/route.ts');
-  assert.match(api, /getReservationAreaStatus/);
-  assert.match(api, /!areaStatus\.masterReady[^]*REGION_MASTER_NOT_READY/);
+  assert.doesNotMatch(api, /getReservationAreaStatus/);
+  assert.doesNotMatch(api, /REGION_MASTER_NOT_READY/);
   assert.doesNotMatch(api, /countAreas/);
-  assert.doesNotMatch(api, /미임포트 상태에서 모든 예약을 막으면 서비스가 중단되므로 통과시킨다/);
 });
 
 
@@ -130,12 +132,12 @@ test('사이청소 all_day 보호를 재개방할 때 all_day 예약 자체는 �
   assert.match(calendar, /const directBookedCount = activeCounts\.get\(`\$\{date\}\|\$\{timeSlot\}`\) \?\? 0/);
 });
 
-test('재개방 슬롯의 예약금 공개·확정·시간변경은 all_day 보호 예약을 capacity 점유로 세지 않는다', () => {
+test('레거시 재개방 슬롯 처리도 all_day 보호 예약을 직접 슬롯 capacity로 세지 않는다', () => {
   const domain = read('src/lib/reservations.ts');
   const repo = read('src/database/repositories/reservation-repository.ts');
   assert.match(repo, /countDirectActiveReservationsOnSlotExcluding/);
   const directUses = domain.match(/slotView\.reopened[\s\S]{0,220}countDirectActiveReservationsOnSlotExcluding/g) ?? [];
-  assert.ok(directUses.length >= 3, `재개방 슬롯 직접예약 카운트 사용처가 부족합니다: ${directUses.length}`);
+  assert.ok(directUses.length >= 2, `재개방 슬롯 직접예약 카운트 사용처가 부족합니다: ${directUses.length}`);
 });
 
 test('사이청소 선택 시 좌측 캘린더도 오전/오후 대신 날짜 단위 선택만 사용한다', () => {

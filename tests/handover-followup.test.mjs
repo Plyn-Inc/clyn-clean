@@ -46,16 +46,12 @@ test('공개 캘린더 조회는 만료 예약 정리 같은 쓰기 작업을 �
   assert.doesNotMatch(api, /입금기한이 지난 예약을 먼저 만료 처리/);
 });
 
-test('공개 예약 submit은 서버 견적을 한 번 계산하고 createReservation에 snapshot으로 전달한다', () => {
+test('공개 예약 submit은 서버 가격 재계산 없이 화면의 확정 견적 snapshot을 저장한다', () => {
   const api = read('src/app/api/reservations/route.ts');
-  const reservations = read('src/lib/reservations.ts');
-  const createBlock = between(reservations, 'export async function createReservation(', 'export async function revealDepositAccount(');
-
-  assert.equal((api.match(/calculateQuote\(/g) ?? []).length, 1);
-  assert.match(api, /preparedQuote:\s*serverQuote/);
-  assert.match(api, /instantDiscountEligible:\s*eligible/);
-  assert.ok((createBlock.match(/calculateQuote\(/g) ?? []).length <= 1, 'createReservation should calculate at most once');
-  assert.doesNotMatch(createBlock, /const q2 = await calculateQuote/);
+  assert.doesNotMatch(api, /calculateQuote\(/);
+  assert.match(api, /clientQuote/);
+  assert.match(api, /createReservationAndDeposit/);
+  assert.doesNotMatch(api, /instantDiscountEligible/);
 });
 
 test('견적 계산은 관련 settings를 개별 SELECT하지 않고 한 번에 조회한다', () => {
@@ -91,14 +87,14 @@ test('고객 가격표는 서버 데이터 캐시를 재사용하고 관리자 �
   assert.match(admin, /revalidateTag\(PUBLIC_PRICING_CACHE_TAG/);
 });
 
-test('예약 API는 검증 가격변경 DB timeout을 구분 가능한 오류 코드로 반환한다', () => {
+test('예약 API는 입력오류와 DB 저장 timeout 연결오류를 구분한다', () => {
   const api = read('src/app/api/reservations/route.ts');
   const errors = read('src/lib/error-messages.ts');
   assert.match(api, /code: "VALIDATION_ERROR"/);
-  assert.match(api, /code: "PRICE_CHANGED"/);
+  assert.doesNotMatch(api, /code: "PRICE_CHANGED"/);
   assert.match(api, /DatabaseTimeoutError/);
   assert.match(api, /code: "DB_TIMEOUT"/);
-  assert.match(errors, /PRICE_CHANGED:/);
+  assert.match(api, /code: "DB_UNAVAILABLE"/);
   assert.match(errors, /VALIDATION_ERROR:/);
   assert.match(errors, /DB_TIMEOUT:/);
 });

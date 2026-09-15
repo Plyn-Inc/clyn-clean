@@ -110,6 +110,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [address, setAddress] = useState("");
+  const [addressEditing, setAddressEditing] = useState(false);
 
   // 4단계 — 확인/동의
   const [privacyAgreed, setPrivacyAgreed] = useState(false);
@@ -386,11 +387,20 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   }
 
   async function submitReservation() {
+    const clientQuote = displayQuote;
+    if (!clientQuote || clientQuote.priceConfirmed !== true) {
+      setError("견적금액을 확인할 수 없습니다. 표시된 견적을 확인해주세요.");
+      return;
+    }
+
     setSubmitting(true);
     setError(null);
 
     const reservationTimeSlot: BookingTimeSlot = serviceType === "사이청소" ? "all_day" : timeSlot;
-    const outcome = await callApi<{ reservation: { reservation_code: string } }>("/api/reservations", {
+    const outcome = await callApi<{
+      reservation: { reservation_code: string };
+      depositInfo: DepositAccountInfo;
+    }>("/api/reservations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -421,24 +431,16 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         corePrinciplesAgreed: agreement.corePrinciplesAgreed,
         serviceTermsAgreed: agreement.serviceTermsAgreed,
         additionalChargeAgreed: agreement.additionalChargeAgreed,
-        clientEstimatedTotal: quote?.priceConfirmed ? quote.estimatedTotal : undefined,
+        clientQuote: {
+          basePrice: clientQuote.basePrice,
+          estimatedTotal: clientQuote.estimatedTotal,
+          depositAmount: clientQuote.depositAmount,
+          estimatedBalance: clientQuote.estimatedBalance,
+          priceConfirmed: clientQuote.priceConfirmed,
+          optionBreakdown: clientQuote.optionBreakdown,
+        },
       }),
     });
-
-    if (
-      outcome.kind === "serverError" &&
-      outcome.status === 409 &&
-      outcome.body?.code === "CONSULT_REQUIRED"
-    ) {
-      const b = outcome.body as { requestCode?: string; notice?: string; error?: string };
-      setResult({
-        kind: "consultation",
-        code: b.requestCode ?? "-",
-        notice: b.notice ?? b.error ?? "",
-      });
-      setSubmitting(false);
-      return;
-    }
 
     if (outcome.kind !== "success") {
       setError(outcome.message);
@@ -446,18 +448,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
       return;
     }
 
-    const code = outcome.data.reservation.reservation_code;
-    const acc = await callApi<DepositAccountInfo>(`/api/reservations/${code}/deposit-account`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ phone: customerPhone }),
-    });
-    if (acc.kind !== "success") {
-      setError(acc.message);
-      setSubmitting(false);
-      return;
-    }
-    setResult({ kind: "deposit", info: acc.data });
+    setResult({ kind: "deposit", info: outcome.data.depositInfo });
     setSubmitting(false);
   }
 
@@ -796,14 +787,45 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               label="작업 장소"
               value={`${[region.sidoName, region.sigunguName, region.dongName].filter(Boolean).join(" ")} ${address.trim()}`.trim()}
             />
-            <div className="flex justify-end pt-2">
-              <button
-                type="button"
-                onClick={() => { setError(null); setStep(1); }}
-                className="min-h-[40px] rounded-full border border-[var(--line)] px-4 text-xs font-semibold text-[var(--navy)]"
-              >
-                주소 수정
-              </button>
+            <div className="pt-2">
+              {addressEditing ? (
+                <div className="rounded-xl bg-[var(--sand-deep)] p-3">
+                  <label className="mb-1.5 block text-xs font-semibold text-[var(--ink-soft)]">상세 주소</label>
+                  <div className="flex gap-2">
+                    <input
+                      autoFocus
+                      value={address}
+                      onChange={(e) => setAddress(e.target.value)}
+                      placeholder="도로명 또는 지번 상세주소"
+                      className="min-h-[42px] flex-1 rounded-lg border border-[var(--line)] bg-white px-3 text-sm focus:border-[var(--mint)] focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!address.trim()) {
+                          setError("상세 주소를 입력해주세요.");
+                          return;
+                        }
+                        setError(null);
+                        setAddressEditing(false);
+                      }}
+                      className="min-h-[42px] rounded-lg bg-[var(--navy)] px-4 text-xs font-semibold text-white"
+                    >
+                      수정 완료
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => { setError(null); setAddressEditing(true); }}
+                    className="min-h-[40px] rounded-full border border-[var(--line)] px-4 text-xs font-semibold text-[var(--navy)]"
+                  >
+                    주소 수정
+                  </button>
+                </div>
+              )}
             </div>
             {serviceType !== "사이청소" && serviceType !== "집정리" && (
               <SummaryRow label="입주 상태" value={OCCUPANCY_STATUS_LABEL[occupancyStatus]} />

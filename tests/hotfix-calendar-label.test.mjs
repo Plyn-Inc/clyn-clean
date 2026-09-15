@@ -16,11 +16,12 @@ test('고객 예약 캘린더는 화면에 표시한 월과 같은 월을 API에
   assert.doesNotMatch(src, /getMonthRangeKST\(cursor\.year,\s*cursor\.month\s*\+\s*1\)/);
 });
 
-test('특수일 캐시가 비어 있어도 예약 가능 슬롯 자체는 닫지 않는다', () => {
+test('공개 캘린더는 정적 특수일 표시는 하되 예약 가능 여부를 특수일 동기화에 의존하지 않는다', () => {
   const src = read('src/app/api/calendar/route.ts');
-  assert.doesNotMatch(src, /selectable:\s*!!special\s*&&/);
-  assert.match(src, /selectable:\s*day\.morning\.effectiveStatus\s*===\s*"available"\s*&&\s*day\.morning\.remaining\s*>\s*0/);
-  assert.match(src, /selectable:\s*day\.afternoon\.effectiveStatus\s*===\s*"available"\s*&&\s*day\.afternoon\.remaining\s*>\s*0/);
+  assert.match(src, /getStaticSpecialDayMeta/);
+  assert.match(src, /isStaticSpecialDaySupported/);
+  assert.doesNotMatch(src, /getSpecialDayRange/);
+  assert.match(src, /selectable:\s*adminStatus === "available" && remaining > 0/);
 });
 
 test('예약 생성도 특수일 캐시 미동기화만으로 거부하지 않는다', () => {

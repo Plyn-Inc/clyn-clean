@@ -208,6 +208,50 @@ export async function aggregateConfirmedReservationsInRange(
   return map;
 }
 
+
+export interface PublicReservationRangeState {
+  activeCount: number;
+  confirmedCount: number;
+}
+
+/**
+ * 공개 캘린더 전용 단일 예약 집계.
+ * 진행중/완료 판정에 필요한 숫자를 같은 GROUP BY 쿼리에서 함께 계산한다.
+ */
+export async function aggregatePublicReservationStatesInRange(
+  startDate: string,
+  endDate: string
+): Promise<Map<string, PublicReservationRangeState>> {
+  const rows = await queryRows<{
+    desired_date: string;
+    time_slot: string;
+    active_count: number | string;
+    confirmed_count: number | string;
+  }>(
+    `SELECT
+       rs.desired_date,
+       rs.time_slot,
+       COUNT(*) AS active_count,
+       SUM(CASE WHEN rs.reservation_status IN ('confirmed','completed') THEN 1 ELSE 0 END) AS confirmed_count
+     FROM reservations rs
+     WHERE rs.desired_date >= ? AND rs.desired_date <= ?
+       AND rs.reservation_status IN (
+         'received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed','completed'
+       )
+     GROUP BY rs.desired_date, rs.time_slot`,
+    [startDate, endDate]
+  );
+
+  const map = new Map<string, PublicReservationRangeState>();
+  for (const row of rows) {
+    map.set(`${row.desired_date}|${row.time_slot}`, {
+      activeCount: Number(row.active_count ?? 0),
+      confirmedCount: Number(row.confirmed_count ?? 0),
+    });
+  }
+  return map;
+}
+
 // ---------------------------------------------------------------------------
 // 사이청소 all_day 보호 / 슬롯 재개방 override
 // ---------------------------------------------------------------------------

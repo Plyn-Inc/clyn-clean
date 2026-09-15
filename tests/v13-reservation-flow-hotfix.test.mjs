@@ -26,11 +26,12 @@ test('추가옵션이 없으면 견적 API는 option_prices를 조회하지 않�
   assert.match(optionBlock, /getOptionPrices\(\)/);
 });
 
-test('최종 예약 API도 할인 판정을 위해 캘린더 DB를 중복 조회하지 않는다', () => {
+test('최종 예약 API는 할인·가격·캘린더를 다시 계산하지 않고 clientQuote를 저장한다', () => {
   const route = read('src/app/api/reservations/route.ts');
   assert.doesNotMatch(route, /computeInstantDiscountEligible/);
-  assert.match(route, /isInstantDiscountCandidate/);
-  assert.doesNotMatch(route, /countAreas/);
+  assert.doesNotMatch(route, /isInstantDiscountCandidate/);
+  assert.doesNotMatch(route, /calculateQuote\(/);
+  assert.match(route, /clientQuote/);
 });
 
 test('DB 연결 계열 실패는 generic 500이 아니라 식별 가능한 503으로 반환한다', () => {
@@ -60,13 +61,14 @@ test('계좌 공개는 예약 생성 당시 가격 snapshot을 신뢰하고 가�
   assert.match(reveal, /price_confirmed_snapshot/);
 });
 
-test('고객은 확인 단계에서 전체 주소를 보고 바로 주소 수정으로 1단계에 이동할 수 있다', () => {
+test('고객은 확인 단계에서 전체 주소를 보고 그 자리에서 인라인 수정할 수 있다', () => {
   const form = read('src/components/booking/BookingForm.tsx');
   const step4 = between(form, '{step === 4 && (', '{error &&');
   assert.match(step4, /label="작업 장소"/);
   assert.match(step4, /address\.trim\(\)/);
   assert.match(step4, /주소 수정/);
-  assert.match(step4, /setStep\(1\)/);
+  assert.match(step4, /addressEditing/);
+  assert.doesNotMatch(step4, /setStep\(1\)/);
 });
 
 test('견적 API는 DB 연결/timeout을 generic 500 대신 503 코드로 반환한다', () => {
@@ -85,15 +87,10 @@ test('계좌 공개 API도 DB 연결/timeout을 식별 가능한 503으로 반�
   assert.match(route, /code: "DB_UNAVAILABLE"/);
 });
 
-test('서비스지역 master 준비상태와 ON 여부는 예약 제출에서 DB 한 번으로 확인한다', () => {
+test('서비스지역 master와 ON 여부는 지역 선택 단계에서 처리하고 예약 제출에서는 재조회하지 않는다', () => {
   const route = read('src/app/api/reservations/route.ts');
-  const repo = read('src/database/repositories/region-repository.ts');
-  assert.match(route, /getReservationAreaStatus/);
+  const regionApi = read('src/app/api/regions/route.ts');
+  assert.doesNotMatch(route, /getReservationAreaStatus/);
   assert.doesNotMatch(route, /countAreas/);
-  assert.match(route, /masterReady[^]*REGION_MASTER_NOT_READY/);
-  assert.match(repo, /export async function getReservationAreaStatus/);
-  const block = between(repo, 'export async function getReservationAreaStatus', '/** 활성 서비스 지역 코드 집합 */');
-  assert.equal((block.match(/queryRow</g) ?? []).length, 1);
-  assert.match(block, /administrative_areas/);
-  assert.match(block, /service_areas/);
+  assert.match(regionApi, /listCachedAvailable/);
 });

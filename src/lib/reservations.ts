@@ -387,6 +387,178 @@ export async function createReservation(
   return { reservation, payment: null };
 }
 
+
+export interface SubmittedQuoteSnapshot {
+  basePrice: number;
+  estimatedTotal: number;
+  depositAmount: number;
+  estimatedBalance?: number;
+  priceConfirmed: boolean;
+  optionBreakdown?: { key: string; label: string; price: number; isConsult: boolean }[];
+}
+
+export class ReservationPersistenceError extends Error {
+  stage: "reservation_insert" | "payment_insert" | "history_insert" | "transaction";
+  constructor(
+    stage: ReservationPersistenceError["stage"],
+    cause?: unknown
+  ) {
+    super(`예약 저장 단계 실패: ${stage}`);
+    this.name = "ReservationPersistenceError";
+    this.stage = stage;
+    if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause;
+  }
+}
+
+export interface CreateReservationAndDepositResult {
+  reservationId: number;
+  reservationCode: string;
+  paymentId: number;
+  depositDeadline: string;
+  totalAmount: number;
+  depositAmount: number;
+  balanceAmount: number;
+}
+
+/**
+ * 신규 고객 예약 단순 접수.
+ *
+ * 고객은 앞 단계에서 이미 날짜/서비스/지역/견적을 확인했다. 제출 시점에는
+ * 캘린더, 가격표, 특수일, 서비스지역을 다시 조회하지 않는다. 화면에 표시된
+ * 견적 snapshot을 그대로 저장하고 pending payment와 관리자 이력을 한 트랜잭션에 만든다.
+ */
+export async function createReservationAndDeposit(
+  input: CreateReservationInput,
+  quote: SubmittedQuoteSnapshot,
+  paymentDueHours: number
+): Promise<CreateReservationAndDepositResult> {
+  const allAgreed = isAllAgreed({
+    corePrinciplesAgreed: input.corePrinciplesAgreed === true,
+    serviceTermsAgreed: input.serviceTermsAgreed === true,
+    additionalChargeAgreed: input.additionalChargeAgreed === true,
+  });
+  if (input.privacyAgreed !== true || !allAgreed) {
+    throw new Error("필수 동의를 확인해주세요.");
+  }
+
+  const totalAmount = Math.round(quote.estimatedTotal);
+  const depositAmount = Math.round(quote.depositAmount);
+  if (
+    quote.priceConfirmed !== true ||
+    !Number.isFinite(totalAmount) || totalAmount <= 0 ||
+    !Number.isFinite(depositAmount) || depositAmount < 0 ||
+    depositAmount > totalAmount
+  ) {
+    throw new Error("견적금액을 확인해주세요.");
+  }
+  const balanceAmount = totalAmount - depositAmount;
+  const code = generateReservationCode();
+  const dueHours = Number.isFinite(paymentDueHours) && paymentDueHours > 0 ? paymentDueHours : DEPOSIT_DEADLINE_HOURS;
+  const dueDate = addHoursISO(dueHours);
+  const keyNum = input.houseTypeKey ? parseInt(input.houseTypeKey, 10) : NaN;
+  const resolvedAreaPyeong = input.actualPyeong != null
+    ? input.actualPyeong
+    : input.areaPyeong != null
+      ? input.areaPyeong
+      : !Number.isNaN(keyNum) && keyNum > 0
+        ? keyNum
+        : null;
+
+  let reservationId = 0;
+  let paymentId = 0;
+  let stage: ReservationPersistenceError["stage"] = "transaction";
+
+  try {
+    await withTransaction(async () => {
+      stage = "reservation_insert";
+      reservationId = await reservationRepo.insertReservation({
+        code,
+        customerName: input.customerName,
+        customerPhone: input.customerPhone,
+        customerEmail: input.customerEmail ?? null,
+        serviceType: input.serviceType,
+        region: input.region,
+        address: input.address,
+        areaPyeong: resolvedAreaPyeong,
+        houseTypeKey: input.houseTypeKey ?? null,
+        priceMultiplier: 1,
+        houseStructure: input.houseStructure ?? null,
+        occupancyStatus: input.occupancyStatus ?? null,
+        desiredDate: input.desiredDate || null,
+        timeSlot: input.timeSlot,
+        entryRoute: input.entryRoute,
+        extraOptions: JSON.stringify(input.extraOptions ?? []),
+        extraNotes: input.extraNotes ?? null,
+        hasSitePhotos: input.hasSitePhotos ? 1 : 0,
+        basePriceSnapshot: Math.round(quote.basePrice),
+        extraPriceSnapshot: 0,
+        optionBreakdownSnapshot: JSON.stringify(quote.optionBreakdown ?? []),
+        depositAmountSnapshot: depositAmount,
+        instantDiscountSnapshot: null,
+        estimatedTotalSnapshot: totalAmount,
+        estimatedBalanceSnapshot: balanceAmount,
+        priceConfirmedSnapshot: 1,
+        instantDiscountEligible: 0,
+        privacyAgreed: 1,
+        areaSido: input.areaSido?.trim() || null,
+        areaSigungu: input.areaSigungu?.trim() || null,
+        areaDong: input.areaDong?.trim() || null,
+        corePrinciplesAgreed: 1,
+        serviceTermsAgreed: 1,
+        additionalChargeAgreed: 1,
+        agreementVersion: AGREEMENT_VERSION,
+        hasPet: input.hasPet ? 1 : 0,
+        dateAdjustmentApplied: 0,
+        dateAdjustmentAmount: 0,
+        productKey: input.serviceType === "집정리"
+          ? input.jipjeongriPackage ?? null
+          : input.houseTypeKey ?? null,
+        holidaySurchargeSnapshot: 0,
+        totalAmountSnapshot: totalAmount,
+        moveOutTime: input.moveOutTime ?? null,
+        moveInTime: input.moveInTime ?? null,
+        areaSidoCode: input.areaSidoCode ?? null,
+        areaSigunguCode: input.areaSigunguCode ?? null,
+        areaDongCode: input.areaDongCode ?? null,
+        finalConfirmedTotal: totalAmount,
+        accountRevealed: true,
+        reservationStatus: "awaiting_deposit",
+      });
+
+      stage = "payment_insert";
+      paymentId = await reservationRepo.insertPayment({
+        reservationId,
+        amount: depositAmount,
+        depositorName: input.depositorName || input.customerName,
+        dueDate,
+      });
+
+      stage = "history_insert";
+      await reservationRepo.insertLog(
+        reservationId,
+        null,
+        "시스템",
+        "reservation_received",
+        `고객 예약 접수 / 계좌 안내 — 총 ${totalAmount.toLocaleString("ko-KR")}원 / 예약금 ${depositAmount.toLocaleString("ko-KR")}원`,
+        undefined,
+        "awaiting_deposit"
+      );
+    });
+  } catch (error) {
+    throw new ReservationPersistenceError(stage, error);
+  }
+
+  return {
+    reservationId,
+    reservationCode: code,
+    paymentId,
+    depositDeadline: dueDate,
+    totalAmount,
+    depositAmount,
+    balanceAmount,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // 조회
 // ---------------------------------------------------------------------------
@@ -763,7 +935,7 @@ export async function confirmPayment(
   if (!reservation) throw new Error("예약을 찾을 수 없습니다.");
   const payment = await reservationRepo.findPaymentByReservationId(reservationId);
   if (!payment) throw new Error("결제 정보를 찾을 수 없습니다.");
-  // 신규 흐름(approved_awaiting_deposit)과 기존 데이터(awaiting_deposit) 모두 허용
+
   const payableStatuses: ReservationStatus[] = ["approved_awaiting_deposit", "awaiting_deposit"];
   if (!payableStatuses.includes(reservation.reservation_status)) {
     throw new Error(`현재 예약 상태(${reservation.reservation_status})에서는 예약금 입금 확인을 처리할 수 없습니다.`);
@@ -773,15 +945,8 @@ export async function confirmPayment(
   }
 
   const prevStatus = reservation.reservation_status;
+  const nextStatus: ReservationStatus = "awaiting_admin_check";
 
-  // 관리자가 실제 입금을 수기로 확인한 시점 = 예약완료 (요구사항 27)
-  // 기존 데이터(awaiting_deposit)는 종전대로 awaiting_admin_check을 거친다.
-  const nextStatus: ReservationStatus =
-    prevStatus === "approved_awaiting_deposit" ? "confirmed" : "awaiting_admin_check";
-
-  // 동시성 방어 — 입금대기 상태일 때만 전이한다.
-  // 만료 배치(cancelOverdueReservation)와 동시에 실행돼도 이 UPDATE가 row 배타 잠금을
-  // 잡으므로 한쪽만 성공한다. PostgreSQL에서도 동일하게 보장된다.
   const changed = await reservationRepo.compareAndSetReservationStatus(
     reservationId,
     ["approved_awaiting_deposit", "awaiting_deposit"],
@@ -792,15 +957,14 @@ export async function confirmPayment(
       "예약 상태가 변경되어 입금 확인을 처리할 수 없습니다. 예약 상태를 다시 확인해주세요."
     );
   }
+
   await reservationRepo.compareAndSetPaymentConfirmed(reservationId, adminId);
   await reservationRepo.insertLog(
     reservationId,
     adminId,
     adminName,
     "payment_confirmed",
-    (nextStatus === "confirmed"
-      ? "예약금 입금 확인 완료 / 예약완료"
-      : "선입금 확인 완료 / 관리자 예약확정 대기") + (memo ? ` (${memo})` : ""),
+    "선입금 확인 완료 / 관리자 최종 예약확정 대기" + (memo ? ` (${memo})` : ""),
     prevStatus,
     nextStatus
   );
@@ -837,43 +1001,6 @@ export async function confirmReservation(
       `현재 예약 상태(${reservation.reservation_status})에서는 예약을 확정할 수 없습니다.` +
       " 선입금 확인 완료 후 예약확정이 가능합니다."
     );
-  }
-  if (reservation.price_confirmed_snapshot === 0 && reservation.final_confirmed_total == null) {
-    throw new Error("미확정 견적 예약은 최종 확정금액을 입력한 후 예약을 확정할 수 있습니다.");
-  }
-
-  // 슬롯 검증 — 날짜/슬롯이 변경됐거나 capacity가 조정된 경우 재확인
-  // 자기 예약은 카운트에서 제외 (본인이 이미 점유 중인 슬롯이므로 빼야 함)
-  if (reservation.desired_date && reservation.time_slot &&
-      reservation.time_slot !== "all_day") {
-    const slot = reservation.time_slot as "morning" | "afternoon";
-    const view = await getDaySlotView(reservation.desired_date);
-    const slotView = slot === "morning" ? view.morning : view.afternoon;
-    const othersCount = slotView.reopened
-      ? await reservationRepo.countDirectActiveReservationsOnSlotExcluding(
-          reservation.desired_date, slot, reservationId
-        )
-      : await reservationRepo.countActiveReservationsOnSlotExcluding(
-          reservation.desired_date, slot, reservationId
-        );
-
-    // 달력의 관리자 원본 상태가 예약 불가 또는 상담 필요면 차단한다.
-    const calStatus = slotView.status;
-    if (calStatus === "closed") {
-      throw new Error(
-        `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"} 시간대는 예약 불가 상태입니다. 날짜/시간대를 변경해주세요.`
-      );
-    }
-    if (calStatus === "consult_required") {
-      throw new Error(
-        `${reservation.desired_date} ${slot === "morning" ? "오전" : "오후"} 시간대는 상담 후 예약이 필요합니다.`
-      );
-    }
-
-    // 다른 예약이 슬롯을 모두 점유한 경우 차단
-    if (othersCount >= slotView.capacity) {
-      throw new SlotConflictError(reservation.desired_date, slot);
-    }
   }
 
   await reservationRepo.setReservationStatusRaw(reservationId, "confirmed");

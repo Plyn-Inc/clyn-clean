@@ -59,6 +59,12 @@ export interface CreateReservationRow {
   /** 날짜 조건 가격 보정 내부 감사용 */
   dateAdjustmentApplied: number;
   dateAdjustmentAmount: number;
+  /** 신규 단순 접수 흐름에서 insert 시점에 바로 확정할 snapshot */
+  finalConfirmedTotal?: number | null;
+  /** 계좌를 동일 응답으로 안내하므로 insert 시각을 공개시각으로 기록 */
+  accountRevealed?: boolean;
+  /** 기본 received, 신규 고객 접수는 awaiting_deposit */
+  reservationStatus?: ReservationStatus;
 }
 
 export function insertReservation(row: CreateReservationRow): Promise<number> {
@@ -80,7 +86,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       product_key, holiday_surcharge_snapshot, total_amount_snapshot,
       move_out_time, move_in_time,
       area_sido_code, area_sigungu_code, area_dong_code,
-      reservation_status
+      final_confirmed_total, account_revealed_at, reservation_status
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
       ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END,
@@ -91,7 +97,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       ?, ?, ?,
       ?, ?,
       ?, ?, ?,
-      'received'
+      ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?
     )`,
     [
       row.code, row.customerName, row.customerPhone, row.customerEmail,
@@ -109,6 +115,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       row.productKey, row.holidaySurchargeSnapshot, row.totalAmountSnapshot,
       row.moveOutTime, row.moveInTime,
       row.areaSidoCode, row.areaSigunguCode, row.areaDongCode,
+      row.finalConfirmedTotal ?? null, row.accountRevealed ? 1 : 0, row.reservationStatus ?? "received",
     ]
   );
 }
