@@ -85,7 +85,7 @@ export default function ReservationCalendar({
 
   useEffect(() => {
     let cancelled = false;
-    const { start, end } = getMonthRangeKST(cursor.year, cursor.month + 1);
+    const { start, end } = getMonthRangeKST(cursor.year, cursor.month);
     fetch(`/api/calendar?start=${start}&end=${end}`)
       .then(async (r) => {
         // HTTP 오류를 정상 응답처럼 처리하지 않는다

@@ -329,7 +329,7 @@ export interface Post {
  */
 export const SERVICE_TYPE_LABEL: Record<string, string> = {
   "입주청소": "입주청소",
-  "사이청소": "당일 이사 사이청소",
+  "사이청소": "사이청소",
   "거주청소": "거주청소",
   "집정리": "집정리",
 };

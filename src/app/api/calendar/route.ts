@@ -4,6 +4,7 @@ import { releaseExpiredDepositReservations } from "@/lib/reservations";
 import { aggregateConfirmedReservationsInRange } from "@/database/repositories/calendar-repository";
 import { toPublicSlotStatus } from "@/lib/types";
 import { getSpecialDayRange } from "@/lib/special-days-store";
+import { getSpecialDayMeta as getStaticSpecialDayMeta, isYearSupported as isStaticSpecialDaySupported } from "@/lib/special-days";
 import { bookingMinDate, bookingMaxDate } from "@/lib/booking-window";
 
 /**
@@ -56,7 +57,11 @@ export async function GET(req: NextRequest) {
       // 특수일 메타 — 시각적 구분용. 가격 가산 사유는 포함하지 않는다.
       // 토/일은 서버가 날짜로 직접 계산하므로 캐시가 없어도 정확하다.
       const wd = new Date(`${day.date}T00:00:00Z`).getUTCDay();
-      const special = specialMap.get(day.date);
+      const cachedSpecial = specialMap.get(day.date);
+      const fallbackSpecial = !cachedSpecial && isStaticSpecialDaySupported(day.date)
+        ? getStaticSpecialDayMeta(day.date)
+        : null;
+      const special = cachedSpecial ?? fallbackSpecial;
       return {
         date: day.date,
         isWeekend: wd === 0 || wd === 6,
@@ -65,8 +70,8 @@ export async function GET(req: NextRequest) {
         isHoliday: special?.isHoliday ?? false,
         isSonEomneunDay: special?.isSonEomneunDay ?? false,
         badge: special?.customerBadge ?? null,
-        // 캐시가 없는 날짜는 예약 선택을 허용하지 않는다 (일반일로 간주 금지)
-        specialDaySynced: !!special,
+        // 캐시 동기화 여부는 운영 진단용으로 남기되, 캐시 지연만으로 예약 슬롯을 닫지 않는다.
+        specialDaySynced: !!cachedSpecial,
         // 사이청소 예약이 점유한 날짜는 오전·오후가 함께 막힌다
         allDayBlocked: day.morning.blockedByAllDay === true,
         morning: {
@@ -75,7 +80,7 @@ export async function GET(req: NextRequest) {
             remaining: day.morning.remaining,
             hasConfirmed: morningConfirmed,
           }),
-          selectable: !!special && day.morning.effectiveStatus === "available" && day.morning.remaining > 0,
+          selectable: day.morning.effectiveStatus === "available" && day.morning.remaining > 0,
           consultRequired: day.morning.effectiveStatus === "consult_required",
         },
         afternoon: {
@@ -84,7 +89,7 @@ export async function GET(req: NextRequest) {
             remaining: day.afternoon.remaining,
             hasConfirmed: afternoonConfirmed,
           }),
-          selectable: !!special && day.afternoon.effectiveStatus === "available" && day.afternoon.remaining > 0,
+          selectable: day.afternoon.effectiveStatus === "available" && day.afternoon.remaining > 0,
           consultRequired: day.afternoon.effectiveStatus === "consult_required",
         },
       };

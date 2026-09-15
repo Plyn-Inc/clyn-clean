@@ -10,7 +10,7 @@ import {
 import { getBankSettings, checkReservationReadiness } from "@/lib/settings";
 import { calculateQuote, getOptionPrices } from "@/lib/pricing";
 import { createConsultation } from "@/lib/consultations";
-import { SpecialDayNotSyncedError, isDateSynced } from "@/lib/special-days-store";
+import { SpecialDayNotSyncedError } from "@/lib/special-days-store";
 import { CONSULTATION_COMPLETE_NOTICE } from "@/lib/types";
 import { todayKST, isValidDateFormat, isPastDateKST } from "@/lib/utils";
 import { isWithinBookingWindow, outOfWindowMessage, bookingMaxDate, BOOKING_WINDOW_DAYS } from "@/lib/booking-window";
@@ -125,15 +125,6 @@ export async function POST(req: NextRequest) {
   if (!isWithinBookingWindow(dateStr)) {
     return NextResponse.json({ error: outOfWindowMessage(), code: "OUT_OF_BOOKING_WINDOW" }, { status: 400 });
   }
-  // 공휴일/손없는날 캐시가 없는 날짜는 가격을 확정할 수 없으므로 거부한다.
-  // (데이터 없음을 "일반일"로 간주하지 않는다)
-  if (!(await isDateSynced(dateStr))) {
-    return NextResponse.json(
-      { error: new SpecialDayNotSyncedError(dateStr).message, code: "SPECIAL_DAY_NOT_SYNCED" },
-      { status: 400 }
-    );
-  }
-
   const parsed = reservationSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ error: parsed.error.issues[0]?.message || "입력값을 확인해주세요." }, { status: 400 });

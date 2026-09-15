@@ -1,14 +1,10 @@
 /**
- * 특수일(공휴일·손없는날) — Production source of truth.
+ * 특수일(공휴일·손없는날) 판정.
  *
- * 판정 원칙:
- *   - 공휴일 / 손없는날 : Supabase `special_days` 캐시에서만 읽는다.
- *   - 토 / 일           : 서버가 날짜로 직접 계산한다 (DB 불필요).
- *   - 데이터가 없는 날짜 : "일반일"로 간주하지 않고 SpecialDayNotSyncedError를 던진다.
- *   - KASI OpenAPI는 배치 동기화에서만 호출한다 (고객 요청 경로에서 호출 금지).
- *
- * 코드 내 정적 목록(special-days.ts)은 Production 판정에 사용하지 않으며
- * 개발/테스트/backfill 보조 용도로만 남아 있다.
+ * 운영에서는 Supabase `special_days`의 KASI 동기화 값을 우선 사용한다.
+ * 단, 신규 배포 직후처럼 캐시가 아직 비어 있는 동안 예약 전체가 닫히지 않도록
+ * 지원 연도(2026~2028)는 내장 KASI 검증표를 읽기 전용 fallback으로 사용한다.
+ * KASI OpenAPI 자체는 배치 동기화에서만 호출하며 고객 요청 경로에서는 호출하지 않는다.
  */
 import * as repo from "@/database/repositories/special-day-repository";
 import { withTransaction, getDatabaseBackend } from "@/database/connection";
@@ -145,10 +141,10 @@ export interface DateSurchargeResult {
 /**
  * 휴일 가산금을 판정한다. 공휴일 캐시 조회가 실패해도 예외를 던지지 않는다.
  *
- * 실패 시:
- *   - 일요일은 서버 날짜 계산으로 판정 가능하므로 가산한다
- *   - 공휴일 여부는 알 수 없으므로 가산하지 않고 기본가격으로 진행한다
- *   - specialDayAvailable=false로 관리자 알림 대상임을 표시한다
+ * 캐시 실패 시:
+ *   - 지원 연도는 내장 KASI 검증표로 공휴일을 보완한다
+ *   - 일요일은 날짜 자체로 판정한다
+ *   - specialDayAvailable=false로 캐시 미동기화 상태를 남긴다
  */
 export async function resolveDateSurcharge(
   dateStr: string | null | undefined
@@ -163,6 +159,13 @@ export async function resolveDateSurcharge(
     };
   } catch {
     const wd = weekdayOf(dateStr);
+    if (staticYearSupported(dateStr)) {
+      const fallback = staticMeta(dateStr);
+      return {
+        amount: wd === 0 || fallback.isHoliday ? surcharge : 0,
+        specialDayAvailable: false,
+      };
+    }
     return { amount: wd === 0 ? surcharge : 0, specialDayAvailable: false };
   }
 }

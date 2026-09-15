@@ -2791,19 +2791,10 @@ test('캘린더 API는 예약 가능 범위를 벗어난 start/end를 제한한�
   assert.ok(dates[dates.length - 1] <= bw.bookingMaxDate(), '예약 최대일 이후는 반환하지 않는다');
 });
 
-test('캐시가 없는 날짜는 캘린더에서 선택할 수 없다', async () => {
-  const calendarRoute = await import('../src/app/api/calendar/route.ts');
-  const bw = await import('../src/lib/booking-window.ts');
-  const start = bw.bookingMinDate();
-  const res = await calendarRoute.GET({
-    url: `http://localhost/api/calendar?start=${start}&end=${start}`,
-  });
-  const body = await res.json();
-  const day = body.days[0];
-  assert.equal(day.specialDaySynced, true, '동기화된 날짜여야 한다');
-  // specialDaySynced가 false면 selectable도 false여야 한다
+test('특수일 캐시가 없어도 예약 가능 슬롯 자체는 닫지 않는다', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
-  assert.match(src, /selectable: !!special &&/);
+  assert.doesNotMatch(src, /selectable:\s*!!special\s*&&/);
+  assert.match(src, /selectable:\s*day\.morning\.effectiveStatus\s*===\s*"available"/);
 });
 
 test('상담접수도 예약 가능 기간을 서버에서 검증한다', async () => {
@@ -3373,9 +3364,9 @@ test('BookingForm이 CONSULT_REQUIRED 흐름을 유지한다', async () => {
 
 // --- 사이청소 label ---
 
-test('고객 UI에 "당일 이사 사이청소" label이 적용된다', async () => {
+test('고객 UI에 "사이청소" label이 적용된다', async () => {
   const types = await import('../src/lib/types.ts');
-  assert.equal(types.serviceLabel('사이청소'), '당일 이사 사이청소');
+  assert.equal(types.serviceLabel('사이청소'), '사이청소');
   assert.equal(types.serviceLabel('입주청소'), '입주청소');
   assert.match(types.SERVICE_TYPE_SHORT_DESC['사이청소'], /퇴거와 새 입주 사이/);
 
@@ -4321,4 +4312,15 @@ test('행정구역 importer가 유효하지 않은 level을 거부한다', async
     { code: '11', name: '서울', level: 'province', parent_code: null },
   ]);
   assert.ok(errors.some((e) => /level이 올바르지 않습니다/.test(e)));
+});
+
+test('[hotfix] 고객 예약 캘린더는 표시 월과 동일한 월을 조회한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/ReservationCalendar.tsx'), 'utf8');
+  assert.match(src, /getMonthRangeKST\(cursor\.year,\s*cursor\.month\)/);
+  assert.doesNotMatch(src, /getMonthRangeKST\(cursor\.year,\s*cursor\.month\s*\+\s*1\)/);
+});
+
+test('[hotfix] 특수일 캐시 미동기화만으로 예약 생성이 차단되지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/reservations/route.ts'), 'utf8');
+  assert.doesNotMatch(src, /if\s*\(\s*!\(await isDateSynced\(dateStr\)\)\s*\)/);
 });
