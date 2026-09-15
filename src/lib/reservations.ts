@@ -1208,16 +1208,7 @@ export async function changeReservationSlot(
 // ---------------------------------------------------------------------------
 
 export async function getDashboardStats() {
-  const [total, received, awaitingDeposit, confirmed, consultRequired, cancelled, completed] = await Promise.all([
-    reservationRepo.countAll(),
-    reservationRepo.countByStatus("received"),
-    reservationRepo.countByStatus("awaiting_deposit"),
-    reservationRepo.countByStatus("confirmed"),
-    reservationRepo.countByStatus("consult_required"),
-    reservationRepo.countByStatus("cancelled"),
-    reservationRepo.countByStatus("completed"),
-  ]);
-  return { total, received, awaitingDeposit, confirmed, consultRequired, cancelled, completed };
+  return reservationRepo.getDashboardStatsAggregate();
 }
 
 // ---------------------------------------------------------------------------

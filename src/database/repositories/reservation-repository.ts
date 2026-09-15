@@ -535,6 +535,46 @@ export function findLogsByReservationId(reservationId: number): Promise<Confirma
   );
 }
 
+export async function getDashboardStatsAggregate(): Promise<{
+  total: number;
+  received: number;
+  awaitingDeposit: number;
+  confirmed: number;
+  consultRequired: number;
+  cancelled: number;
+  completed: number;
+}> {
+  const row = await queryRow<{
+    total: number | string;
+    received: number | string;
+    awaiting_deposit: number | string;
+    confirmed: number | string;
+    consult_required: number | string;
+    cancelled: number | string;
+    completed: number | string;
+  }>(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN reservation_status = 'received' THEN 1 ELSE 0 END) AS received,
+      SUM(CASE WHEN reservation_status = 'awaiting_deposit' THEN 1 ELSE 0 END) AS awaiting_deposit,
+      SUM(CASE WHEN reservation_status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed,
+      SUM(CASE WHEN reservation_status = 'consult_required' THEN 1 ELSE 0 END) AS consult_required,
+      SUM(CASE WHEN reservation_status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled,
+      SUM(CASE WHEN reservation_status = 'completed' THEN 1 ELSE 0 END) AS completed
+    FROM reservations
+  `);
+
+  return {
+    total: Number(row?.total ?? 0),
+    received: Number(row?.received ?? 0),
+    awaitingDeposit: Number(row?.awaiting_deposit ?? 0),
+    confirmed: Number(row?.confirmed ?? 0),
+    consultRequired: Number(row?.consult_required ?? 0),
+    cancelled: Number(row?.cancelled ?? 0),
+    completed: Number(row?.completed ?? 0),
+  };
+}
+
 export async function countByStatus(status: ReservationStatus): Promise<number> {
   const row = await queryRow<{ c: number | string }>("SELECT COUNT(*) as c FROM reservations WHERE reservation_status = ?", [status]);
   return Number(row?.c ?? 0);
