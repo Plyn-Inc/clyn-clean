@@ -13,7 +13,7 @@ import {
   EXTRA_SERVICE_NOTICE,
   serviceLabel,
 } from "@/lib/types";
-import type { OccupancyStatus } from "@/lib/types";
+import type { OccupancyStatus, ServiceType } from "@/lib/types";
 import type { SelectedSlot } from "./ReservationCalendar";
 import AgreementSection, { type AgreementState } from "./AgreementSection";
 import RegionSelect, { EMPTY_REGION, type RegionValue } from "./RegionSelect";
@@ -53,7 +53,7 @@ const STEP_LABELS = ["서비스", "날짜", "고객정보", "확인·동의"];
 interface BookingFormProps {
   selectedSlot: SelectedSlot | null;
   selectedDate?: string | null;
-  onServiceChange?: (serviceType: string) => void;
+  onServiceChange?: (serviceType: ServiceType) => void;
 }
 
 export default function BookingForm({ selectedSlot, selectedDate, onServiceChange }: BookingFormProps) {
@@ -63,7 +63,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [result, setResult] = useState<Result | null>(null);
 
   // 1단계 — 서비스
-  const [serviceType, setServiceType] = useState<string>(SERVICE_TYPES[0]);
+  const [serviceType, setServiceType] = useState<ServiceType>(SERVICE_TYPES[0]);
   const [houseTypeKey, setHouseTypeKey] = useState("");
   const [isApartment, setIsApartment] = useState(false);
   const [apartmentSize, setApartmentSize] = useState<number>(24);
@@ -190,7 +190,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
   }
 
-  function selectService(nextService: string) {
+  function selectService(nextService: ServiceType) {
     onServiceChange?.(nextService);
     setServiceType(nextService);
     setDesiredDate("");

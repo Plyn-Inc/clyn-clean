@@ -143,10 +143,10 @@ test('사이청소 선택 시 좌측 캘린더도 오전/오후 대신 날짜 �
   const form = read('src/components/booking/BookingForm.tsx');
   const calendar = read('src/components/booking/ReservationCalendar.tsx');
 
-  assert.match(form, /onServiceChange\?: \(serviceType: string\) => void/);
+  assert.match(form, /onServiceChange\?: \(serviceType: ServiceType\) => void/);
   assert.match(form, /selectedDate\?: string \| null/);
   assert.match(form, /onServiceChange\?\.\(nextService\)/);
-  assert.match(section, /const \[activeService, setActiveService\] = useState\(SERVICE_TYPES\[0\]\)/);
+  assert.match(section, /const \[activeService, setActiveService\] = useState<ServiceType>\(SERVICE_TYPES\[0\]\)/);
   assert.match(section, /dateOnly=\{activeService === "사이청소"\}/);
   assert.match(section, /onSelectDate=\{handleSelectDate\}/);
   assert.match(section, /selectedDate=\{selectedDate\}/);

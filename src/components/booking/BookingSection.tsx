@@ -5,11 +5,12 @@ import ReservationCalendar from "./ReservationCalendar";
 import BookingForm from "./BookingForm";
 import type { SelectedSlot } from "./ReservationCalendar";
 import { SERVICE_TYPES } from "@/lib/types";
+import type { ServiceType } from "@/lib/types";
 
 export default function BookingSection() {
   const [selectedSlot, setSelectedSlot] = useState<SelectedSlot | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
-  const [activeService, setActiveService] = useState(SERVICE_TYPES[0]);
+  const [activeService, setActiveService] = useState<ServiceType>(SERVICE_TYPES[0]);
   const bookingRef = useRef<HTMLDivElement | null>(null);
 
   function handleSelectSlot(slot: SelectedSlot) {
@@ -24,7 +25,7 @@ export default function BookingSection() {
     bookingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  function handleServiceChange(nextService: string) {
+  function handleServiceChange(nextService: ServiceType) {
     setActiveService(nextService);
     setSelectedSlot(null);
     setSelectedDate(null);
