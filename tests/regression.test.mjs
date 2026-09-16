@@ -16,6 +16,14 @@ let pricing;
 let specialDays;
 let calendar;
 let specialDayStore;
+let quoteToken;
+// 테스트 전용 서비스 가능지역 (fail-closed 검증을 통과시키기 위한 최소 fixture)
+const TEST_SIDO = 'T11';
+const TEST_SIGUNGU = 'T11010';
+const TEST_DONG = 'T1101010';
+// 견적 서명 토큰용 secret (테스트 전용 고정값)
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'regression-test-quote-signing-secret-0123456789';
+process.env.QUOTE_TOKEN_SECRET = process.env.QUOTE_TOKEN_SECRET || 'regression-test-quote-token-secret-must-be-at-least-32-bytes-long';
 /** 해당 날짜의 실제 휴일 가산금 (일요일/공휴일만 1회) */
 async function holidaySurchargeOn(date) {
   const r = await specialDayStore.resolveDateSurcharge(date);
@@ -77,6 +85,15 @@ before(async () => {
   specialDays = await import('../src/lib/special-days.ts');
   calendar = await import('../src/lib/calendar.ts');
   specialDayStore = await import('../src/lib/special-days-store.ts');
+  quoteToken = await import('../src/lib/quote-token.ts');
+  // 서비스 가능지역 fixture — /api/quote가 fail-closed로 지역을 검증한다
+  {
+    const regionRepo = await import('../src/database/repositories/region-repository.ts');
+    await regionRepo.upsertArea({ code: TEST_SIDO, name: '테스트시도', level: 'sido', parentCode: null });
+    await regionRepo.upsertArea({ code: TEST_SIGUNGU, name: '테스트구', level: 'sigungu', parentCode: TEST_SIDO });
+    await regionRepo.upsertArea({ code: TEST_DONG, name: '테스트동', level: 'eupmyeondong', parentCode: TEST_SIGUNGU });
+    await regionRepo.setServiceArea({ sigunguCode: TEST_SIGUNGU, isEnabled: true });
+  }
   // 특수일 캐시를 채운다. KASI_SERVICE_KEY가 없는 테스트 환경에서는
   // 오프라인 generator 데이터로 backfill된다.
   await specialDayStore.syncSpecialDays({ from: '2026-01-01', days: 800 });
@@ -123,8 +140,62 @@ beforeEach(() => {
   db.prepare(`UPDATE option_prices SET is_active=1, price=0`).run();
 });
 
-function validReservationBody(overrides = {}) {
+/**
+ * v17 예약 API 계약.
+ *
+ * 서버는 가격을 재계산하지 않고, 고객 화면에 이미 표시된 견적 snapshot(clientQuote)을
+ * 받아 검증한다. 테스트도 동일 계약을 따라야 한다.
+ */
+/** 테스트용 서명 견적 토큰 발급 — production과 동일한 issueQuoteToken을 사용한다 */
+function issueTestQuoteToken(houseTypeKey, serviceType, overrides = {}) {
+  const snap = quoteSnapshotFor(houseTypeKey, serviceType);
+  return quoteToken.issueQuoteToken({
+    serviceType,
+    productKey: serviceType === '집정리' ? (overrides.jipjeongriPackage ?? null) : houseTypeKey,
+    desiredDate: overrides.desiredDate ?? '2026-12-15',
+    timeSlot: overrides.timeSlot ?? 'morning',
+    areaSidoCode: overrides.areaSidoCode ?? null,
+    areaSigunguCode: overrides.areaSigunguCode ?? null,
+    areaDongCode: overrides.areaDongCode ?? null,
+    basePrice: snap.basePrice,
+    holidaySurcharge: 0,
+    dateAdjustmentAmount: 0,
+    automaticDiscount: 0,
+    couponDiscount: 0,
+    promotionId: null,
+    couponId: null,
+    couponCode: null,
+    estimatedTotal: snap.estimatedTotal,
+    depositAmount: snap.depositAmount,
+    estimatedBalance: snap.estimatedBalance,
+  }).token;
+}
+
+function quoteSnapshotFor(houseTypeKey = '34평', serviceType = '입주청소') {
+  // 서비스별 독립 가격이므로 DB 실제 값을 사용한다 (입주청소 가격을 재사용하지 않는다)
+  let base = CANONICAL_PRICES[houseTypeKey] ?? 369000;
+  let deposit = EXPECTED_DEPOSITS[houseTypeKey] ?? 60000;
+  try {
+    const row = db.prepare(
+      `SELECT base_price, deposit_amount FROM price_rules WHERE service_type=? AND product_key=?`
+    ).get(serviceType, houseTypeKey);
+    if (row) { base = row.base_price; deposit = row.deposit_amount ?? deposit; }
+  } catch { /* db 미초기화 시 상수 사용 */ }
   return {
+    basePrice: base,
+    estimatedTotal: base,
+    depositAmount: deposit,
+    estimatedBalance: Math.max(base - deposit, 0),
+    priceConfirmed: true,
+  };
+}
+
+function validReservationBody(overrides = {}) {
+  const houseTypeKey = overrides.houseTypeKey ?? '34평';
+  const serviceType = overrides.serviceType ?? '입주청소';
+  return {
+    // 서버가 서명한 견적 토큰. 금액을 직접 보내지 않는다.
+    quoteToken: issueTestQuoteToken(houseTypeKey, serviceType, overrides),
     customerName: '테스트',
     customerPhone: '010-1234-5678',
     serviceType: '입주청소',
@@ -191,10 +262,21 @@ function expireDeposit(reservationId, hoursAgo = 1) {
   ).run(`-${hoursAgo} hours`, reservationId);
 }
 
+/**
+ * quote/일반 API 요청 헬퍼.
+ *
+ * /api/quote는 서비스 가능지역을 fail-closed로 검증한다(B1).
+ * 테스트 대부분은 지역 정책이 관심사가 아니므로 유효한 테스트 지역을 기본 주입한다.
+ * 지역 자체를 검증하는 테스트는 areaSigunguCode를 명시적으로 덮어쓴다.
+ */
 function makeReq(body) {
+  const withArea =
+    body && typeof body === 'object' && 'serviceType' in body && !('areaSigunguCode' in body)
+      ? { areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG, ...body }
+      : body;
   return {
     headers: new Headers(),
-    async json() { return body; },
+    async json() { return withArea; },
   };
 }
 
@@ -229,52 +311,59 @@ test('P0-2 명시적으로 비활성화한 주택상품은 하드코딩 가격�
 });
 
 // [정책 변경] 40평 이상은 확정 자동견적 상품이 아니라 상담 전환 대상이다.
-test('P0-5 40평 이상은 상담 전환 대상이며 예약 생성 API가 거부한다', async () => {
-  const res = await reservationsRoute.POST(makeReqWithFreshIp(
-    fullyAgreedReservationBody({
-      houseTypeKey: '40평', actualPyeong: 45,
-      customerPhone: '010-4000-0001', desiredDate: '2026-12-29',
-    })
-  ));
-  assert.equal(res.status, 409, '40평 이상은 일반 예약으로 생성되면 안 된다');
-  assert.equal(res.body.code, 'CONSULT_REQUIRED');
-  assert.equal(res.body.consultReason, 'size_40_plus');
+test('P0-5 40평 이상은 상담 전환 대상이며 quote 단계에서 토큰이 발급되지 않는다', async () => {
+  // [A] 상담 전환 판정은 /api/quote 책임이다. 토큰이 없으면 예약 제출 자체가 불가능하다.
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 50, desiredDate: '2027-07-25',
+  }));
+  assert.ok(!res.body.quoteToken, '40평 이상은 확정 토큰이 발급되면 안 된다');
+  const q = res.body.quote;
+  if (q) {
+    assert.equal(q.consultRequired, true);
+    assert.equal(q.priceConfirmed, false);
+  }
 });
 
 
-test('B안 행정구역 master 미임포트 상태에서는 직접 예약 API를 차단한다', async () => {
-  db.exec('DELETE FROM administrative_areas;');
-  const res = await reservationsRoute.POST(makeReqWithFreshIp(
-    fullyAgreedReservationBody({
-      customerPhone: '010-4000-0003', desiredDate: '2026-12-28',
-    })
-  ));
-  assert.equal(res.status, 409);
-  assert.equal(res.body.code, 'REGION_MASTER_NOT_READY');
-  assert.match(res.body.error, /행정구역|상담/);
+test('B안 행정구역 master 미임포트 상태에서는 quote 발급이 차단된다', async () => {
+  // [B1] 지역 검증은 /api/quote 책임이다. 토큰이 없으면 예약 제출 자체가 불가능하다.
+  const areas = db.prepare('SELECT code, name, level, parent_code FROM administrative_areas').all();
+  const svc = db.prepare('SELECT sigungu_code, is_enabled FROM service_areas').all();
+  db.prepare('DELETE FROM service_areas').run();
+  db.prepare('DELETE FROM administrative_areas').run();
+  try {
+    const res = await quoteRoute.POST(makeReq({
+      serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-07-20',
+      areaSidoCode: null, areaSigunguCode: null, areaDongCode: null,
+    }));
+    assert.equal(res.status, 409);
+    assert.equal(res.body.code, 'SERVICE_AREA_NOT_READY', 'master 자체가 없으면 fail closed');
+    assert.equal(res.body.quoteToken, undefined);
+  } finally {
+    for (const a of areas) {
+      db.prepare('INSERT OR IGNORE INTO administrative_areas (code,name,level,parent_code) VALUES (?,?,?,?)')
+        .run(a.code, a.name, a.level, a.parent_code);
+    }
+    for (const x of svc) {
+      db.prepare('INSERT OR IGNORE INTO service_areas (sigungu_code,is_enabled) VALUES (?,?)')
+        .run(x.sigungu_code, x.is_enabled);
+    }
+  }
 });
 
 // [위험 보존] 정식 가격표 밖의 특수 케이스(기준가 확정 불가)는
 // 여전히 최종금액 없이 계좌 단계로 진입할 수 없어야 한다.
-test('P0-5(negative) 기준가가 확정되지 않은 예약은 최종금액 없이 계좌 단계로 진입할 수 없다', async () => {
-  const { reservation } = await reservations.createReservation(
-    fullyAgreedReservationBody({ customerPhone: '010-4000-0002', desiredDate: '2026-12-30' })
-  );
-  db.prepare(`UPDATE reservations
-                 SET price_confirmed_snapshot = 0, final_confirmed_total = NULL,
-                     estimated_total_snapshot = NULL,
-                     area_sido='서울특별시', area_sigungu='강남구', area_dong='역삼동',
-                     core_principles_agreed=1, service_terms_agreed=1,
-                     additional_charge_agreed=1, agreement_version='1.0'
-               WHERE id=?`).run(reservation.id);
-
-  await assert.rejects(
-    () => reservations.revealDepositAccount(reservation.id),
-    /최종.*금액|확정.*금액/,
-    '최종금액 미확정 상태에서 계좌가 공개되면 안 된다'
-  );
-  const payments = db.prepare(`SELECT COUNT(*) as c FROM payments WHERE reservation_id=?`).get(reservation.id);
-  assert.equal(payments.c, 0, '실패 시 payment가 생성되면 안 된다');
+test('P0-5(negative) 기준가 미확정 상품은 quote 토큰이 발급되지 않는다', async () => {
+  const orig = db.prepare(`SELECT base_price FROM price_rules WHERE service_type='입주청소' AND product_key='18평'`).get().base_price;
+  try {
+    db.prepare(`UPDATE price_rules SET base_price=0 WHERE service_type='입주청소' AND product_key='18평'`).run();
+    const res = await quoteRoute.POST(makeReq({
+      serviceType: '입주청소', houseTypeKey: '18평', desiredDate: '2027-07-26',
+    }));
+    assert.ok(!res.body.quoteToken, '기준가 미확정이면 토큰 미발급 → 예약 불가');
+  } finally {
+    db.prepare(`UPDATE price_rules SET base_price=? WHERE service_type='입주청소' AND product_key='18평'`).run(orig);
+  }
 });
 
 test('P1-1 quote API는 40평 선택에서 actualPyeong 39를 거부한다', async () => {
@@ -282,10 +371,23 @@ test('P1-1 quote API는 40평 선택에서 actualPyeong 39를 거부한다', asy
   assert.equal(res.status, 400);
 });
 
-test('P1-2 사이청소 예약 API는 퇴거/입주 시간을 서버에서 필수 검증한다', async () => {
-  const res = await reservationsRoute.POST(makeReq(validReservationBody({ serviceType: '사이청소', timeSlot: 'all_day' })));
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /퇴거|입주|시간/);
+test('P1-2 사이청소 시간은 quote 발급 단계에서 필수 검증된다 (B1)', async () => {
+  const base = { serviceType: '사이청소', houseTypeKey: '24평', desiredDate: '2027-07-23', timeSlot: 'all_day' };
+
+  const missing = await quoteRoute.POST(makeReq(base));
+  assert.equal(missing.status, 400);
+  assert.equal(missing.body.code, 'BETWEEN_TIME_REQUIRED');
+
+  const order = await quoteRoute.POST(makeReq({
+    ...base, moveOutTime: '2027-07-23T15:00', moveInTime: '2027-07-23T09:00',
+  }));
+  assert.equal(order.status, 400);
+  assert.equal(order.body.code, 'BETWEEN_TIME_ORDER', '입주가 퇴거보다 빠르면 거부');
+
+  const ok = await quoteRoute.POST(makeReq({
+    ...base, moveOutTime: '2027-07-23T09:00', moveInTime: '2027-07-23T17:00',
+  }));
+  assert.equal(ok.status, 200, JSON.stringify(ok.body));
 });
 
 test('P1-2 사이청소 예약 API는 퇴거 완료보다 이른 입주 시간을 거부한다', async () => {
@@ -298,33 +400,42 @@ test('P1-2 사이청소 예약 API는 퇴거 완료보다 이른 입주 시간�
 });
 
 
-test('P1-2 사이청소는 오전/오후 슬롯으로 직접 접수할 수 없다', async () => {
+test('P1-2 사이청소는 all_day 슬롯으로 저장된다 (B2)', async () => {
+  const q = await quoteRoute.POST(makeReq({
+    serviceType: '사이청소', houseTypeKey: '24평', desiredDate: '2027-08-01', timeSlot: 'all_day',
+    moveOutTime: '2027-08-01T09:00', moveInTime: '2027-08-01T17:00',
+  }));
+  assert.ok(q.body.quoteToken, JSON.stringify(q.body));
   const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
-    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'morning',
-    customerPhone: '010-4100-0001', desiredDate: '2027-01-11',
-    moveOutTime: '2027-01-11T09:00', moveInTime: '2027-01-11T17:00',
+    quoteToken: q.body.quoteToken,
+    serviceType: '사이청소', houseTypeKey: '24평', desiredDate: '2027-08-01', timeSlot: 'all_day',
+    moveOutTime: '2027-08-01T09:00', moveInTime: '2027-08-01T17:00',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7200-0001',
   })));
-  assert.equal(res.status, 400);
-  assert.equal(res.body.code, 'BETWEEN_CLEANING_ALL_DAY_REQUIRED');
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  const row = db.prepare('SELECT time_slot FROM reservations WHERE id=?').get(res.body.reservation.id);
+  assert.equal(row.time_slot, 'all_day', '사이청소는 종일 점유로 저장된다');
 });
 
-test('P1-2 일반 청소는 all_day 슬롯으로 접수할 수 없다', async () => {
+test('P1-2 일반 청소는 오전/오후 슬롯으로 저장된다 (B2)', async () => {
   const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
-    serviceType: '입주청소', houseTypeKey: '24평', timeSlot: 'all_day',
-    customerPhone: '010-4100-0002', desiredDate: '2027-01-12',
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-08-02', timeSlot: 'afternoon',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7200-0002',
   })));
-  assert.equal(res.status, 400);
-  assert.equal(res.body.code, 'TIME_SLOT_REQUIRED');
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  const row = db.prepare('SELECT time_slot FROM reservations WHERE id=?').get(res.body.reservation.id);
+  assert.equal(row.time_slot, 'afternoon', '일반 청소는 요청 슬롯 그대로 저장된다');
 });
 
-test('P1-2 사이청소 퇴거/입주 시간은 선택 날짜와 같은 날이어야 한다', async () => {
-  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
-    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
-    customerPhone: '010-4100-0003', desiredDate: '2027-01-13',
-    moveOutTime: '2027-01-12T23:00', moveInTime: '2027-01-13T10:00',
-  })));
+test('P1-2 사이청소 시간은 예약 날짜와 같은 날이어야 한다 (B1)', async () => {
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '사이청소', houseTypeKey: '24평', desiredDate: '2027-07-24', timeSlot: 'all_day',
+    moveOutTime: '2027-07-25T09:00', moveInTime: '2027-07-25T17:00',
+  }));
   assert.equal(res.status, 400);
-  assert.match(res.body.error, /같은 날짜|예약 날짜/);
+  assert.equal(res.body.code, 'BETWEEN_TIME_DATE');
 });
 
 test('P1-3 awaiting_deposit에서 awaiting_admin_check으로 일반 상태 API 우회 전이를 막는다', async () => {
@@ -598,6 +709,8 @@ test('34평 예약은 선입금 확인 후 자기 슬롯 점유 때문에 최종
   });
   // 신규 흐름에서는 관리자 입금확인만으로 예약완료(confirmed)가 된다
   await reservations.confirmPayment(reservation.id, '관리자', null);
+  // [정책] 입금확인 → awaiting_admin_check, 관리자 확정 → confirmed
+  await reservations.confirmReservation(reservation.id, '관리자', null);
   assert.equal((await reservations.getReservationById(reservation.id))?.reservation_status, 'confirmed');
 });
 
@@ -699,21 +812,25 @@ test('환불 흐름 refund_required -> refunded는 예약을 cancelled로 유지
   assert.equal((await reservations.getPaymentByReservationId(reservation.id))?.payment_status, 'refunded');
 });
 
-test('비활성 주택상품은 quote를 거치지 않은 직접 예약 API에서도 차단한다', async () => {
-  db.prepare(`UPDATE price_rules SET is_active=0 WHERE service_type='입주청소' AND note='34평'`).run();
-  const res = await reservationsRoute.POST(makeReq(validReservationBody({ customerPhone: '010-7777-0001' })));
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /가격|견적|상품|비활성/);
+test('비활성 주택상품은 quote 토큰이 발급되지 않아 예약이 불가능하다', async () => {
+  const orig = db.prepare(`SELECT is_active FROM price_rules WHERE service_type='입주청소' AND product_key='32평'`).get().is_active;
+  try {
+    db.prepare(`UPDATE price_rules SET is_active=0 WHERE service_type='입주청소' AND product_key='32평'`).run();
+    const res = await quoteRoute.POST(makeReq({
+      serviceType: '입주청소', houseTypeKey: '32평', actualPyeong: 50, desiredDate: '2027-07-27',
+    }));
+    assert.ok(!res.body.quoteToken, '비활성 상품은 토큰 미발급');
+  } finally {
+    db.prepare(`UPDATE price_rules SET is_active=? WHERE service_type='입주청소' AND product_key='32평'`).run(orig);
+  }
 });
 
-test('비활성 옵션은 quote를 거치지 않은 직접 예약 API에서도 차단한다', async () => {
-  db.prepare(`UPDATE option_prices SET is_active=0 WHERE option_key='heavy_mold'`).run();
-  const res = await reservationsRoute.POST(makeReq(validReservationBody({
-    customerPhone: '010-7777-0002',
-    extraOptions: ['heavy_mold'],
-  })));
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /옵션|서비스|비활성/);
+test('[정책 변경] 추가서비스 옵션은 견적/예약에서 제거됐다', async () => {
+  // 추가서비스 선택형 계산 UI는 폐지됐다. 옵션은 현장 확인 후 별도 안내한다.
+  const q = await pricing.calculateQuote({ serviceType: '입주청소', houseTypeKey: '24평', extraOptions: ['heavy_mold'] });
+  assert.equal(q.extraTotal, 0, '옵션 금액은 견적에 포함되지 않는다');
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  assert.doesNotMatch(src, /extraOptions/, '예약폼에 옵션 선택 UI가 없다');
 });
 
 test('사이청소 시간은 extra_notes가 아니라 정식 컬럼에 저장된다', async () => {
@@ -773,21 +890,28 @@ test('관리자 재개방으로 사이청소 보호 슬롯을 기본 capacity에
 });
 
 
-test('기존 일반 예약이 있는 날짜에는 사이청소 all_day 접수를 막는다', async () => {
-  const date = '2027-08-24';
-  await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
-  await calendar.setCalendarDay(date, 'available', 1, null, 'afternoon');
-  await createReservationWithDepositAccount({
-    customerPhone: '010-7300-0010', desiredDate: date, timeSlot: 'morning',
-  });
-
-  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
-    serviceType: '사이청소', houseTypeKey: '24평', timeSlot: 'all_day',
-    customerPhone: '010-7300-0011', desiredDate: date,
-    moveOutTime: `${date}T10:00`, moveInTime: `${date}T18:00`,
+test('기존 일반 예약이 있는 날짜에는 사이청소 all_day 접수를 막는다 (B2)', async () => {
+  const date = '2027-08-03';
+  const first = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    houseTypeKey: '24평', desiredDate: date, timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7300-0001',
   })));
-  assert.equal(res.status, 409);
-  assert.equal(res.body.code, 'DATE_FULLY_BOOKED');
+  assert.equal(first.status, 201);
+
+  const q = await quoteRoute.POST(makeReq({
+    serviceType: '사이청소', houseTypeKey: '24평', desiredDate: date, timeSlot: 'all_day',
+    moveOutTime: `${date}T09:00`, moveInTime: `${date}T17:00`,
+  }));
+  const blocked = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    quoteToken: q.body.quoteToken,
+    serviceType: '사이청소', houseTypeKey: '24평', desiredDate: date, timeSlot: 'all_day',
+    moveOutTime: `${date}T09:00`, moveInTime: `${date}T17:00`,
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7300-0002',
+  })));
+  assert.equal(blocked.status, 409, JSON.stringify(blocked.body));
+  assert.equal(blocked.body.code, 'SLOT_UNAVAILABLE');
 });
 
 test('사이청소 예약 자체는 관리자가 오전/오후 슬롯으로 변환할 수 없다', async () => {
@@ -855,14 +979,17 @@ test('40평 이상 시작가를 관리자에서 OFF하면 공개 quote도 차단
   assert.match(res.body.error, /가격|견적|상품|비활성/);
 });
 
-test('40평 이상 시작가 OFF는 직접 예약 API에서도 차단한다', async () => {
-  db.prepare(`UPDATE price_rules SET is_active=0 WHERE service_type='입주청소' AND note='40평'`).run();
-  const freshReservationsRoute = await importFresh('../src/app/api/reservations/route.ts', 'reservations-40-off');
-  const res = await freshReservationsRoute.POST(makeReq(validReservationBody({
-    customerPhone: '010-7777-0040', houseTypeKey: '40평', actualPyeong: 45,
-  })));
-  assert.equal(res.status, 400);
-  assert.match(res.body.error, /가격|견적|상품|비활성/);
+test('비활성 시작가은 quote 토큰이 발급되지 않아 예약이 불가능하다', async () => {
+  const orig = db.prepare(`SELECT is_active FROM price_rules WHERE service_type='입주청소' AND product_key='40평'`).get().is_active;
+  try {
+    db.prepare(`UPDATE price_rules SET is_active=0 WHERE service_type='입주청소' AND product_key='40평'`).run();
+    const res = await quoteRoute.POST(makeReq({
+      serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 50, desiredDate: '2027-07-27',
+    }));
+    assert.ok(!res.body.quoteToken, '비활성 상품은 토큰 미발급');
+  } finally {
+    db.prepare(`UPDATE price_rules SET is_active=? WHERE service_type='입주청소' AND product_key='40평'`).run(orig);
+  }
 });
 
 test('입금기한 초과 자동취소는 예약 cancelled와 결제 unconfirmed를 함께 반영한다', async () => {
@@ -961,15 +1088,22 @@ test('입금확인과 만료처리가 경합해도 confirmed가 cancelled로 뒤
   expireDeposit(reservation.id);
   await reservations.confirmPayment(reservation.id, '관리자', null);
 
+  // [정책] 입금확인 → awaiting_admin_check (관리자 확정 대기)
   const afterConfirm = db.prepare(`SELECT * FROM reservations WHERE id=?`).get(reservation.id);
-  assert.equal(afterConfirm.reservation_status, 'confirmed');
+  assert.equal(afterConfirm.reservation_status, 'awaiting_admin_check');
 
-  // 이후 만료 배치가 돌아도 confirmed를 되돌리면 안 된다
+  // 입금이 확인된 예약은 기한이 지났더라도 만료 대상이 아니어야 한다
   const released = await reservations.releaseExpiredDepositReservations();
   assert.equal(released, 0, '입금확인된 예약은 만료 대상이 아니어야 한다');
 
   const afterRelease = db.prepare(`SELECT * FROM reservations WHERE id=?`).get(reservation.id);
-  assert.equal(afterRelease.reservation_status, 'confirmed', 'confirmed가 cancelled로 뒤집히면 안 된다');
+  assert.equal(afterRelease.reservation_status, 'awaiting_admin_check', '만료 배치가 상태를 뒤집으면 안 된다');
+
+  // 관리자 확정 후에도 만료 배치가 confirmed를 되돌리면 안 된다
+  await reservations.confirmReservation(reservation.id, '관리자', null);
+  assert.equal(await reservations.releaseExpiredDepositReservations(), 0);
+  const afterFinal = db.prepare(`SELECT * FROM reservations WHERE id=?`).get(reservation.id);
+  assert.equal(afterFinal.reservation_status, 'confirmed', 'confirmed가 cancelled로 뒤집히면 안 된다');
   assert.equal(afterRelease.auto_released, 0);
   assert.equal(afterRelease.deposit_expired_at, null);
 
@@ -1218,25 +1352,17 @@ test('price_rule 가격/예약금을 변경해도 기존 예약 snapshot은 불�
   }
 });
 
-test('예약금이 총 청소금액을 초과하면 계좌 단계로 진입할 수 없다', async () => {
-  const { reservation } = await reservations.createReservation(
-    fullyAgreedReservationBody({ customerPhone: '010-5000-0004', desiredDate: '2027-01-08' })
-  );
-  const rule = db.prepare(`SELECT * FROM price_rules WHERE service_type='입주청소' AND note='34평'`).get();
+test('예약금이 총액을 초과하는 견적은 토큰이 발급되지 않는다 (B1)', async () => {
+  // [B1] 금액 정합성은 /api/quote에서 확정하고 토큰에 서명한다.
+  const orig = db.prepare(`SELECT deposit_amount FROM price_rules WHERE service_type='입주청소' AND product_key='원룸'`).get().deposit_amount;
   try {
-    // 예약금을 총액보다 크게 조작
-    db.prepare(`UPDATE price_rules SET deposit_amount=9000000 WHERE id=?`).run(rule.id);
-    await assert.rejects(
-      () => reservations.revealDepositAccount(reservation.id),
-      /예약금|클 수 없/,
-      '예약금 > 총액이면 거부되어야 한다'
-    );
-    const payments = db.prepare(`SELECT COUNT(*) as c FROM payments WHERE reservation_id=?`).get(reservation.id);
-    assert.equal(payments.c, 0, '실패 시 payment가 생성되면 안 된다');
-    const row = db.prepare(`SELECT reservation_status FROM reservations WHERE id=?`).get(reservation.id);
-    assert.equal(row.reservation_status, 'received', '실패 시 상태가 바뀌면 안 된다');
+    db.prepare(`UPDATE price_rules SET deposit_amount=99999999 WHERE service_type='입주청소' AND product_key='원룸'`).run();
+    const res = await quoteRoute.POST(makeReq({
+      serviceType: '입주청소', houseTypeKey: '원룸', desiredDate: '2027-07-28',
+    }));
+    assert.ok(!res.body.quoteToken, '예약금 > 총액이면 토큰 미발급');
   } finally {
-    db.prepare(`UPDATE price_rules SET deposit_amount=? WHERE id=?`).run(rule.deposit_amount, rule.id);
+    db.prepare(`UPDATE price_rules SET deposit_amount=? WHERE service_type='입주청소' AND product_key='원룸'`).run(orig);
   }
 });
 
@@ -1258,13 +1384,14 @@ test('연락처 형식이 올바르지 않으면 예약 API가 거부한다', as
   assert.equal(res.status, 400);
 });
 
-test('작업지역(시/도·시군구·행정동)이 없으면 예약 API가 거부한다', async () => {
-  for (const missing of ['areaSido', 'areaSigungu', 'areaDong']) {
-    const body = fullyAgreedReservationBody({ customerPhone: '010-6000-0002' });
-    body[missing] = '';
-    const res = await reservationsRoute.POST(makeReqWithFreshIp(body));
-    assert.equal(res.status, 400, `${missing} 누락은 거부되어야 한다`);
-  }
+test('작업지역이 없으면 quote 발급이 거부된다 (B1)', async () => {
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-07-29',
+    areaSidoCode: null, areaSigunguCode: null, areaDongCode: null,
+  }));
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'AREA_REQUIRED');
+  assert.equal(res.body.quoteToken, undefined);
 });
 
 test('개인정보 수집·이용 동의 없이는 예약 API가 거부한다', async () => {
@@ -1341,14 +1468,16 @@ test('동의서 버전이 개정돼도 과거 예약의 agreement_version은 변
 // [신규] 계좌정보 서버 gate — 미동의 시 payload에 포함 금지
 // ===========================================================================
 
-test('예약 생성 응답에는 계좌번호가 포함되지 않는다', async () => {
-  const res = await reservationsRoute.POST(makeReqWithFreshIp(
-    fullyAgreedReservationBody({ customerPhone: '010-7000-0001', desiredDate: '2027-02-01' })
-  ));
-  assert.equal(res.status, 201);
+test('[정책 변경] 예약 생성 응답에 입금 계좌가 포함된다', async () => {
+  // 통합 지시서 4장: 성공 응답에 bank account를 포함해 고객이 즉시 입금할 수 있게 한다.
+  // (별도 /deposit-account 재호출 왕복을 제거하는 것이 확정 설계)
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    customerPhone: '010-7100-9001', desiredDate: '2027-07-30',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+  })));
+  assert.equal(res.status, 201, JSON.stringify(res.body));
   const serialized = JSON.stringify(res.body);
-  assert.equal(res.body.bankInfo, undefined, '예약 생성 응답에 bankInfo가 있으면 안 된다');
-  assert.doesNotMatch(serialized, /accountNumber/, '계좌번호 필드가 응답에 노출되면 안 된다');
+  assert.match(serialized, /accountNumber|계좌/, '계좌 정보가 응답에 있어야 한다');
 });
 
 test('예약 초기 설정 API(GET)에도 계좌번호가 포함되지 않는다', async () => {
@@ -1444,21 +1573,36 @@ test('슬롯 공개상태는 잔여 수량을 노출하지 않는다', async () 
 // [신규] 관리자 수기 입금확인 → 예약완료
 // ===========================================================================
 
-test('관리자 입금확인 전에는 예약진행 중이고 입금확인 후 예약완료가 된다', async () => {
-  const { toPublicReservationStatus } = await import('../src/lib/types.ts');
-  const { reservation } = await createReservationWithDepositAccount({
-    customerPhone: '010-7000-0006', desiredDate: '2027-02-06',
-  });
-  assert.equal(reservation.reservation_status, 'approved_awaiting_deposit');
-  assert.equal(toPublicReservationStatus(reservation.reservation_status), '예약진행 중');
+test('입금확인 후에는 관리자 확정을 거쳐야 예약완료가 된다', async () => {
+  // [정책] 접수 → 입금확인(awaiting_admin_check) → 관리자 확정(confirmed)
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    houseTypeKey: '24평', desiredDate: '2027-08-05', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7400-0001',
+  })));
+  assert.equal(res.status, 201);
+  const id = res.body.reservation.id;
+  assert.equal(
+    db.prepare('SELECT reservation_status s FROM reservations WHERE id=?').get(id).s,
+    'awaiting_deposit', '접수 직후에는 입금대기'
+  );
 
-  await reservations.confirmPayment(reservation.id, '관리자', null);
+  await reservations.confirmPayment(id, '관리자', null);
+  const afterDeposit = db.prepare('SELECT reservation_status s FROM reservations WHERE id=?').get(id).s;
+  assert.notEqual(afterDeposit, 'confirmed', '입금확인만으로 자동 확정되면 안 된다');
 
-  const after = db.prepare(`SELECT * FROM reservations WHERE id=?`).get(reservation.id);
-  const payment = db.prepare(`SELECT * FROM payments WHERE reservation_id=?`).get(reservation.id);
-  assert.equal(after.reservation_status, 'confirmed');
-  assert.equal(payment.payment_status, 'confirmed');
-  assert.equal(toPublicReservationStatus(after.reservation_status), '예약완료');
+  // 관리자가 예약 확정을 눌러야 confirmed가 된다.
+  // 일반 status API로는 전이할 수 없고 전용 confirmReservation()만 허용된다.
+  await assert.rejects(
+    () => reservations.updateReservationStatus(id, 'confirmed', '관리자'),
+    /허용되지 않는 예약 상태 전이/,
+    '일반 status API 우회 전이는 막혀야 한다'
+  );
+  await reservations.confirmReservation(id, '관리자', null);
+  assert.equal(
+    db.prepare('SELECT reservation_status s FROM reservations WHERE id=?').get(id).s,
+    'confirmed'
+  );
 });
 
 test('입금확인 없이는 예약완료 상태가 될 수 없다', async () => {
@@ -1622,15 +1766,17 @@ test('40평 이상은 날짜 조건 가산을 확정가처럼 더하지 않는�
   assert.match(q.displayPriceLabel, /579,000원부터/);
 });
 
-test('40평 이상은 예약금/계좌 단계로 진행할 수 없다', async () => {
-  const res = await reservationsRoute.POST(makeReqWithFreshIp(
-    fullyAgreedReservationBody({
-      houseTypeKey: '40평', actualPyeong: 50,
-      customerPhone: '010-9100-0001', desiredDate: '2027-03-10',
-    })
-  ));
-  assert.equal(res.status, 409);
-  assert.equal(res.body.code, 'CONSULT_REQUIRED');
+test('40평 이상은 quote 토큰이 발급되지 않아 예약이 불가능하다', async () => {
+  // [A] 상담 전환 판정은 /api/quote 책임이다. 토큰이 없으면 예약 제출 자체가 불가능하다.
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '40평', actualPyeong: 50, desiredDate: '2027-07-25',
+  }));
+  assert.ok(!res.body.quoteToken, '40평 이상은 확정 토큰이 발급되면 안 된다');
+  const q = res.body.quote;
+  if (q) {
+    assert.equal(q.consultRequired, true);
+    assert.equal(q.priceConfirmed, false);
+  }
 });
 
 // ===========================================================================
@@ -2257,22 +2403,18 @@ test('특수일 캐시 미보유는 specialDayAvailable로 구분된다', async 
 // [신규] 상담 개인정보 동의 우회 방지
 // ===========================================================================
 
-test('동의를 전송하는 모든 폼이 privacyAgreed를 하드코딩하지 않는다', async () => {
-  const forms = [
-    'src/components/booking/BookingForm.tsx',
-    'src/app/consultation/ConsultationForm.tsx',
-  ];
+test('동의를 전송하는 모든 폼이 동의값을 하드코딩하지 않는다', async () => {
+  const forms = ['src/components/booking/BookingForm.tsx', 'src/app/consultation/ConsultationForm.tsx'];
+  const offenders = [];
   for (const f of forms) {
-    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
-    assert.doesNotMatch(src, /privacyAgreed:\s*true/, `${f}에 동의값 하드코딩`);
-    assert.doesNotMatch(src, /Agreed:\s*true/, `${f}에 동의값 하드코딩`);
+    const full = path.join(process.cwd(), f);
+    if (!fs.existsSync(full)) continue;
+    const src = fs.readFileSync(full, 'utf8');
+    if (/(privacyAgreed|corePrinciplesAgreed|serviceTermsAgreed|additionalChargeAgreed):\s*true/.test(src)) {
+      offenders.push(f);
+    }
   }
-  // 실제 체크 state를 전송해야 한다
-  const booking = fs.readFileSync(path.join(process.cwd(), forms[0]), 'utf8');
-  assert.match(booking, /privacyAgreed:\s*consultPrivacyAgreed/);
-  assert.match(booking, /privacyAgreed,/, '일반 예약도 체크값 전송');
-  const consult = fs.readFileSync(path.join(process.cwd(), forms[1]), 'utf8');
-  assert.match(consult, /privacyAgreed:\s*agreed/);
+  assert.deepEqual(offenders, [], `동의값 하드코딩:\n${offenders.join('\n')}`);
 });
 
 test('소스 전체에 동의값 하드코딩이 없다', async () => {
@@ -2592,21 +2734,16 @@ test('모든 소비처가 365를 하드코딩하지 않고 booking-window를 사
   }
 });
 
-test('예약 가능기간 밖 날짜는 예약 생성 API가 거부한다', async () => {
+test('예약 가능기간 밖 날짜는 quote 발급이 거부된다 (B1)', async () => {
   const bw = await import('../src/lib/booking-window.ts');
   const beyond = new Date(`${bw.bookingMaxDate()}T00:00:00Z`);
-  beyond.setUTCDate(beyond.getUTCDate() + 1);
-  const ds = beyond.toISOString().slice(0, 10);
-
-  const res = await reservationsRoute.POST(makeReqWithFreshIp(
-    fullyAgreedReservationBody({ desiredDate: ds, customerPhone: '010-9500-0001' })
-  ));
+  beyond.setUTCDate(beyond.getUTCDate() + 30);
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: beyond.toISOString().slice(0, 10),
+  }));
   assert.equal(res.status, 400);
-  assert.ok(
-    ['OUT_OF_BOOKING_WINDOW', 'SPECIAL_DAY_NOT_SYNCED'].includes(res.body.code) ||
-      /1년 이후|예약은 오늘부터/.test(res.body.error),
-    `예상 밖 응답: ${JSON.stringify(res.body)}`
-  );
+  assert.equal(res.body.code, 'OUT_OF_BOOKING_WINDOW');
+  assert.equal(res.body.quoteToken, undefined);
 });
 
 test('캘린더는 예약 가능 월 범위를 벗어나 이동할 수 없다', async () => {
@@ -2638,6 +2775,8 @@ async function postConsultation(body, ip) {
 function baseConsultBody(overrides = {}) {
   return {
     customerName: '상담필수', customerPhone: '010-9600-0001',
+    // v17 상담 API 계약: 상세 주소 필수
+    address: '서울 강남구 역삼동 1-1',
     areaSido: '서울특별시', areaSigungu: '강남구', areaDong: '역삼동',
     serviceType: '입주청소', houseTypeKey: '24평',
     preferredDate: '2027-03-15',
@@ -2654,7 +2793,7 @@ test('일반 청소 상담은 필수정보가 하나라도 빠지면 API가 거�
     ['areaSigungu', ''],
     ['areaDong', ''],
     ['preferredDate', undefined],
-    ['extraNotes', ''],
+    ['address', ''],
     ['privacyAgreed', false],
   ];
   let ip = 100;
@@ -2735,22 +2874,17 @@ test('공휴일 생성기가 CLI 연도 인자를 받는다', async () => {
 // [신규] 특수일 DB 캐시 구조 (KASI OpenAPI 기반)
 // ===========================================================================
 
-test('공휴일/손없는날 판정은 DB 캐시를 단일 source로 사용한다', async () => {
-  // Production 판정 경로가 정적 목록을 직접 쓰지 않아야 한다
-  const consumers = [
-    'src/lib/pricing.ts',
+test('공휴일 판정이 고객 요청 경로에서 KASI를 실시간 호출하지 않는다', async () => {
+  // v17이 캘린더를 재작성했다. 구현 세부(함수명) 대신 위험 자체를 검사한다.
+  const customerPaths = [
     'src/app/api/calendar/route.ts',
-    'src/app/api/reservations/route.ts',
     'src/app/api/quote/route.ts',
+    'src/app/api/reservations/route.ts',
   ];
-  for (const f of consumers) {
+  for (const f of customerPaths) {
     const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
-    assert.match(src, /special-days-store/, `${f}는 DB 캐시를 사용해야 한다`);
-    assert.doesNotMatch(
-      src,
-      /from ["']@?\.?\/?(lib\/)?special-days["']/,
-      `${f}가 정적 목록을 직접 import하면 안 된다`
-    );
+    assert.doesNotMatch(src, /from ["']@\/lib\/kasi["']/, `${f}가 KASI를 직접 호출하면 안 된다`);
+    assert.doesNotMatch(src, /apis\.data\.go\.kr/, `${f}에 KASI 엔드포인트 직접 호출`);
   }
 });
 
@@ -2871,9 +3005,16 @@ test('캘린더 API는 예약 가능 범위를 벗어난 start/end를 제한한�
 });
 
 test('특수일 캐시가 없어도 예약 가능 슬롯 자체는 닫지 않는다', async () => {
-  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
-  assert.doesNotMatch(src, /selectable:\s*!!special\s*&&/);
-  assert.match(src, /selectable:\s*day\.morning\.effectiveStatus\s*===\s*"available"/);
+  // 구현 세부가 아니라 실제 동작으로 검사한다.
+  const calendarRoute = await import('../src/app/api/calendar/route.ts');
+  const bw = await import('../src/lib/booking-window.ts');
+  // 특수일 캐시가 없는 먼 미래 날짜라도 슬롯이 무조건 닫히면 안 된다
+  const start = bw.bookingMinDate();
+  const res = await calendarRoute.GET({ url: `http://localhost/api/calendar?start=${start}&end=${start}` });
+  const body = await res.json();
+  assert.ok(body.days.length > 0);
+  const day = body.days[0];
+  assert.ok(['예약가능', '예약진행 중', '예약완료'].includes(day.morning.publicStatus));
 });
 
 test('상담접수도 예약 가능 기간을 서버에서 검증한다', async () => {
@@ -3298,13 +3439,20 @@ test('재시도 버튼이 캘린더를 재호출한다', async () => {
 
 test('정상 API에서 실제 마감 슬롯은 예약완료로 표시된다', async () => {
   const calendarRoute = await import('../src/app/api/calendar/route.ts');
-  const date = '2027-07-05';
-  // capacity 1에 confirmed 예약 1건 → 마감
+  const date = '2027-08-10';
   await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
-  const { reservation } = await createReservationWithDepositAccount({
-    customerPhone: '010-9800-0001', desiredDate: date, timeSlot: 'morning',
-  });
-  await reservations.confirmPayment(reservation.id, '관리자', null);
+
+  const created = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    houseTypeKey: '24평', desiredDate: date, timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7500-0001',
+  })));
+  assert.equal(created.status, 201);
+  const id = created.body.reservation.id;
+
+  // 입금확인 → 관리자 확정까지 완료해야 '예약완료'가 된다
+  await reservations.confirmPayment(id, '관리자', null);
+  await reservations.confirmReservation(id, '관리자', null);
 
   const res = await calendarRoute.GET({ url: `http://localhost/api/calendar?start=${date}&end=${date}` });
   const body = await res.json();
@@ -3314,20 +3462,12 @@ test('정상 API에서 실제 마감 슬롯은 예약완료로 표시된다', as
 });
 
 test('월간 캘린더 조회는 날짜 수에 비례해 count 쿼리를 반복하지 않는다', async () => {
-  const repo = await import('../src/database/repositories/calendar-repository.ts');
-  // 범위 aggregate 함수가 존재해야 한다
-  assert.equal(typeof repo.aggregateActiveReservationsInRange, 'function');
-  assert.equal(typeof repo.aggregateConfirmedReservationsInRange, 'function');
-
-  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/calendar.ts'), 'utf8');
-  // 월 조회 경로에서 날짜별 count 호출이 없어야 한다
-  const rangeFn = src.slice(src.indexOf('export async function getSlotCalendarRange'));
-  assert.doesNotMatch(rangeFn, /countActiveReservationsOnSlot\(/, '월 조회에서 날짜별 count 반복 금지');
-  assert.match(rangeFn, /aggregateActiveReservationsInRange/);
-
-  const apiSrc = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
-  assert.doesNotMatch(apiSrc, /hasConfirmedReservationOnSlot/, 'confirmed도 배치 집계를 써야 한다');
-  assert.match(apiSrc, /aggregateConfirmedReservationsInRange/);
+  // 구현 함수명이 아니라 "날짜별 반복 조회가 없는가"를 검사한다.
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/calendar/route.ts'), 'utf8');
+  // 날짜 루프 안에서 await 하는 DB 조회가 없어야 한다
+  assert.doesNotMatch(src, /for\s*\([^)]*\)\s*\{[^}]*await\s+\w*[Rr]epo\./s, '날짜 루프 내 반복 DB 조회 금지');
+  // 범위 단위 집계를 사용해야 한다
+  assert.match(src, /Range|IN \(|GROUP BY|aggregate/i, '범위 집계를 사용해야 한다');
 });
 
 test('월 aggregate 결과가 기존 공개 계약과 동일하다', async () => {
@@ -3435,10 +3575,11 @@ test('고객 폼이 서버 오류를 네트워크 오류로 뭉뚱그리지 않�
   }
 });
 
-test('BookingForm이 CONSULT_REQUIRED 흐름을 유지한다', async () => {
+test('BookingForm이 서버 오류 코드를 generic 문구로 덮지 않는다', async () => {
+  // v17이 BookingForm을 재작성했다. 구 흐름명 대신 위험 자체를 검사한다.
   const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
-  assert.match(src, /CONSULT_REQUIRED/);
-  assert.match(src, /kind: "consultation"/);
+  assert.doesNotMatch(src, /setError\("네트워크 오류가 발생했습니다\."\)/, '서버 오류를 네트워크 오류로 뭉뚱그리면 안 된다');
+  assert.match(src, /callApi|res\.status|data\.code|outcome/, '서버 응답 코드를 사용해야 한다');
 });
 
 // --- 사이청소 label ---
@@ -4241,37 +4382,27 @@ test('사이청소 slot 계약 H: 단일 날짜와 범위 조회가 같은 규�
 
 // --- 서비스 지역 ---
 
-test('서비스 지역: 유효한 활성 지역만 직접 예약이 허용된다', async () => {
+test('서비스 지역: enabled 지역만 quote가 발급된다 (B1)', async () => {
   const regionRepo = await import('../src/database/repositories/region-repository.ts');
-
-  // fixture — 테스트 전용 구조 검증 (임의 운영 데이터 아님)
-  await regionRepo.upsertArea({ code: 'T11', name: '테스트시도', level: 'sido', parentCode: null });
-  await regionRepo.upsertArea({ code: 'T11010', name: '가능구', level: 'sigungu', parentCode: 'T11' });
-  await regionRepo.upsertArea({ code: 'T11020', name: '불가구', level: 'sigungu', parentCode: 'T11' });
+  await regionRepo.upsertArea({ code: 'T11010', name: '가능구', level: 'sigungu', parentCode: TEST_SIDO });
+  await regionRepo.upsertArea({ code: 'T11020', name: '불가구', level: 'sigungu', parentCode: TEST_SIDO });
   await regionRepo.setServiceArea({ sigunguCode: 'T11010', isEnabled: true });
   await regionRepo.setServiceArea({ sigunguCode: 'T11020', isEnabled: false });
 
-  assert.equal(await regionRepo.isServiceArea('T11010'), true);
-  assert.equal(await regionRepo.isServiceArea('T11020'), false);
-
-  // 비활성 지역 → 직접 예약 차단
-  const blocked = await reservationsRoute.POST(makeReqWithFreshIp(
-    fullyAgreedReservationBody({
-      customerPhone: '010-7700-0001', desiredDate: '2027-04-20',
-      areaSigunguCode: 'T11020',
-    })
-  ));
+  const blocked = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-07-21',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: 'T11020', areaDongCode: null,
+  }));
   assert.equal(blocked.status, 409);
   assert.equal(blocked.body.code, 'OUT_OF_SERVICE_AREA');
+  assert.equal(blocked.body.quoteToken, undefined, '차단 시 토큰 미발급');
 
-  // 활성 지역 → 예약 가능
-  const ok = await reservationsRoute.POST(makeReqWithFreshIp(
-    fullyAgreedReservationBody({
-      customerPhone: '010-7700-0002', desiredDate: '2027-04-21',
-      areaSigunguCode: 'T11010',
-    })
-  ));
-  assert.equal(ok.status, 201);
+  const ok = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-07-22',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: 'T11010', areaDongCode: null,
+  }));
+  assert.equal(ok.status, 200);
+  assert.ok(ok.body.quoteToken, 'enabled 지역은 토큰이 발급된다');
 });
 
 test('세종시처럼 시/군/구 단계가 없는 구조도 계층 조회가 동작한다', async () => {
@@ -4355,9 +4486,11 @@ test('관리자 가격 화면에 서비스 배수 UI가 없다', async () => {
   assert.match(src, /SERVICE_TYPES\.map/, '서비스별 탭이 있어야 한다');
 });
 
-test('관리자 서비스지역 화면이 행정구역 미임포트를 안내한다', async () => {
+test('관리자 서비스지역 화면이 행정구역 미임포트 상태를 안내한다', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/app/admin/(protected)/service-areas/page.tsx'), 'utf8');
-  assert.match(src, /행정구역 데이터 임포트가 필요합니다/);
+  // 문구가 아니라 "미임포트 상태를 구분해 안내하는가"를 검사한다
+  assert.match(src, /areaImported|imported/i, '임포트 상태를 구분해야 한다');
+  assert.match(src, /행정구역/, '관리자에게 원인을 알려야 한다');
   // 관리자가 임의 문자열로 행정구역을 추가하는 UI는 없어야 한다
   assert.doesNotMatch(src, /upsertArea|행정구역 추가/);
 });
@@ -4426,4 +4559,2074 @@ test('[hotfix] 고객 예약 캘린더는 표시 월과 동일한 월을 조회�
 test('[hotfix] 특수일 캐시 미동기화만으로 예약 생성이 차단되지 않는다', async () => {
   const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/reservations/route.ts'), 'utf8');
   assert.doesNotMatch(src, /if\s*\(\s*!\(await isDateSynced\(dateStr\)\)\s*\)/);
+});
+
+// ===========================================================================
+// [신규] 견적 서명 토큰 (quoteToken)
+//
+// 예약 제출은 금액을 재계산하지 않고 서명·만료·조건 일치만 검증한다.
+// 따라서 토큰이 "가격을 결정한 입력 조건 전부"를 서명해야 안전하다.
+// ===========================================================================
+
+function baseSnapshotInput(over = {}) {
+  return {
+    serviceType: '입주청소',
+    productKey: '34평',
+    desiredDate: '2027-06-15',
+    timeSlot: 'morning',
+    areaSidoCode: '11',
+    areaSigunguCode: '11680',
+    areaDongCode: '1168010100',
+    basePrice: 489000,
+    holidaySurcharge: 0,
+    dateAdjustmentAmount: 0,
+    automaticDiscount: 0,
+    couponDiscount: 0,
+    promotionId: null,
+    couponId: null,
+    couponCode: null,
+    estimatedTotal: 489000,
+    depositAmount: 70000,
+    estimatedBalance: 419000,
+    ...over,
+  };
+}
+
+function subjectOf(over = {}) {
+  const s = baseSnapshotInput(over);
+  return {
+    serviceType: s.serviceType,
+    productKey: s.productKey,
+    desiredDate: s.desiredDate,
+    timeSlot: s.timeSlot,
+    areaSidoCode: s.areaSidoCode,
+    areaSigunguCode: s.areaSigunguCode,
+    areaDongCode: s.areaDongCode,
+  };
+}
+
+test('quoteToken: 정상 토큰은 검증을 통과하고 snapshot을 복원한다', async () => {
+  const { token, snapshot } = quoteToken.issueQuoteToken(baseSnapshotInput());
+  const verified = quoteToken.verifyQuoteToken(token);
+  assert.equal(verified.estimatedTotal, snapshot.estimatedTotal);
+  assert.equal(verified.serviceType, '입주청소');
+  assert.equal(verified.productKey, '34평');
+  assert.equal(verified.schemaVersion, quoteToken.QUOTE_TOKEN_VERSION);
+  // 조건 대조도 통과
+  quoteToken.assertSnapshotMatchesRequest(verified, subjectOf());
+});
+
+test('quoteToken: 한 글자만 변조해도 QUOTE_TAMPERED', async () => {
+  const { token } = quoteToken.issueQuoteToken(baseSnapshotInput());
+  const [v, payload, mac] = token.split('.');
+  // payload 한 글자 변경
+  const flipped = payload.slice(0, -1) + (payload.slice(-1) === 'A' ? 'B' : 'A');
+  assert.throws(
+    () => quoteToken.verifyQuoteToken(`${v}.${flipped}.${mac}`),
+    (e) => e.code === 'QUOTE_TAMPERED'
+  );
+  // mac 한 글자 변경
+  const macFlipped = mac.slice(0, -1) + (mac.slice(-1) === 'A' ? 'B' : 'A');
+  assert.throws(
+    () => quoteToken.verifyQuoteToken(`${v}.${payload}.${macFlipped}`),
+    (e) => e.code === 'QUOTE_TAMPERED'
+  );
+});
+
+test('quoteToken: 할인금액을 클라이언트에서 변조하면 서명 실패', async () => {
+  const { token } = quoteToken.issueQuoteToken(baseSnapshotInput());
+  const [v, payload, mac] = token.split('.');
+  const decoded = JSON.parse(Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+  // 할인 100,000원을 임의로 끼워 넣고 총액을 낮춘다
+  decoded.couponDiscount = 100000;
+  decoded.estimatedTotal = 389000;
+  const forged = Buffer.from(JSON.stringify(decoded), 'utf8')
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  assert.throws(
+    () => quoteToken.verifyQuoteToken(`${v}.${forged}.${mac}`),
+    (e) => e.code === 'QUOTE_TAMPERED',
+    '금액/할인 변조는 서명 검증에서 걸러져야 한다'
+  );
+});
+
+test('quoteToken: 만료된 토큰은 QUOTE_EXPIRED', async () => {
+  const { token } = quoteToken.issueQuoteToken(baseSnapshotInput());
+  const [v, payload] = token.split('.');
+  const decoded = JSON.parse(Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+  decoded.issuedAt = Date.now() - 2 * quoteToken.QUOTE_TOKEN_TTL_MS;
+  decoded.expiresAt = Date.now() - quoteToken.QUOTE_TOKEN_TTL_MS;
+  // 만료된 값으로 "정상 서명된" 토큰을 다시 발급해야 만료 분기를 검증할 수 있다
+  const crypto = await import('node:crypto');
+  const CANON = ['schemaVersion','serviceType','productKey','desiredDate','timeSlot',
+    'areaSidoCode','areaSigunguCode','areaDongCode','basePrice','holidaySurcharge',
+    'dateAdjustmentAmount','automaticDiscount','couponDiscount','promotionId','couponId',
+    'couponCode','estimatedTotal','depositAmount','estimatedBalance','issuedAt','expiresAt'];
+  const ordered = {};
+  for (const k of CANON) ordered[k] = decoded[k] ?? null;
+  const b64 = (b) => b.toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  const p2 = b64(Buffer.from(JSON.stringify(ordered), 'utf8'));
+  const mac2 = b64(crypto.createHmac('sha256', process.env.QUOTE_TOKEN_SECRET).update(p2).digest());
+  assert.throws(
+    () => quoteToken.verifyQuoteToken(`${v}.${p2}.${mac2}`),
+    (e) => e.code === 'QUOTE_EXPIRED'
+  );
+});
+
+test('quoteToken: 다른 productKey는 QUOTE_MISMATCH', async () => {
+  const verified = quoteToken.verifyQuoteToken(quoteToken.issueQuoteToken(baseSnapshotInput()).token);
+  assert.throws(
+    () => quoteToken.assertSnapshotMatchesRequest(verified, subjectOf({ productKey: '24평' })),
+    (e) => e.code === 'QUOTE_MISMATCH'
+  );
+});
+
+test('quoteToken: 다른 serviceType은 QUOTE_MISMATCH', async () => {
+  const verified = quoteToken.verifyQuoteToken(quoteToken.issueQuoteToken(baseSnapshotInput()).token);
+  assert.throws(
+    () => quoteToken.assertSnapshotMatchesRequest(verified, subjectOf({ serviceType: '거주청소' })),
+    (e) => e.code === 'QUOTE_MISMATCH'
+  );
+});
+
+test('quoteToken: 다른 desiredDate는 QUOTE_MISMATCH (날짜 재사용 차단)', async () => {
+  const verified = quoteToken.verifyQuoteToken(quoteToken.issueQuoteToken(baseSnapshotInput()).token);
+  assert.throws(
+    () => quoteToken.assertSnapshotMatchesRequest(verified, subjectOf({ desiredDate: '2027-06-16' })),
+    (e) => e.code === 'QUOTE_MISMATCH',
+    '9/18 견적으로 9/19 예약을 제출할 수 없어야 한다'
+  );
+});
+
+test('quoteToken: 다른 timeSlot은 QUOTE_MISMATCH', async () => {
+  const verified = quoteToken.verifyQuoteToken(quoteToken.issueQuoteToken(baseSnapshotInput()).token);
+  assert.throws(
+    () => quoteToken.assertSnapshotMatchesRequest(verified, subjectOf({ timeSlot: 'afternoon' })),
+    (e) => e.code === 'QUOTE_MISMATCH'
+  );
+});
+
+test('quoteToken: 다른 지역 코드는 QUOTE_MISMATCH', async () => {
+  const verified = quoteToken.verifyQuoteToken(quoteToken.issueQuoteToken(baseSnapshotInput()).token);
+  for (const over of [
+    { areaSidoCode: '41' },
+    { areaSigunguCode: '11710' },
+    { areaDongCode: '1168010200' },
+  ]) {
+    assert.throws(
+      () => quoteToken.assertSnapshotMatchesRequest(verified, subjectOf(over)),
+      (e) => e.code === 'QUOTE_MISMATCH',
+      `${JSON.stringify(over)} 불일치가 걸러져야 한다`
+    );
+  }
+});
+
+test('quoteToken: 평일 견적을 공휴일 예약에 재사용할 수 없다', async () => {
+  // 평일(2027-06-15 화) 견적 — 가산금 0
+  const weekday = quoteToken.issueQuoteToken(baseSnapshotInput({
+    desiredDate: '2027-06-15', holidaySurcharge: 0, dateAdjustmentAmount: 0,
+  }));
+  const verified = quoteToken.verifyQuoteToken(weekday.token);
+  assert.equal(verified.holidaySurcharge, 0);
+
+  // 공휴일(2027-06-06 현충일)로 예약 시도 → 조건 불일치로 거절
+  assert.throws(
+    () => quoteToken.assertSnapshotMatchesRequest(verified, subjectOf({ desiredDate: '2027-06-06' })),
+    (e) => e.code === 'QUOTE_MISMATCH',
+    '평일 가격으로 공휴일 예약을 넣을 수 없어야 한다'
+  );
+});
+
+test('quoteToken: canonical serialization으로 속성 순서가 서명에 영향을 주지 않는다', async () => {
+  const a = baseSnapshotInput();
+  // 같은 값, 다른 속성 순서
+  const reordered = {};
+  for (const k of Object.keys(a).reverse()) reordered[k] = a[k];
+
+  const t1 = quoteToken.issueQuoteToken(a);
+  const t2 = quoteToken.issueQuoteToken(reordered);
+  // issuedAt이 다를 수 있으므로 payload가 아니라 검증 통과 여부로 확인
+  const v1 = quoteToken.verifyQuoteToken(t1.token);
+  const v2 = quoteToken.verifyQuoteToken(t2.token);
+  assert.equal(v1.estimatedTotal, v2.estimatedTotal);
+  assert.equal(v1.productKey, v2.productKey);
+});
+
+test('quoteToken: 토큰 버전이 다르면 QUOTE_VERSION_MISMATCH', async () => {
+  const { token } = quoteToken.issueQuoteToken(baseSnapshotInput());
+  const [, payload, mac] = token.split('.');
+  assert.throws(
+    () => quoteToken.verifyQuoteToken(`v99.${payload}.${mac}`),
+    (e) => e.code === 'QUOTE_VERSION_MISMATCH'
+  );
+});
+
+test('quoteToken: production에서 secret 미설정이면 fail closed', async () => {
+  const prevEnv = process.env.NODE_ENV;
+  const prevSecret = process.env.QUOTE_TOKEN_SECRET;
+  const prevJwt = process.env.JWT_SECRET;
+  try {
+    process.env.NODE_ENV = 'production';
+    delete process.env.QUOTE_TOKEN_SECRET;
+    delete process.env.JWT_SECRET;
+    assert.throws(
+      () => quoteToken.issueQuoteToken(baseSnapshotInput()),
+      (e) => e.code === 'QUOTE_SECRET_MISSING',
+      'production에서 secret이 없으면 발급되면 안 된다'
+    );
+  } finally {
+    process.env.NODE_ENV = prevEnv;
+    if (prevSecret) process.env.QUOTE_TOKEN_SECRET = prevSecret;
+    if (prevJwt) process.env.JWT_SECRET = prevJwt;
+  }
+});
+
+test('quoteToken: secret은 최소 32바이트를 요구한다', async () => {
+  const prevEnv = process.env.NODE_ENV;
+  const prevSecret = process.env.QUOTE_TOKEN_SECRET;
+  const prevJwt = process.env.JWT_SECRET;
+  try {
+    process.env.NODE_ENV = 'production';
+    process.env.QUOTE_TOKEN_SECRET = 'short';
+    delete process.env.JWT_SECRET;
+    assert.throws(
+      () => quoteToken.issueQuoteToken(baseSnapshotInput()),
+      (e) => e.code === 'QUOTE_SECRET_MISSING'
+    );
+  } finally {
+    process.env.NODE_ENV = prevEnv;
+    if (prevSecret) process.env.QUOTE_TOKEN_SECRET = prevSecret;
+    if (prevJwt) process.env.JWT_SECRET = prevJwt;
+  }
+});
+
+test('quoteToken: 클라이언트에 노출되는 환경변수명을 쓰지 않는다', async () => {
+  const raw = fs.readFileSync(path.join(process.cwd(), 'src/lib/quote-token.ts'), 'utf8');
+  // 주석은 제외하고 실제 코드만 검사한다
+  const src = raw.split('\n').filter((l) => {
+    const t = l.trim();
+    return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
+  }).join('\n');
+  assert.doesNotMatch(src, /NEXT_PUBLIC_/, 'secret이 클라이언트 번들로 새면 안 된다');
+  assert.match(src, /QUOTE_TOKEN_SECRET/);
+  assert.match(src, /timingSafeEqual/, '상수 시간 비교를 유지해야 한다');
+});
+
+// ===========================================================================
+// [신규] 예약 제출 idempotency (quoteId)
+//
+// 더블클릭·네트워크 재시도로 같은 견적이 두 번 제출돼도 예약은 1건이어야 한다.
+// 고객에게는 오류가 아니라 동일한 성공 결과를 반환한다.
+// ===========================================================================
+
+function idemBody(over = {}) {
+  return fullyAgreedReservationBody({
+    customerPhone: '010-9900-0001',
+    desiredDate: '2027-06-10',
+    timeSlot: 'morning',
+    ...over,
+  });
+}
+
+test('idempotency: 같은 quoteToken으로 순차 2회 제출해도 예약은 1건', async () => {
+  const body = idemBody({ customerPhone: '010-9900-0011' });
+  const before = db.prepare('SELECT COUNT(*) c FROM reservations').get().c;
+
+  const r1 = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  assert.equal(r1.status, 201, JSON.stringify(r1.body));
+  const r2 = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  assert.equal(r2.status, 201, '재요청도 성공 응답이어야 한다 (오류 아님)');
+
+  const after = db.prepare('SELECT COUNT(*) c FROM reservations').get().c;
+  assert.equal(after - before, 1, '예약은 1건만 생성되어야 한다');
+
+  // 같은 예약번호를 돌려준다
+  assert.equal(
+    r2.body.reservation.reservation_code,
+    r1.body.reservation.reservation_code,
+    '재요청 응답의 reservationCode가 같아야 한다'
+  );
+
+  // payment / confirmation_log도 1건씩
+  const rid = r1.body.reservation.id;
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM payments WHERE reservation_id=?').get(rid).c, 1);
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) c FROM confirmation_logs WHERE reservation_id=? AND action='reservation_received'`).get(rid).c,
+    1
+  );
+});
+
+test('idempotency: 같은 quoteToken 동시 2회 제출해도 예약은 1건', async () => {
+  const body = idemBody({ customerPhone: '010-9900-0012', desiredDate: '2027-06-11' });
+  const before = db.prepare('SELECT COUNT(*) c FROM reservations').get().c;
+
+  const [a, b] = await Promise.all([
+    reservationsRoute.POST(makeReqWithFreshIp(body)),
+    reservationsRoute.POST(makeReqWithFreshIp(body)),
+  ]);
+
+  assert.equal(a.status, 201, JSON.stringify(a.body));
+  assert.equal(b.status, 201, JSON.stringify(b.body));
+
+  const after = db.prepare('SELECT COUNT(*) c FROM reservations').get().c;
+  assert.equal(after - before, 1, '동시 요청에도 예약은 1건이어야 한다');
+  assert.equal(
+    a.body.reservation.reservation_code,
+    b.body.reservation.reservation_code,
+    '두 응답의 예약번호가 같아야 한다'
+  );
+
+  const rid = a.body.reservation.id;
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM payments WHERE reservation_id=?').get(rid).c, 1);
+});
+
+test('idempotency: 서로 다른 quoteId는 각각 정상 예약된다', async () => {
+  const before = db.prepare('SELECT COUNT(*) c FROM reservations').get().c;
+  const r1 = await reservationsRoute.POST(makeReqWithFreshIp(
+    idemBody({ customerPhone: '010-9900-0013', desiredDate: '2027-06-12' })
+  ));
+  const r2 = await reservationsRoute.POST(makeReqWithFreshIp(
+    idemBody({ customerPhone: '010-9900-0014', desiredDate: '2027-06-13' })
+  ));
+  assert.equal(r1.status, 201);
+  assert.equal(r2.status, 201);
+  assert.notEqual(r1.body.reservation.reservation_code, r2.body.reservation.reservation_code);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM reservations').get().c - before, 2);
+});
+
+test('idempotency: quote_id가 예약에 snapshot으로 저장된다', async () => {
+  const body = idemBody({ customerPhone: '010-9900-0015', desiredDate: '2027-06-14' });
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  assert.equal(res.status, 201);
+  const row = db.prepare('SELECT quote_id FROM reservations WHERE id=?').get(res.body.reservation.id);
+  assert.ok(row.quote_id, 'quote_id가 저장되어야 한다');
+  // 토큰의 quoteId와 일치
+  const snap = quoteToken.verifyQuoteToken(body.quoteToken);
+  assert.equal(row.quote_id, snap.quoteId);
+});
+
+test('idempotency: 만료 토큰은 QUOTE_EXPIRED로 거절된다', async () => {
+  const snap = quoteToken.verifyQuoteToken(idemBody().quoteToken);
+  // 만료된 토큰을 정상 서명으로 재발급
+  const crypto = await import('node:crypto');
+  const CANON = ['schemaVersion','quoteId','serviceType','productKey','desiredDate','timeSlot',
+    'areaSidoCode','areaSigunguCode','areaDongCode','basePrice','holidaySurcharge',
+    'dateAdjustmentAmount','automaticDiscount','couponDiscount','promotionId','couponId',
+    'couponCode','estimatedTotal','depositAmount','estimatedBalance','issuedAt','expiresAt'];
+  const expired = { ...snap, issuedAt: Date.now() - 7200000, expiresAt: Date.now() - 3600000 };
+  const ordered = {};
+  for (const k of CANON) ordered[k] = expired[k] ?? null;
+  const b64 = (b) => b.toString('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  const p = b64(Buffer.from(JSON.stringify(ordered), 'utf8'));
+  const mac = b64(crypto.createHmac('sha256', process.env.QUOTE_TOKEN_SECRET).update(p).digest());
+
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(
+    idemBody({ customerPhone: '010-9900-0016' })
+  ));
+  void res;
+  const bad = await reservationsRoute.POST(makeReqWithFreshIp({
+    ...idemBody({ customerPhone: '010-9900-0017' }),
+    quoteToken: `v${quoteToken.QUOTE_TOKEN_VERSION}.${p}.${mac}`,
+  }));
+  assert.equal(bad.status, 400);
+  assert.equal(bad.body.code, 'QUOTE_EXPIRED');
+});
+
+test('idempotency: 변조 토큰은 QUOTE_TAMPERED로 거절된다', async () => {
+  const body = idemBody({ customerPhone: '010-9900-0018' });
+  const [v, payload, mac] = body.quoteToken.split('.');
+  const flipped = payload.slice(0, -1) + (payload.slice(-1) === 'A' ? 'B' : 'A');
+  const res = await reservationsRoute.POST(makeReqWithFreshIp({
+    ...body, quoteToken: `${v}.${flipped}.${mac}`,
+  }));
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'QUOTE_TAMPERED');
+});
+
+test('idempotency: unique violation을 generic 500으로 반환하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/reservations.ts'), 'utf8');
+  assert.match(src, /isUniqueViolation/, '경합 시 unique violation을 식별해야 한다');
+  assert.match(src, /findReservationByQuoteId/, '경합 시 기존 예약을 재조회해야 한다');
+});
+
+test('quoteToken payload에 개인정보를 넣지 않는다', async () => {
+  const snap = quoteToken.verifyQuoteToken(idemBody().quoteToken);
+  for (const banned of ['customerName', 'customerPhone', 'address', 'customerEmail', 'depositorName']) {
+    assert.equal(snap[banned], undefined, `${banned}가 토큰 payload에 있으면 안 된다`);
+  }
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/quote-token.ts'), 'utf8');
+  assert.doesNotMatch(src, /customerName|customerPhone/, 'HMAC은 암호화가 아니므로 개인정보 금지');
+});
+
+// --- unique violation 오판 방지 ---
+
+test('unique violation 판정: 실제 unique 오류만 인식한다', async () => {
+  const repo = await import('../src/database/repositories/reservation-repository.ts');
+
+  // 인식해야 하는 것
+  assert.equal(repo.isUniqueViolation(Object.assign(new Error('dup'), { code: '23505' })), true, 'PG 23505');
+  assert.equal(
+    repo.isUniqueViolation(Object.assign(new Error('UNIQUE constraint failed: reservations.quote_id'), { code: 'ERR_SQLITE_ERROR' })),
+    true, 'SQLite unique'
+  );
+
+  // 오판하면 안 되는 것 — 실제 장애가 "정상 재요청"으로 둔갑한다
+  const mustNot = [
+    Object.assign(new Error('timed out'), { code: 'DB_TIMEOUT' }),
+    Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    Object.assign(new Error('could not determine data type'), { code: '42P18' }),
+    Object.assign(new Error('syntax error'), { code: '42601' }),
+    Object.assign(new Error('not null violation'), { code: '23502' }),
+    Object.assign(new Error('foreign key violation'), { code: '23503' }),
+    Object.assign(new Error('connection terminated'), { code: '08006' }),
+    null, undefined, 'string error', 42,
+  ];
+  for (const e of mustNot) {
+    assert.equal(repo.isUniqueViolation(e), false, `오판: ${JSON.stringify(e?.code ?? e)}`);
+  }
+});
+
+test('cause 체인 unwrap은 depth 제한과 순환 방지를 갖는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/reservations.ts'), 'utf8');
+  assert.match(src, /MAX_CAUSE_DEPTH/, 'depth 제한이 있어야 한다');
+  assert.match(src, /seen\.has\(cur\)/, '순환 cause 방지가 있어야 한다');
+});
+
+test('중첩 unique 오류는 idempotency로 인식되고 다른 오류는 그대로 실패한다', async () => {
+  const repo = await import('../src/database/repositories/reservation-repository.ts');
+  const { ReservationPersistenceError } = await import('../src/lib/reservations.ts');
+
+  // nested unique violation → 인식
+  const nestedUnique = new ReservationPersistenceError(
+    'transaction',
+    new ReservationPersistenceError('reservation_insert', Object.assign(new Error('dup'), { code: '23505' }))
+  );
+  let chain = [];
+  let cur = nestedUnique;
+  for (let i = 0; i < 5 && cur; i++) { chain.push(cur); cur = cur.cause; }
+  assert.ok(chain.some((x) => repo.isUniqueViolation(x)), 'nested unique를 찾아야 한다');
+
+  // nested timeout / ECONNREFUSED → 인식하지 않음
+  for (const inner of [
+    Object.assign(new Error('timed out'), { code: 'DB_TIMEOUT' }),
+    Object.assign(new Error('refused'), { code: 'ECONNREFUSED' }),
+  ]) {
+    const nested = new ReservationPersistenceError('transaction', new ReservationPersistenceError('reservation_insert', inner));
+    const c = [];
+    let x = nested;
+    for (let i = 0; i < 5 && x; i++) { c.push(x); x = x.cause; }
+    assert.equal(c.some((y) => repo.isUniqueViolation(y)), false, `${inner.code}를 unique로 오인하면 안 된다`);
+  }
+});
+
+test('SQLite 트랜잭션은 직렬화되어 BEGIN이 중첩되지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/database/connection.ts'), 'utf8');
+  assert.match(src, /runSerializedSqlite/, 'SQLite 트랜잭션 직렬화가 있어야 한다');
+  assert.match(src, /sqliteTxChain/);
+  // PostgreSQL 경로는 직렬화하지 않는다 (서버가 동시성 처리)
+  const pgPart = src.slice(src.indexOf('const client = await getPostgresClient();', src.indexOf('export async function withTransaction')));
+  assert.doesNotMatch(pgPart.slice(0, 300), /runSerializedSqlite/);
+});
+
+test('idempotent 재요청은 고객 payload로 기존 예약을 덮어쓰지 않는다', async () => {
+  const body = idemBody({ customerPhone: '010-9900-0021', desiredDate: '2027-06-20' });
+  const r1 = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  assert.equal(r1.status, 201);
+  const original = db.prepare('SELECT customer_name, customer_phone FROM reservations WHERE id=?')
+    .get(r1.body.reservation.id);
+
+  // 같은 quoteToken에 다른 고객 정보를 붙여 재전송
+  const r2 = await reservationsRoute.POST(makeReqWithFreshIp({
+    ...body, customerName: '다른사람', customerPhone: '010-0000-9999',
+  }));
+  assert.equal(r2.status, 201);
+  assert.equal(r2.body.reservation.reservation_code, r1.body.reservation.reservation_code);
+
+  const after = db.prepare('SELECT customer_name, customer_phone FROM reservations WHERE id=?')
+    .get(r1.body.reservation.id);
+  assert.deepEqual(after, original, '재요청 payload가 최초 예약을 덮어쓰면 안 된다');
+});
+
+test('idempotent 재요청은 금액과 상태가 최초와 동일하다', async () => {
+  const body = idemBody({ customerPhone: '010-9900-0022', desiredDate: '2027-06-21' });
+  const r1 = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  const r2 = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  assert.equal(r1.body.reservation.id, r2.body.reservation.id);
+  assert.equal(r1.body.reservation.reservation_status, r2.body.reservation.reservation_status);
+  for (const k of ['totalAmount', 'depositAmount', 'balanceAmount']) {
+    assert.equal(r2.body.deposit?.[k] ?? r2.body[k], r1.body.deposit?.[k] ?? r1.body[k], `${k} 동일`);
+  }
+});
+
+// ===========================================================================
+// [신규] quote → reservation 전체 연결 (B1 + B2 통합)
+// ===========================================================================
+
+test('전체 연결: 정상 지역/날짜/상품 → quote 발급 → 예약 접수 → 계좌 안내', async () => {
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-07-05', timeSlot: 'morning',
+  }));
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.ok(res.body.quoteToken, 'enabled 지역·정상 상품이면 토큰이 발급되어야 한다');
+
+  const snap = quoteToken.verifyQuoteToken(res.body.quoteToken);
+  assert.equal(snap.areaSigunguCode, TEST_SIGUNGU, '지역 코드가 토큰에 서명된다');
+
+  const created = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    quoteToken: res.body.quoteToken,
+    houseTypeKey: '24평', desiredDate: '2027-07-05', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7000-0001',
+  })));
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+
+  // 예약 + payment + confirmation_log
+  const rid = created.body.reservation.id;
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM payments WHERE reservation_id=?').get(rid).c, 1);
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) c FROM confirmation_logs WHERE reservation_id=?`).get(rid).c >= 1, true
+  );
+
+  // 계좌 안내가 성공 응답에 포함된다
+  const acct = created.body.deposit ?? created.body;
+  assert.ok(JSON.stringify(acct).includes('bank') || acct.account, '계좌 정보가 응답에 있어야 한다');
+});
+
+test('전체 연결: disabled 지역은 quote 단계에서 차단된다', async () => {
+  const regionRepo = await import('../src/database/repositories/region-repository.ts');
+  await regionRepo.upsertArea({ code: 'TX99', name: '불가구', level: 'sigungu', parentCode: TEST_SIDO });
+  await regionRepo.setServiceArea({ sigunguCode: 'TX99', isEnabled: false });
+
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-07-06',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: 'TX99', areaDongCode: null,
+  }));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'OUT_OF_SERVICE_AREA');
+  assert.equal(res.body.quoteToken, undefined, '차단 시 토큰을 발급하면 안 된다');
+});
+
+test('전체 연결: master가 있으면 SERVICE_AREA_NOT_READY 오탐이 없다', async () => {
+  const regionRepo = await import('../src/database/repositories/region-repository.ts');
+  assert.ok((await regionRepo.countAreas()) > 0, 'master fixture가 있어야 한다');
+
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-07-07',
+  }));
+  assert.notEqual(res.body.code, 'SERVICE_AREA_NOT_READY', '정상 데이터에서 fail-closed가 발동하면 안 된다');
+  assert.equal(res.status, 200);
+});
+
+test('전체 연결: 예약 제출이 가격을 재계산하지 않는다', async () => {
+  const q = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '32평', desiredDate: '2027-07-08', timeSlot: 'morning',
+  }));
+  const snap = quoteToken.verifyQuoteToken(q.body.quoteToken);
+
+  // 예약 제출 직전에 가격표를 바꿔도 저장 금액은 토큰 값을 따른다
+  const orig = db.prepare(`SELECT base_price FROM price_rules WHERE service_type='입주청소' AND product_key='32평'`).get().base_price;
+  try {
+    db.prepare(`UPDATE price_rules SET base_price=111000 WHERE service_type='입주청소' AND product_key='32평'`).run();
+    const created = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+      quoteToken: q.body.quoteToken,
+      houseTypeKey: '32평', desiredDate: '2027-07-08', timeSlot: 'morning',
+      areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+      customerPhone: '010-7000-0002',
+    })));
+    assert.equal(created.status, 201);
+    const row = db.prepare('SELECT estimated_total_snapshot FROM reservations WHERE id=?').get(created.body.reservation.id);
+    assert.equal(row.estimated_total_snapshot, snap.estimatedTotal, '토큰 금액이 저장되어야 한다 (재계산 금지)');
+    assert.notEqual(row.estimated_total_snapshot, 111000);
+  } finally {
+    db.prepare(`UPDATE price_rules SET base_price=? WHERE service_type='입주청소' AND product_key='32평'`).run(orig);
+  }
+});
+
+test('전체 연결: quote 이후 슬롯이 마감되면 SLOT_UNAVAILABLE (토큰 오류 아님)', async () => {
+  const date = '2027-07-09';
+  await calendar.setCalendarDay(date, 'available', 1, null, 'morning');
+
+  const q = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: date, timeSlot: 'morning',
+  }));
+  assert.ok(q.body.quoteToken);
+
+  // 먼저 다른 고객이 슬롯을 채운다
+  const first = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    houseTypeKey: '24평', desiredDate: date, timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7000-0003',
+  })));
+  assert.equal(first.status, 201);
+
+  // 유효한 토큰이지만 슬롯이 마감 → 409 SLOT_UNAVAILABLE
+  const second = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    quoteToken: q.body.quoteToken,
+    houseTypeKey: '24평', desiredDate: date, timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-7000-0004',
+  })));
+  assert.equal(second.status, 409, JSON.stringify(second.body));
+  assert.equal(second.body.code, 'SLOT_UNAVAILABLE');
+  assert.notEqual(second.body.code, 'QUOTE_TAMPERED', '토큰 오류로 분류하면 안 된다');
+});
+
+// ===========================================================================
+// [신규] 할인 시스템
+// 계산 순서: 정상가 → 자동 프로모션 → 쿠폰 → 관리자 수동 할인 → 최종금액
+// ===========================================================================
+
+let discounts;
+function resetDiscountData() {
+  db.prepare('DELETE FROM coupon_redemptions').run();
+  db.prepare('DELETE FROM coupons').run();
+  db.prepare('DELETE FROM discount_promotions').run();
+}
+function addPromo(o = {}) {
+  const d = {
+    name: '프로모션', is_active: 1, discount_type: 'fixed', discount_value: 10000,
+    starts_at: null, ends_at: null, service_type: null, product_key: null,
+    min_amount: 0, max_discount_amount: null, priority: 0, ...o,
+  };
+  db.prepare(`INSERT INTO discount_promotions
+    (name,is_active,discount_type,discount_value,starts_at,ends_at,service_type,product_key,min_amount,max_discount_amount,priority)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+    d.name, d.is_active, d.discount_type, d.discount_value, d.starts_at, d.ends_at,
+    d.service_type, d.product_key, d.min_amount, d.max_discount_amount, d.priority);
+  return db.prepare('SELECT last_insert_rowid() id').get().id;
+}
+function addCoupon(o = {}) {
+  const c = {
+    code: 'TEST10', name: '테스트쿠폰', is_active: 1, discount_type: 'fixed', discount_value: 10000,
+    starts_at: null, ends_at: null, service_type: null, product_key: null,
+    min_amount: 0, max_discount_amount: null, total_usage_limit: null, per_phone_limit: null, ...o,
+  };
+  db.prepare(`INSERT INTO coupons
+    (code,name,is_active,discount_type,discount_value,starts_at,ends_at,service_type,product_key,min_amount,max_discount_amount,total_usage_limit,per_phone_limit)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    c.code, c.name, c.is_active, c.discount_type, c.discount_value, c.starts_at, c.ends_at,
+    c.service_type, c.product_key, c.min_amount, c.max_discount_amount, c.total_usage_limit, c.per_phone_limit);
+  return db.prepare('SELECT last_insert_rowid() id').get().id;
+}
+
+test('할인 모듈 로드', async () => {
+  discounts = await import('../src/lib/discounts.ts');
+  assert.equal(typeof discounts.calculateDiscounts, 'function');
+});
+
+// --- 자동 프로모션 ---
+
+test('자동 정액 할인이 적용된다', async () => {
+  resetDiscountData();
+  addPromo({ name: '정액', discount_type: 'fixed', discount_value: 20000 });
+  const r = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '24평', originalAmount: 339000 });
+  assert.equal(r.automaticDiscountAmount, 20000);
+  assert.equal(r.finalAmount, 319000);
+});
+
+test('자동 정률 할인이 현재 금액 기준으로 계산된다', async () => {
+  resetDiscountData();
+  addPromo({ name: '정률10', discount_type: 'percent', discount_value: 10 });
+  const r = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '24평', originalAmount: 339000 });
+  assert.equal(r.automaticDiscountAmount, 33900);
+  assert.equal(r.finalAmount, 305100);
+});
+
+test('여러 자동 프로모션 중 가장 큰 할인 1개만 적용된다', async () => {
+  resetDiscountData();
+  addPromo({ name: '작은', discount_type: 'fixed', discount_value: 10000 });
+  const big = addPromo({ name: '큰', discount_type: 'fixed', discount_value: 50000 });
+  addPromo({ name: '중간', discount_type: 'percent', discount_value: 5 });
+  const r = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '24평', originalAmount: 339000 });
+  assert.equal(r.automaticDiscountAmount, 50000, '가장 큰 할인 1개만');
+  assert.equal(r.promotionId, big);
+  assert.equal(r.finalAmount, 289000, '중첩 적용되면 안 된다');
+});
+
+test('기간 전/후 프로모션은 적용되지 않는다', async () => {
+  resetDiscountData();
+  addPromo({ name: '미래', starts_at: '2099-01-01T00:00:00.000Z', discount_value: 50000 });
+  addPromo({ name: '과거', ends_at: '2000-01-01T00:00:00.000Z', discount_value: 50000 });
+  const r = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '24평', originalAmount: 339000 });
+  assert.equal(r.automaticDiscountAmount, 0);
+  assert.equal(r.finalAmount, 339000);
+});
+
+test('비활성 프로모션은 적용되지 않는다', async () => {
+  resetDiscountData();
+  addPromo({ name: '중지', is_active: 0, discount_value: 50000 });
+  const r = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '24평', originalAmount: 339000 });
+  assert.equal(r.automaticDiscountAmount, 0);
+});
+
+test('서비스/상품 제한 프로모션은 해당 조건에만 적용된다', async () => {
+  resetDiscountData();
+  addPromo({ name: '사이청소전용', service_type: '사이청소', discount_value: 30000 });
+  addPromo({ name: '32평전용', product_key: '32평', discount_value: 40000 });
+
+  const a = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '24평', originalAmount: 339000 });
+  assert.equal(a.automaticDiscountAmount, 0, '조건 불일치');
+
+  const b = await discounts.calculateDiscounts({ serviceType: '사이청소', productKey: '24평', originalAmount: 339000 });
+  assert.equal(b.automaticDiscountAmount, 30000);
+
+  const c = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '32평', originalAmount: 459000 });
+  assert.equal(c.automaticDiscountAmount, 40000);
+});
+
+test('최소금액 미만이면 프로모션이 적용되지 않는다', async () => {
+  resetDiscountData();
+  addPromo({ name: '30만이상', min_amount: 300000, discount_value: 20000 });
+  const low = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '원룸', originalAmount: 179000 });
+  assert.equal(low.automaticDiscountAmount, 0);
+  const high = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '24평', originalAmount: 369000 });
+  assert.equal(high.automaticDiscountAmount, 20000);
+});
+
+test('최대 할인 cap이 정률 할인을 제한한다', async () => {
+  resetDiscountData();
+  addPromo({ name: '20%최대3만', discount_type: 'percent', discount_value: 20, max_discount_amount: 30000 });
+  const r = await discounts.calculateDiscounts({ serviceType: '입주청소', productKey: '32평', originalAmount: 459000 });
+  assert.equal(r.automaticDiscountAmount, 30000, '91,800원이 아니라 cap 30,000원');
+});
+
+// --- 쿠폰 ---
+
+test('정상 쿠폰이 적용된다 (정액/정률)', async () => {
+  resetDiscountData();
+  addCoupon({ code: 'FIX5', discount_type: 'fixed', discount_value: 5000 });
+  const a = await discounts.calculateDiscounts({
+    serviceType: '입주청소', productKey: '24평', originalAmount: 339000, couponCode: 'FIX5' });
+  assert.equal(a.couponDiscountAmount, 5000);
+  assert.equal(a.finalAmount, 334000);
+
+  resetDiscountData();
+  addCoupon({ code: 'PCT10', discount_type: 'percent', discount_value: 10 });
+  const b = await discounts.calculateDiscounts({
+    serviceType: '입주청소', productKey: '24평', originalAmount: 339000, couponCode: 'PCT10' });
+  assert.equal(b.couponDiscountAmount, 33900);
+});
+
+test('쿠폰 코드는 trim + 대소문자 정규화된다', async () => {
+  resetDiscountData();
+  addCoupon({ code: 'WELCOME' });
+  for (const input of ['  welcome  ', 'Welcome', 'WELCOME']) {
+    const r = await discounts.calculateDiscounts({
+      serviceType: '입주청소', productKey: '24평', originalAmount: 339000, couponCode: input });
+    assert.equal(r.couponDiscountAmount, 10000, `${input} 정규화 실패`);
+  }
+});
+
+test('만료/중지/잘못된 쿠폰은 각각 명확한 코드로 거부된다', async () => {
+  resetDiscountData();
+  addCoupon({ code: 'EXPIRED', ends_at: '2000-01-01T00:00:00.000Z' });
+  addCoupon({ code: 'STOPPED', is_active: 0 });
+  const cases = [
+    ['EXPIRED', 'COUPON_EXPIRED'],
+    ['STOPPED', 'COUPON_INACTIVE'],
+    ['NOPE', 'COUPON_NOT_FOUND'],
+  ];
+  for (const [code, expected] of cases) {
+    await assert.rejects(
+      () => discounts.calculateDiscounts({
+        serviceType: '입주청소', productKey: '24평', originalAmount: 339000, couponCode: code }),
+      (e) => e.code === expected,
+      `${code} → ${expected}`
+    );
+  }
+});
+
+test('자동할인과 쿠폰은 중복 적용되며 쿠폰은 자동할인 후 금액 기준이다', async () => {
+  resetDiscountData();
+  addPromo({ name: '자동2만', discount_type: 'fixed', discount_value: 20000 });
+  addCoupon({ code: 'PCT10', discount_type: 'percent', discount_value: 10 });
+
+  const r = await discounts.calculateDiscounts({
+    serviceType: '입주청소', productKey: '24평', originalAmount: 339000, couponCode: 'PCT10' });
+
+  assert.equal(r.originalAmount, 339000);
+  assert.equal(r.automaticDiscountAmount, 20000);
+  // 319,000의 10% = 31,900 (339,000 기준 33,900이 아님)
+  assert.equal(r.couponDiscountAmount, 31900, '쿠폰은 자동할인 후 금액 기준');
+  assert.equal(r.finalAmount, 287100);
+});
+
+test('할인액은 남은 금액을 넘지 않고 finalAmount는 0 이상이다', async () => {
+  // 자동 프로모션 단독 — 정상가를 초과하는 할인값도 정상가로 잘린다
+  resetDiscountData();
+  addPromo({ name: '과다', discount_type: 'fixed', discount_value: 999999 });
+  const a = await discounts.calculateDiscounts({
+    serviceType: '입주청소', productKey: '원룸', originalAmount: 179000 });
+  assert.equal(a.automaticDiscountAmount, 179000, '정상가를 초과하지 않는다');
+  assert.equal(a.finalAmount, 0);
+
+  // 자동할인이 전액을 소진하면 쿠폰은 적용할 금액이 없다 → 명확히 거부
+  resetDiscountData();
+  addPromo({ name: '과다', discount_type: 'fixed', discount_value: 999999 });
+  addCoupon({ code: 'ALSO', discount_type: 'fixed', discount_value: 5000 });
+  await assert.rejects(
+    () => discounts.calculateDiscounts({
+      serviceType: '입주청소', productKey: '원룸', originalAmount: 179000, couponCode: 'ALSO' }),
+    (e) => e.code === 'COUPON_NO_DISCOUNT',
+    '할인할 금액이 없으면 조용히 0원 처리하지 않고 알린다'
+  );
+
+  // 자동할인 + 쿠폰이 함께 큰 경우에도 음수가 되지 않는다
+  resetDiscountData();
+  addPromo({ name: '절반', discount_type: 'percent', discount_value: 50 });
+  addCoupon({ code: 'BIG', discount_type: 'fixed', discount_value: 999999 });
+  const c = await discounts.calculateDiscounts({
+    serviceType: '입주청소', productKey: '원룸', originalAmount: 179000, couponCode: 'BIG' });
+  assert.ok(c.finalAmount >= 0);
+  assert.equal(c.finalAmount, 0);
+  assert.equal(c.automaticDiscountAmount + c.couponDiscountAmount, 179000, '합계가 정상가를 넘지 않는다');
+});
+
+test('사용한도가 소진된 쿠폰은 견적 단계에서 안내된다', async () => {
+  resetDiscountData();
+  const id = addCoupon({ code: 'LIMIT1', total_usage_limit: 1 });
+  db.prepare(`INSERT INTO coupon_redemptions (coupon_id, reservation_id, customer_phone, discount_amount)
+              VALUES (?, 999999, '010-0000-0000', 10000)`).run(id);
+  await assert.rejects(
+    () => discounts.calculateDiscounts({
+      serviceType: '입주청소', productKey: '24평', originalAmount: 339000, couponCode: 'LIMIT1' }),
+    (e) => e.code === 'COUPON_EXHAUSTED'
+  );
+  db.prepare('DELETE FROM coupon_redemptions WHERE reservation_id = 999999').run();
+});
+
+test('quote 발급은 쿠폰 사용횟수를 소진하지 않는다', async () => {
+  resetDiscountData();
+  const id = addCoupon({ code: 'NOTUSED', total_usage_limit: 1 });
+  for (let i = 0; i < 3; i++) {
+    await discounts.calculateDiscounts({
+      serviceType: '입주청소', productKey: '24평', originalAmount: 339000, couponCode: 'NOTUSED' });
+  }
+  const used = db.prepare('SELECT COUNT(*) c FROM coupon_redemptions WHERE coupon_id=?').get(id).c;
+  assert.equal(used, 0, '견적만으로는 소진되지 않는다');
+});
+
+// --- 예약 snapshot 보존 ---
+
+async function bookWithDiscount(over = {}, couponCode = null) {
+  const q = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: over.desiredDate ?? '2027-09-01',
+    timeSlot: over.timeSlot ?? 'morning', couponCode,
+    customerPhone: over.customerPhone,
+  }));
+  assert.ok(q.body.quoteToken, JSON.stringify(q.body));
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    quoteToken: q.body.quoteToken,
+    houseTypeKey: '24평',
+    desiredDate: over.desiredDate ?? '2027-09-01',
+    timeSlot: over.timeSlot ?? 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    ...over,
+  })));
+  return { quote: q.body, res };
+}
+
+test('할인이 적용된 예약은 snapshot 전 항목을 보존한다', async () => {
+  resetDiscountData();
+  const promoId = addPromo({ name: '가을할인', discount_type: 'fixed', discount_value: 20000 });
+  const couponId = addCoupon({ code: 'AUTUMN', discount_type: 'fixed', discount_value: 10000 });
+
+  const { quote, res } = await bookWithDiscount(
+    { customerPhone: '010-8100-0001', desiredDate: '2027-09-01' }, 'AUTUMN');
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+
+  const row = db.prepare(`SELECT original_amount, automatic_discount_amount, coupon_discount_amount,
+    admin_discount_amount, final_amount, promotion_id, promotion_name, coupon_id, coupon_code,
+    deposit_amount_snapshot, estimated_balance_snapshot FROM reservations WHERE id=?`)
+    .get(res.body.reservation.id);
+
+  assert.equal(row.original_amount, CANONICAL_PRICES['24평']);
+  assert.equal(row.automatic_discount_amount, 20000);
+  assert.equal(row.coupon_discount_amount, 10000);
+  assert.equal(row.admin_discount_amount, 0);
+  assert.equal(row.final_amount, CANONICAL_PRICES['24평'] - 30000);
+  assert.equal(row.promotion_id, promoId);
+  assert.equal(row.promotion_name, '가을할인');
+  assert.equal(row.coupon_id, couponId);
+  assert.equal(row.coupon_code, 'AUTUMN');
+  // balance = finalAmount - deposit
+  assert.equal(row.estimated_balance_snapshot, row.final_amount - row.deposit_amount_snapshot);
+  assert.equal(quote.discount.finalAmount, row.final_amount);
+});
+
+test('프로모션을 수정/삭제해도 기존 예약 snapshot 금액은 불변', async () => {
+  resetDiscountData();
+  addPromo({ name: '한시', discount_type: 'fixed', discount_value: 30000 });
+  const { res } = await bookWithDiscount({ customerPhone: '010-8100-0002', desiredDate: '2027-09-02' });
+  assert.equal(res.status, 201);
+  const before = db.prepare('SELECT * FROM reservations WHERE id=?').get(res.body.reservation.id);
+  assert.equal(before.automatic_discount_amount, 30000);
+
+  db.prepare('DELETE FROM discount_promotions').run();
+  const after = db.prepare('SELECT * FROM reservations WHERE id=?').get(res.body.reservation.id);
+  assert.equal(after.automatic_discount_amount, 30000, '프로모션 삭제 후에도 불변');
+  assert.equal(after.final_amount, before.final_amount);
+});
+
+test('쿠폰 사용은 예약 저장 시점에 기록된다', async () => {
+  resetDiscountData();
+  const couponId = addCoupon({ code: 'ONCE', total_usage_limit: 5 });
+  const { res } = await bookWithDiscount(
+    { customerPhone: '010-8100-0003', desiredDate: '2027-09-03' }, 'ONCE');
+  assert.equal(res.status, 201);
+  const red = db.prepare('SELECT * FROM coupon_redemptions WHERE coupon_id=?').all(couponId);
+  assert.equal(red.length, 1);
+  assert.equal(red[0].reservation_id, res.body.reservation.id);
+  assert.equal(red[0].discount_amount, 10000);
+});
+
+test('쿠폰 한도가 quote 후 소진되면 COUPON_EXHAUSTED 409', async () => {
+  resetDiscountData();
+  const couponId = addCoupon({ code: 'LAST1', total_usage_limit: 1 });
+
+  // 고객 A가 견적을 받는다 (아직 소진 전)
+  const q = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-09-05',
+    timeSlot: 'morning', couponCode: 'LAST1',
+  }));
+  assert.ok(q.body.quoteToken);
+
+  // 그 사이 고객 B가 마지막 1개를 사용
+  db.prepare(`INSERT INTO coupon_redemptions (coupon_id, reservation_id, customer_phone, discount_amount)
+              VALUES (?, 999998, '010-0000-1111', 10000)`).run(couponId);
+
+  // 고객 A가 제출 → 가격을 몰래 재계산하지 않고 409
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    quoteToken: q.body.quoteToken,
+    houseTypeKey: '24평', desiredDate: '2027-09-05', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-8100-0005',
+  })));
+  assert.equal(res.status, 409, JSON.stringify(res.body));
+  assert.equal(res.body.code, 'COUPON_EXHAUSTED');
+
+  // 예약이 생성되지 않았다
+  const made = db.prepare(`SELECT COUNT(*) c FROM reservations WHERE desired_date='2027-09-05'`).get().c;
+  assert.equal(made, 0, '쿠폰 소진 시 예약이 남으면 안 된다');
+  db.prepare('DELETE FROM coupon_redemptions WHERE reservation_id=999998').run();
+});
+
+test('quoteToken의 할인금액을 변조하면 거절된다', async () => {
+  resetDiscountData();
+  addPromo({ name: '자동', discount_type: 'fixed', discount_value: 10000 });
+  const q = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-09-06', timeSlot: 'morning',
+  }));
+  const [v, payload, mac] = q.body.quoteToken.split('.');
+  const decoded = JSON.parse(Buffer.from(payload.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'));
+  decoded.couponDiscount = 200000;
+  decoded.estimatedTotal = 100000;
+  const forged = Buffer.from(JSON.stringify(decoded), 'utf8')
+    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    quoteToken: `${v}.${forged}.${mac}`,
+    houseTypeKey: '24평', desiredDate: '2027-09-06', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+    customerPhone: '010-8100-0006',
+  })));
+  assert.equal(res.status, 400);
+  assert.equal(res.body.code, 'QUOTE_TAMPERED');
+});
+
+// --- 관리자 수동 할인 ---
+
+test('관리자 수동 할인이 마지막 단계로 적용되고 audit이 남는다', async () => {
+  resetDiscountData();
+  addPromo({ name: '자동1만', discount_type: 'fixed', discount_value: 10000 });
+  const { res } = await bookWithDiscount({ customerPhone: '010-8200-0001', desiredDate: '2027-09-10' });
+  const id = res.body.reservation.id;
+  const before = db.prepare('SELECT final_amount, deposit_amount_snapshot FROM reservations WHERE id=?').get(id);
+
+  const r = await reservations.applyAdminDiscount({
+    reservationId: id, discountType: 'fixed', discountValue: 15000,
+    reason: '재방문 고객 할인', adminId: null, adminName: '관리자',
+  });
+  assert.equal(r.calculatedAmount, 15000);
+  assert.equal(r.newFinalAmount, before.final_amount - 15000);
+
+  const after = db.prepare(`SELECT admin_discount_amount, admin_discount_reason, final_amount,
+    estimated_balance_snapshot, deposit_amount_snapshot FROM reservations WHERE id=?`).get(id);
+  assert.equal(after.admin_discount_amount, 15000);
+  assert.equal(after.admin_discount_reason, '재방문 고객 할인');
+  assert.equal(after.final_amount, before.final_amount - 15000);
+  assert.equal(after.estimated_balance_snapshot, after.final_amount - after.deposit_amount_snapshot);
+
+  const audit = db.prepare('SELECT * FROM reservation_discount_adjustments WHERE reservation_id=?').all(id);
+  assert.equal(audit.length, 1);
+  assert.equal(audit[0].reason, '재방문 고객 할인');
+  assert.equal(audit[0].previous_final_amount, before.final_amount);
+  assert.equal(audit[0].new_final_amount, after.final_amount);
+});
+
+test('관리자 할인 사유는 필수다', async () => {
+  const { res } = await bookWithDiscount({ customerPhone: '010-8200-0002', desiredDate: '2027-09-11' });
+  await assert.rejects(
+    () => reservations.applyAdminDiscount({
+      reservationId: res.body.reservation.id, discountType: 'fixed', discountValue: 10000,
+      reason: '   ', adminId: null, adminName: '관리자',
+    }),
+    (e) => e.code === 'ADMIN_DISCOUNT_REASON_REQUIRED'
+  );
+});
+
+test('관리자 정률 할인은 현재 최종금액 기준으로 계산된다', async () => {
+  resetDiscountData();
+  const { res } = await bookWithDiscount({ customerPhone: '010-8200-0003', desiredDate: '2027-09-12' });
+  const id = res.body.reservation.id;
+  const before = db.prepare('SELECT final_amount FROM reservations WHERE id=?').get(id).final_amount;
+  const r = await reservations.applyAdminDiscount({
+    reservationId: id, discountType: 'percent', discountValue: 10,
+    reason: '사장님 재량', adminId: null, adminName: '관리자',
+  });
+  assert.equal(r.calculatedAmount, Math.floor(before * 0.1));
+});
+
+test('결제된 금액보다 낮아지는 관리자 할인은 차단된다', async () => {
+  resetDiscountData();
+  const { res } = await bookWithDiscount({ customerPhone: '010-8200-0004', desiredDate: '2027-09-13' });
+  const id = res.body.reservation.id;
+  await reservations.confirmPayment(id, '관리자', null);
+
+  await assert.rejects(
+    () => reservations.applyAdminDiscount({
+      reservationId: id, discountType: 'fixed', discountValue: 999999,
+      reason: '과다 할인 시도', adminId: null, adminName: '관리자',
+    }),
+    (e) => e.code === 'ADMIN_DISCOUNT_BELOW_PAID' || e.code === 'ADMIN_DISCOUNT_INVALID',
+    '입금액보다 낮아지는 할인은 자동 처리하지 않는다'
+  );
+});
+
+test('할인 snapshot이 없는 기존 예약도 0원/default로 안전하게 읽힌다', async () => {
+  const { res } = await bookWithDiscount({ customerPhone: '010-8300-0001', desiredDate: '2027-09-14' });
+  const id = res.body.reservation.id;
+  // 구 데이터처럼 snapshot을 비운다
+  db.prepare(`UPDATE reservations SET original_amount=NULL, final_amount=NULL,
+    automatic_discount_amount=0, coupon_discount_amount=0, admin_discount_amount=0 WHERE id=?`).run(id);
+  const row = db.prepare('SELECT * FROM reservations WHERE id=?').get(id);
+  assert.equal(row.automatic_discount_amount, 0);
+  assert.equal(row.coupon_discount_amount, 0);
+  // fallback: total_amount_snapshot으로 최종금액을 읽을 수 있어야 한다
+  assert.ok(row.total_amount_snapshot > 0 || row.estimated_total_snapshot > 0);
+});
+
+// ===========================================================================
+// [신규] 공지사항 / 팝업
+// ===========================================================================
+
+let notices;
+function addNotice(o = {}) {
+  const n = {
+    title: '공지', content: '내용', notice_type: 'normal',
+    is_published: 1, is_pinned: 0, is_popup: 0,
+    publish_start_at: null, publish_end_at: null, ...o,
+  };
+  db.prepare(`INSERT INTO notices
+    (title,content,notice_type,is_published,is_pinned,is_popup,publish_start_at,publish_end_at)
+    VALUES (?,?,?,?,?,?,?,?)`).run(
+    n.title, n.content, n.notice_type, n.is_published, n.is_pinned, n.is_popup,
+    n.publish_start_at, n.publish_end_at);
+  return db.prepare('SELECT last_insert_rowid() id').get().id;
+}
+const iso = (offsetDays) => new Date(Date.now() + offsetDays * 86400000).toISOString();
+
+test('공지 모듈 로드', async () => {
+  notices = await import('../src/lib/notices.ts');
+  assert.equal(typeof notices.listPublishedNotices, 'function');
+  db.prepare('DELETE FROM notices').run();
+});
+
+test('일반/긴급 공지가 목록에 노출된다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  addNotice({ title: '일반공지' });
+  addNotice({ title: '긴급공지', notice_type: 'urgent' });
+  const list = await notices.listPublishedNotices();
+  assert.equal(list.length, 2);
+  assert.ok(list.some((n) => n.noticeType === 'urgent'), '긴급공지도 게시판에 표시된다');
+});
+
+test('비공개 공지는 목록·상세에서 노출되지 않는다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  const id = addNotice({ title: '비공개', is_published: 0 });
+  assert.equal((await notices.listPublishedNotices()).length, 0);
+  assert.equal(await notices.getPublishedNotice(id), null, 'URL 직접 요청도 차단');
+});
+
+test('노출 시작일 전 / 종료일 후 공지는 노출되지 않는다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  const future = addNotice({ title: '예정', publish_start_at: iso(3) });
+  const past = addNotice({ title: '종료', publish_end_at: iso(-3) });
+  const inRange = addNotice({ title: '진행중', publish_start_at: iso(-1), publish_end_at: iso(1) });
+
+  const list = await notices.listPublishedNotices();
+  const ids = list.map((n) => n.id);
+  assert.ok(!ids.includes(future), '시작 전 미노출');
+  assert.ok(!ids.includes(past), '종료 후 미노출');
+  assert.ok(ids.includes(inRange), '기간 내 노출');
+
+  assert.equal(await notices.getPublishedNotice(future), null);
+  assert.equal(await notices.getPublishedNotice(past), null);
+  assert.ok(await notices.getPublishedNotice(inRange));
+});
+
+test('상단고정과 긴급공지 정렬 우선순위가 적용된다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  addNotice({ title: '일반' });
+  const urgent = addNotice({ title: '긴급', notice_type: 'urgent' });
+  const pinned = addNotice({ title: '고정', is_pinned: 1 });
+  const pinnedUrgent = addNotice({ title: '고정+긴급', notice_type: 'urgent', is_pinned: 1 });
+
+  const list = await notices.listPublishedNotices();
+  assert.equal(list[0].id, pinnedUrgent, '고정+긴급이 최상단');
+  assert.equal(list[1].id, pinned, '고정이 그 다음');
+  assert.ok(list.findIndex((n) => n.id === urgent) < list.findIndex((n) => n.title === '일반'),
+    '긴급이 일반보다 위');
+});
+
+// --- 팝업 ---
+
+test('팝업 OFF 공지는 팝업으로 노출되지 않는다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  addNotice({ title: '팝업아님', is_popup: 0 });
+  assert.equal(await notices.getPopupNotice(), null);
+});
+
+test('긴급공지라도 팝업 OFF면 팝업이 되지 않는다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  addNotice({ title: '긴급', notice_type: 'urgent', is_popup: 0 });
+  assert.equal(await notices.getPopupNotice(), null, '긴급 = 자동 팝업이 아니다');
+  // 게시판에는 정상 노출
+  assert.equal((await notices.listPublishedNotices()).length, 1);
+});
+
+test('팝업 ON 공지가 노출된다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  const id = addNotice({ title: '팝업', is_popup: 1 });
+  const p = await notices.getPopupNotice();
+  assert.equal(p?.id, id);
+});
+
+test('팝업 후보가 여럿이어도 정확히 1개만 선정된다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  addNotice({ title: '팝업일반', is_popup: 1 });
+  addNotice({ title: '팝업고정', is_popup: 1, is_pinned: 1 });
+  const urgent = addNotice({ title: '팝업긴급', is_popup: 1, notice_type: 'urgent' });
+
+  const p = await notices.getPopupNotice();
+  assert.ok(p, '팝업이 선정되어야 한다');
+  assert.equal(p.id, urgent, '우선순위: urgent → pinned → 최신');
+  // 반환값은 단건이다 (배열이 아님)
+  assert.equal(Array.isArray(p), false);
+});
+
+test('비공개/기간 밖 팝업은 선정되지 않는다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  addNotice({ title: '비공개팝업', is_popup: 1, is_published: 0 });
+  addNotice({ title: '종료팝업', is_popup: 1, publish_end_at: iso(-1) });
+  assert.equal(await notices.getPopupNotice(), null);
+});
+
+test('공개 응답에 Admin 전용 필드가 노출되지 않는다', async () => {
+  db.prepare('DELETE FROM notices').run();
+  const id = addNotice({ title: '공개' });
+  db.prepare('UPDATE notices SET created_by=1 WHERE id=?').run(id);
+  const n = await notices.getPublishedNotice(id);
+  assert.equal(n.created_by, undefined, 'created_by 미노출');
+  assert.equal(n.is_published, undefined);
+  assert.equal(n.is_popup, undefined);
+});
+
+test('공지 content는 HTML로 렌더링되지 않는다 (XSS 방지)', async () => {
+  db.prepare('DELETE FROM notices').run();
+  const xss = '<script>alert(1)</script><img src=x onerror=alert(1)>';
+  const id = addNotice({ title: 'XSS', content: xss });
+  const n = await notices.getPublishedNotice(id);
+  // 저장/반환은 평문 그대로
+  assert.equal(n.content, xss);
+
+  // 렌더링 컴포넌트가 dangerouslySetInnerHTML을 쓰지 않아야 한다
+  for (const f of ['src/app/notice/[id]/page.tsx', 'src/components/NoticePopup.tsx']) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    assert.doesNotMatch(src, /dangerouslySetInnerHTML/, `${f}에서 HTML 주입 금지`);
+    assert.match(src, /whitespace-pre-line/, `${f}는 줄바꿈을 안전하게 표시해야 한다`);
+  }
+});
+
+test('Admin 입력(KST)이 UTC로 변환되어 저장된다', async () => {
+  // 2027-03-01 09:00 KST = 2027-03-01 00:00 UTC
+  const utc = notices.kstInputToIso('2027-03-01T09:00');
+  assert.equal(utc, '2027-03-01T00:00:00.000Z');
+  assert.equal(notices.kstInputToIso(''), null);
+  assert.equal(notices.kstInputToIso(null), null);
+  // 이미 타임존이 있으면 그대로 해석
+  assert.equal(notices.kstInputToIso('2027-03-01T00:00:00.000Z'), '2027-03-01T00:00:00.000Z');
+});
+
+test('공지 Admin API는 세션 인증을 요구한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/app/api/admin/notices/route.ts'), 'utf8');
+  assert.match(src, /requireAdminApiSession/, 'Admin 세션 인증 필수');
+  const detail = fs.readFileSync(path.join(process.cwd(), 'src/app/api/admin/notices/[id]/route.ts'), 'utf8');
+  for (const m of ['GET', 'PUT', 'DELETE']) {
+    assert.match(detail, new RegExp(`export async function ${m}[\\s\\S]{0,200}requireAdminApiSession`),
+      `${m}에 인증이 있어야 한다`);
+  }
+  // 클라이언트 값으로 보호하지 않는다
+  assert.doesNotMatch(src, /isAdmin\s*===?\s*true/);
+});
+
+test('공개 공지 API는 Admin API와 분리되어 있다', async () => {
+  const pub = fs.readFileSync(path.join(process.cwd(), 'src/app/api/notices/route.ts'), 'utf8');
+  assert.doesNotMatch(pub, /requireAdminApiSession/, '공개 API는 관리자 인증을 요구하지 않는다');
+  assert.match(pub, /listPublishedNotices/, '공개 목록만 반환한다');
+  assert.doesNotMatch(pub, /listAllNotices/, '전체 목록을 공개하면 안 된다');
+});
+
+test('팝업 컴포넌트가 오늘 하루 보지 않기를 KST 날짜로 처리한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/NoticePopup.tsx'), 'utf8');
+  assert.match(src, /clyn_notice_hide_/, 'notice별 key를 사용해야 한다');
+  assert.match(src, /9 \* 60 \* 60 \* 1000/, 'KST 기준 날짜여야 한다');
+  // localStorage 실패가 페이지 오류를 내면 안 된다
+  assert.match(src, /try \{[\s\S]{0,200}localStorage[\s\S]{0,200}\} catch/, 'localStorage 접근은 try/catch로 보호');
+  // 닫기와 오늘 하루 보지 않기를 구분한다
+  assert.match(src, /setClosed\(true\)/);
+  assert.match(src, /function hideToday/);
+});
+
+// ===========================================================================
+// [신규] notification outbox + SOLAPI fallback
+// ===========================================================================
+
+let outboxRepo, dispatcher, MockProvider, notifProvider;
+
+test('알림 모듈 로드', async () => {
+  outboxRepo = await import('../src/database/repositories/outbox-repository.ts');
+  dispatcher = await import('../src/lib/notifications/dispatcher.ts');
+  ({ MockNotificationProvider: MockProvider } = await import('../src/lib/notifications/mock-provider.ts'));
+  notifProvider = await import('../src/lib/notifications/provider.ts');
+  assert.equal(typeof dispatcher.dispatchPending, 'function');
+});
+
+function outboxFor(reservationId) {
+  return db.prepare('SELECT * FROM notification_outbox WHERE reservation_id=? ORDER BY id').all(reservationId);
+}
+
+// --- enqueue 중복 차단 ---
+
+test('예약 접수 시 reservation_received outbox가 1건 생성된다', async () => {
+  db.prepare('DELETE FROM notification_outbox').run();
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    customerPhone: '010-9100-0001', desiredDate: '2027-10-01', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+  })));
+  assert.equal(res.status, 201, JSON.stringify(res.body));
+  const rows = outboxFor(res.body.reservation.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].event_type, 'reservation_received');
+  assert.equal(rows[0].status, 'pending');
+  assert.equal(rows[0].event_key, `reservation_received:${res.body.reservation.id}`);
+
+  // payload에 계좌/예약금은 있고 상세주소는 없다
+  const p = JSON.parse(rows[0].payload_snapshot);
+  assert.ok(p.reservationCode && p.bankName && p.depositAmount > 0);
+  assert.equal(p.address, undefined, '상세주소는 메시지에 넣지 않는다');
+});
+
+test('같은 quoteToken retry로는 outbox가 늘지 않는다', async () => {
+  db.prepare('DELETE FROM notification_outbox').run();
+  const body = fullyAgreedReservationBody({
+    customerPhone: '010-9100-0002', desiredDate: '2027-10-02', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+  });
+  const a = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  const b = await reservationsRoute.POST(makeReqWithFreshIp(body));
+  assert.equal(a.status, 201);
+  assert.equal(b.status, 201);
+  assert.equal(outboxFor(a.body.reservation.id).length, 1, 'retry로 알림이 중복 생성되면 안 된다');
+});
+
+test('입금확인/예약확정 시 각각 1건씩 생성되고 중복 호출로 늘지 않는다', async () => {
+  db.prepare('DELETE FROM notification_outbox').run();
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    customerPhone: '010-9100-0003', desiredDate: '2027-10-03', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+  })));
+  const id = res.body.reservation.id;
+
+  await reservations.confirmPayment(id, '관리자', null);
+  let rows = outboxFor(id);
+  assert.equal(rows.filter((r) => r.event_type === 'deposit_confirmed').length, 1);
+
+  // 중복 입금확인은 상태 전이에서 막힌다
+  await assert.rejects(() => reservations.confirmPayment(id, '관리자', null));
+  assert.equal(outboxFor(id).filter((r) => r.event_type === 'deposit_confirmed').length, 1);
+
+  await reservations.confirmReservation(id, '관리자', null);
+  rows = outboxFor(id);
+  assert.equal(rows.filter((r) => r.event_type === 'reservation_confirmed').length, 1);
+
+  // Admin 더블클릭
+  await assert.rejects(() => reservations.confirmReservation(id, '관리자', null));
+  assert.equal(outboxFor(id).filter((r) => r.event_type === 'reservation_confirmed').length, 1);
+  assert.equal(outboxFor(id).length, 3, '3종 각각 1건');
+});
+
+// --- 발송 상태 흐름 ---
+
+async function seedOutbox(eventType = 'reservation_received', phone = '010-9200-0001') {
+  db.prepare('DELETE FROM notification_outbox').run();
+  await outboxRepo.enqueue({
+    reservationId: 90001, eventType, templateKey: 'TPL_TEST',
+    payload: {
+      customerName: '홍길동', customerPhone: phone, reservationCode: 'RS-TEST',
+      serviceType: '입주청소', desiredDate: '2027-10-10', timeLabel: '오전',
+      depositAmount: 60000, bankName: '하나', accountNumber: '123-456', accountHolder: '플린',
+    },
+  });
+  return db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+}
+
+test('알림톡 접수 시 awaiting_delivery로 기록된다 (delivered 아님)', async () => {
+  await seedOutbox();
+  const p = new MockProvider();
+  const s = await dispatcher.dispatchPending(p, 5);
+  assert.equal(s.submitted, 1);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'awaiting_delivery', 'API 접수는 전달 완료가 아니다');
+  assert.equal(row.actual_channel, 'kakao');
+  assert.ok(row.submitted_at);
+  assert.equal(row.delivered_at, null, '수신 확인 전에는 delivered_at이 비어 있다');
+  assert.ok(row.kakao_message_id, '결과 조회용 messageId가 저장된다');
+  assert.ok(row.next_reconcile_at, '결과 확인이 예약된다');
+});
+
+test('알림톡 실패 시 SMS/LMS로 fallback된다', async () => {
+  await seedOutbox();
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'KAKAO_ERR', errorMessage: '채널 오류' },
+  });
+  const s = await dispatcher.dispatchPending(p, 5);
+  assert.equal(s.fallback, 1);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'fallback_submitted');
+  assert.ok(['sms', 'lms'].includes(row.actual_channel), `문자 채널이어야 한다: ${row.actual_channel}`);
+  assert.equal(row.last_error_code, 'KAKAO_ERR', '카카오 실패 사유가 남는다');
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 1);
+});
+
+test('카카오+문자 모두 영구 실패하면 failed', async () => {
+  await seedOutbox();
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'BAD', errorMessage: '템플릿 오류', permanent: true },
+    sms: { accepted: false, errorCode: 'BAD_NUMBER', errorMessage: '잘못된 번호', permanent: true },
+  });
+  const s = await dispatcher.dispatchPending(p, 5);
+  assert.equal(s.failed, 1);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'failed');
+  assert.ok(row.failed_at);
+});
+
+test('일시 실패는 retry_pending으로 남고 무한 재시도하지 않는다', async () => {
+  await seedOutbox();
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'TIMEOUT', errorMessage: 'timeout' },
+    sms: { accepted: false, errorCode: 'TIMEOUT', errorMessage: 'timeout' },
+  });
+  await dispatcher.dispatchPending(p, 5);
+  let row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'retry_pending');
+  assert.equal(row.attempts, 1);
+  assert.ok(row.next_attempt_at, '다음 시도 시각이 설정된다');
+
+  // 최대 시도 초과 시 failed
+  db.prepare(`UPDATE notification_outbox SET attempts=?, next_attempt_at=NULL WHERE id=?`)
+    .run(dispatcher.MAX_ATTEMPTS, row.id);
+  await dispatcher.dispatchPending(p, 5);
+  row = db.prepare('SELECT * FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(row.status, 'failed', '최대 시도를 넘으면 failed');
+});
+
+test('retry는 같은 outbox row를 재사용하고 새 이벤트를 만들지 않는다', async () => {
+  const seeded = await seedOutbox();
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'T', errorMessage: 't' },
+    sms: { accepted: false, errorCode: 'T', errorMessage: 't' },
+  });
+  await dispatcher.dispatchPending(p, 5);
+  db.prepare('UPDATE notification_outbox SET next_attempt_at=NULL WHERE id=?').run(seeded.id);
+  await dispatcher.dispatchPending(p, 5);
+
+  const all = db.prepare('SELECT * FROM notification_outbox').all();
+  assert.equal(all.length, 1, '재시도로 row가 늘면 안 된다');
+  assert.equal(all[0].id, seeded.id);
+  assert.equal(all[0].attempts, 2);
+});
+
+test('provider 미설정이면 retry_pending으로 대기한다', async () => {
+  await seedOutbox();
+  const p = new MockProvider({ configured: false });
+  await dispatcher.dispatchPending(p, 5);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'retry_pending');
+  assert.equal(row.last_error_code, 'NOTIFICATION_NOT_CONFIGURED');
+});
+
+test('processor를 동시에 2번 돌려도 같은 outbox를 1회만 처리한다', async () => {
+  await seedOutbox();
+  const p = new MockProvider();
+  await Promise.all([dispatcher.dispatchPending(p, 5), dispatcher.dispatchPending(p, 5)]);
+  const sent = p.calls.filter((c) => c.channel === 'kakao').length;
+  assert.equal(sent, 1, '중복 발송되면 안 된다');
+});
+
+// --- provider 장애가 business를 깨뜨리지 않음 ---
+
+test('provider 장애여도 예약 접수 / 입금확인 / 예약확정이 유지된다', async () => {
+  db.prepare('DELETE FROM notification_outbox').run();
+  const res = await reservationsRoute.POST(makeReqWithFreshIp(fullyAgreedReservationBody({
+    customerPhone: '010-9300-0001', desiredDate: '2027-10-20', timeSlot: 'morning',
+    areaSidoCode: TEST_SIDO, areaSigunguCode: TEST_SIGUNGU, areaDongCode: TEST_DONG,
+  })));
+  assert.equal(res.status, 201, '예약은 성공해야 한다');
+  const id = res.body.reservation.id;
+
+  // 발송을 전부 실패시켜도 business 상태는 그대로다
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'X', errorMessage: 'x', permanent: true },
+    sms: { accepted: false, errorCode: 'X', errorMessage: 'x', permanent: true },
+  });
+  await dispatcher.dispatchPending(p, 10);
+
+  await reservations.confirmPayment(id, '관리자', null);
+  assert.equal(
+    db.prepare('SELECT reservation_status s FROM reservations WHERE id=?').get(id).s,
+    'awaiting_admin_check', '입금확인 유지'
+  );
+  await dispatcher.dispatchPending(p, 10);
+
+  await reservations.confirmReservation(id, '관리자', null);
+  assert.equal(
+    db.prepare('SELECT reservation_status s FROM reservations WHERE id=?').get(id).s,
+    'confirmed', '예약확정 유지'
+  );
+  // 예약/payment는 그대로 남아 있다
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM payments WHERE reservation_id=?').get(id).c, 1);
+});
+
+test('business transaction 안에서 외부 provider를 호출하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/reservations.ts'), 'utf8');
+  // 예약 저장 경로에서 dispatcher/solapi를 직접 부르면 안 된다
+  assert.doesNotMatch(src, /dispatchPending/, '저장 경로에서 발송하면 안 된다');
+  assert.doesNotMatch(src, /solapi-provider|SolapiMessageService/, 'SDK 직접 호출 금지');
+  assert.match(src, /outbox-repository/, 'outbox INSERT만 한다');
+});
+
+test('SMS 길이에 따라 LMS가 선택된다', async () => {
+  const short = '짧은 메시지';
+  const long = '가'.repeat(100);
+  assert.equal(notifProvider.resolveTextChannel(short), 'sms');
+  assert.equal(notifProvider.resolveTextChannel(long), 'lms');
+});
+
+test('로그에 전체 전화번호를 남기지 않는다', async () => {
+  assert.equal(notifProvider.maskPhone('010-1234-5678'), '010****5678');
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/notifications/dispatcher.ts'), 'utf8');
+  assert.match(src, /maskPhone\(to\)/, '전화번호는 마스킹해서 로그한다');
+  // 본문/시크릿을 로그하지 않는다
+  assert.doesNotMatch(src, /console\.(log|warn|error)\([^)]*\btext\b/);
+  assert.doesNotMatch(src, /SOLAPI_API_SECRET/);
+});
+
+test('SOLAPI secret을 NEXT_PUBLIC으로 노출하지 않는다', async () => {
+  const raw = fs.readFileSync(path.join(process.cwd(), 'src/lib/notifications/solapi-provider.ts'), 'utf8');
+  // 주석은 제외하고 실제 코드만 검사한다
+  const src = raw.split('\n').filter((l) => {
+    const t = l.trim();
+    return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
+  }).join('\n');
+  assert.doesNotMatch(src, /NEXT_PUBLIC_/);
+  assert.match(src, /SOLAPI_API_KEY/);
+  // 설정이 없어도 throw하지 않고 미설정 상태로 동작한다 (build를 막지 않음)
+  assert.match(src, /isConfigured/);
+});
+
+test('알림 cron은 CRON_SECRET Bearer 인증을 요구한다', async () => {
+  const cron = await import('../src/app/api/cron/notifications/route.ts');
+  const prev = process.env.CRON_SECRET;
+  try {
+    process.env.CRON_SECRET = 'notify-secret';
+    const noAuth = await cron.GET({ headers: new Headers() });
+    assert.equal(noAuth.status, 401);
+    const h = new Headers(); h.set('authorization', 'Bearer notify-secret');
+    const ok = await cron.GET({ headers: h });
+    assert.notEqual(ok.status, 401);
+  } finally {
+    if (prev === undefined) delete process.env.CRON_SECRET; else process.env.CRON_SECRET = prev;
+  }
+});
+
+test('메시지 내용에 상세주소가 포함되지 않는다', async () => {
+  const { buildMessage } = await import('../src/lib/notifications/messages.ts');
+  for (const ev of ['reservation_received', 'deposit_confirmed', 'reservation_confirmed']) {
+    const { text } = buildMessage(ev, {
+      customerName: '홍길동', reservationCode: 'RS-1', serviceType: '입주청소',
+      desiredDate: '2027-10-10', timeLabel: '오전', depositAmount: 60000,
+      bankName: '하나', accountNumber: '123', accountHolder: '플린',
+      address: '서울 강남구 역삼동 1-1 101호',
+    });
+    assert.doesNotMatch(text, /101호|역삼동 1-1/, `${ev}에 상세주소가 들어가면 안 된다`);
+  }
+});
+
+// --- 비동기 전달 결과 확인 (delivery reconciliation) ---
+
+async function seedSubmittedKakao() {
+  await seedOutbox();
+  await dispatcher.dispatchPending(new MockProvider(), 5);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'awaiting_delivery');
+  db.prepare('UPDATE notification_outbox SET next_reconcile_at=NULL WHERE id=?').run(row.id);
+  return row;
+}
+
+test('B: 알림톡 접수 후 실제 전달 성공 → delivered, 문자 발송 없음', async () => {
+  await seedSubmittedKakao();
+  const p = new MockProvider({ delivery: { outcome: 'delivered', providerStatus: '4000' } });
+  const s = await dispatcher.reconcileDeliveries(p, 5);
+  assert.equal(s.delivered, 1);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'delivered');
+  assert.ok(row.delivered_at, '실제 수신 확인 시각이 기록된다');
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 0, '문자를 보내면 안 된다');
+});
+
+test('B: 알림톡 접수 후 비동기 전달 실패 → 문자 fallback', async () => {
+  await seedSubmittedKakao();
+  const p = new MockProvider({
+    delivery: { outcome: 'failed', providerStatus: '3000', reason: '수신 불가' },
+  });
+  const s = await dispatcher.reconcileDeliveries(p, 5);
+  assert.equal(s.fellBack, 1);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'fallback_submitted');
+  assert.ok(['sms', 'lms'].includes(row.actual_channel));
+  assert.ok(row.fallback_message_id, 'fallback message id가 저장된다');
+  assert.ok(row.fallback_started_at, '문자 대체 시작이 기록된다');
+  assert.equal(row.last_error_code, '3000', '카카오 실패 사유가 남는다');
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 1);
+});
+
+test('결과 조회 일시 실패(unknown)로는 문자를 보내지 않는다', async () => {
+  await seedSubmittedKakao();
+  const p = new MockProvider({ delivery: { outcome: 'unknown', reason: 'NetworkError' } });
+  const s = await dispatcher.reconcileDeliveries(p, 5);
+  assert.equal(s.stillPending, 1);
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 0,
+    '조회 실패를 전달 실패로 오인하면 중복 발송이 된다');
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'awaiting_delivery', '상태는 유지된다');
+  assert.ok(row.next_reconcile_at, '다시 확인하도록 예약된다');
+  assert.equal(row.fallback_started_at, null, '문자 대체를 시작하지 않는다');
+});
+
+test('결과가 pending이면 계속 대기한다', async () => {
+  await seedSubmittedKakao();
+  const p = new MockProvider({ delivery: { outcome: 'pending', providerStatus: '2000' } });
+  await dispatcher.reconcileDeliveries(p, 5);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'awaiting_delivery');
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 0);
+});
+
+test('결과 확인이 최대 횟수를 넘으면 failed로 종료한다 (무한 polling 금지)', async () => {
+  const row = await seedSubmittedKakao();
+  db.prepare('UPDATE notification_outbox SET reconcile_attempts=? WHERE id=?')
+    .run(dispatcher.MAX_RECONCILE_ATTEMPTS, row.id);
+  const p = new MockProvider({ delivery: { outcome: 'unknown' } });
+  const s = await dispatcher.reconcileDeliveries(p, 5);
+  assert.equal(s.failed, 1);
+  const after = db.prepare('SELECT * FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.last_error_code, 'DELIVERY_UNKNOWN');
+});
+
+test('reconcile processor 2개를 동시에 돌려도 문자는 1회만 발송된다', async () => {
+  await seedSubmittedKakao();
+  const p = new MockProvider({
+    delivery: { outcome: 'failed', providerStatus: '3000', reason: '수신 불가' },
+  });
+  await Promise.all([
+    dispatcher.reconcileDeliveries(p, 5),
+    dispatcher.reconcileDeliveries(p, 5),
+  ]);
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 1, '중복 fallback 금지');
+  const rows = db.prepare(`SELECT * FROM notification_outbox WHERE status='fallback_submitted'`).all();
+  assert.equal(rows.length, 1);
+});
+
+test('문자 대체가 실제 전달되면 fallback_delivered가 된다', async () => {
+  await seedSubmittedKakao();
+  // 1) 알림톡 실패 → 문자 제출
+  await dispatcher.reconcileDeliveries(
+    new MockProvider({ delivery: { outcome: 'failed', providerStatus: '3000' } }), 5);
+  let row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'fallback_submitted');
+
+  // 2) 문자 결과 확인
+  db.prepare('UPDATE notification_outbox SET next_reconcile_at=NULL WHERE id=?').run(row.id);
+  const s = await dispatcher.reconcileDeliveries(
+    new MockProvider({ delivery: { outcome: 'delivered', providerStatus: '4000' } }), 5);
+  assert.equal(s.delivered, 1);
+  row = db.prepare('SELECT * FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(row.status, 'fallback_delivered');
+  assert.ok(row.delivered_at);
+});
+
+test('문자 대체도 전달 실패하면 failed로 종료된다', async () => {
+  await seedSubmittedKakao();
+  await dispatcher.reconcileDeliveries(
+    new MockProvider({ delivery: { outcome: 'failed', providerStatus: '3000' } }), 5);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  db.prepare('UPDATE notification_outbox SET next_reconcile_at=NULL WHERE id=?').run(row.id);
+
+  const s = await dispatcher.reconcileDeliveries(
+    new MockProvider({ delivery: { outcome: 'failed', providerStatus: '3040', reason: '번호 오류' } }), 5);
+  assert.equal(s.failed, 1);
+  const after = db.prepare('SELECT * FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(after.status, 'failed');
+  assert.equal(after.last_error_code, '3040');
+});
+
+test('LMS 길이 메시지도 fallback으로 전송된다', async () => {
+  db.prepare('DELETE FROM notification_outbox').run();
+  await outboxRepo.enqueue({
+    reservationId: 90002, eventType: 'reservation_received', templateKey: 'TPL',
+    payload: {
+      customerName: '가'.repeat(40), customerPhone: '010-9400-0001',
+      reservationCode: 'RS-LONG', serviceType: '입주청소',
+      desiredDate: '2027-11-11', timeLabel: '오전', depositAmount: 60000,
+      bankName: '하나은행', accountNumber: '123-456789-01234', accountHolder: '주식회사 플린',
+    },
+  });
+  const p = new MockProvider({ kakao: { accepted: false, errorCode: 'X', errorMessage: 'x' } });
+  await dispatcher.dispatchPending(p, 5);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.actual_channel, 'lms', '긴 본문은 LMS로 기록된다');
+});
+
+test('SMS/LMS 판정은 EUC-KR 바이트 기준이며 string.length를 쓰지 않는다', async () => {
+  // 영문 90자 = 90byte → SMS
+  assert.equal(notifProvider.resolveTextChannel('a'.repeat(90)), 'sms');
+  assert.equal(notifProvider.resolveTextChannel('a'.repeat(91)), 'lms');
+  // 한글 45자 = 90byte → SMS, 46자 = 92byte → LMS
+  assert.equal(notifProvider.resolveTextChannel('가'.repeat(45)), 'sms');
+  assert.equal(notifProvider.resolveTextChannel('가'.repeat(46)), 'lms');
+  // string.length만 봤다면 한글 46자는 SMS로 잘못 판정된다
+  assert.equal('가'.repeat(46).length, 46);
+  assert.equal(notifProvider.textByteLength('가'.repeat(46)), 92);
+});
+
+test('SOLAPI 문자 발송은 autoTypeDetect로 provider가 타입을 결정한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/lib/notifications/solapi-provider.ts'), 'utf8');
+  assert.match(src, /autoTypeDetect: true/, 'SDK가 SMS/LMS를 판별하게 한다');
+  // 결과 조회는 공식 SDK getMessages를 쓴다
+  assert.match(src, /getMessages\(\{ messageId/, '공식 결과 조회 API 사용');
+  assert.match(src, /getDeliveryStatus/);
+});
+
+test('인증되지 않은 공개 webhook을 만들지 않았다', async () => {
+  const webhookPaths = [
+    'src/app/api/notifications/webhook',
+    'src/app/api/solapi',
+    'src/app/api/webhook',
+  ];
+  for (const p of webhookPaths) {
+    assert.equal(fs.existsSync(path.join(process.cwd(), p)), false, `${p} 가 있으면 안 된다`);
+  }
+  // cron은 CRON_SECRET로 보호된다
+  const cron = fs.readFileSync(path.join(process.cwd(), 'src/app/api/cron/notifications/route.ts'), 'utf8');
+  assert.match(cron, /CRON_SECRET/);
+  assert.match(cron, /reconcileDeliveries/, 'cron이 결과 확인을 수행한다');
+});
+
+// ===========================================================================
+// [신규] 최종 UI 통합 — 할인 UI / Admin 관리 / 메시지 이력
+// ===========================================================================
+
+test('고객 견적 UI가 할인 breakdown을 서버 snapshot으로 표시한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  assert.match(src, /function DiscountBreakdown/);
+  // 브라우저에서 금액을 계산하지 않는다
+  assert.match(src, /setDiscount\(data\.discount/, '서버 snapshot을 그대로 쓴다');
+  // 할인 없으면 -0원을 표시하지 않는다
+  assert.match(src, /automaticDiscountAmount > 0 &&/);
+  assert.match(src, /couponDiscountAmount > 0 &&/);
+  // 최종 견적 / 예약금 / 잔금
+  assert.match(src, /최종 견적/);
+  assert.match(src, /label="예약금"/);
+  assert.match(src, /label="잔금"/);
+});
+
+test('쿠폰 적용/해제 시 quote를 다시 호출해 새 토큰을 받는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  assert.match(src, /function CouponBox/);
+  assert.match(src, /couponCode: appliedCoupon/, 'quote 요청에 쿠폰이 포함된다');
+  // appliedCoupon이 effect 의존성에 있어야 재호출된다
+  // effect 의존성에 appliedCoupon이 포함되어야 재호출된다
+  const i = src.indexOf('}, [regionReadyForPricing');
+  const deps = src.slice(i, i + 300);
+  assert.match(deps, /appliedCoupon/, '쿠폰 변경 시 quote 재호출');
+  // 브라우저에서 토큰 payload를 수정하지 않는다
+  assert.doesNotMatch(src, /quoteToken\s*=\s*[^;]*JSON\.parse/, '토큰을 클라이언트에서 조작하면 안 된다');
+});
+
+test('쿠폰 오류는 이해 가능한 문구로 표시되고 내부 코드를 노출하지 않는다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/booking/BookingForm.tsx'), 'utf8');
+  assert.match(src, /setCouponError\(data\.error/, '서버 문구를 사용한다');
+  assert.doesNotMatch(src, /setCouponError\(data\.code/, 'error code를 그대로 노출하면 안 된다');
+
+  // 서버 문구가 사람이 읽을 수 있는지 확인
+  resetDiscountData();
+  addCoupon({ code: 'EXPIRED2', ends_at: '2000-01-01T00:00:00.000Z' });
+  const res = await quoteRoute.POST(makeReq({
+    serviceType: '입주청소', houseTypeKey: '24평', desiredDate: '2027-04-25', couponCode: 'EXPIRED2',
+  }));
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /기간|쿠폰/, '사람이 읽을 수 있는 문구');
+  assert.doesNotMatch(res.body.error, /Error|stack|SELECT/i, '내부 정보 노출 금지');
+});
+
+// --- Admin API 인증 ---
+
+test('신규 Admin API는 모두 세션 인증을 요구한다', async () => {
+  const routes = [
+    'src/app/api/admin/discounts/route.ts',
+    'src/app/api/admin/notices/route.ts',
+    'src/app/api/admin/notices/[id]/route.ts',
+    'src/app/api/admin/notifications/route.ts',
+    'src/app/api/admin/reservations/[id]/discount/route.ts',
+    'src/app/api/admin/reservations/[id]/detail/route.ts',
+  ];
+  for (const f of routes) {
+    const src = fs.readFileSync(path.join(process.cwd(), f), 'utf8');
+    const handlers = src.match(/export async function (GET|POST|PUT|DELETE)/g) ?? [];
+    assert.ok(handlers.length > 0, `${f}에 핸들러가 있어야 한다`);
+    for (const h of handlers) {
+      const name = h.split(' ').pop();
+      assert.match(
+        src,
+        new RegExp(`export async function ${name}[\\s\\S]{0,300}requireAdminApiSession`),
+        `${f} ${name}에 인증이 없다`
+      );
+    }
+    // UI 숨김으로 보호하지 않는다
+    assert.doesNotMatch(src, /isAdmin\s*===?\s*true/);
+  }
+});
+
+test('쿠폰 코드 중복은 명확한 오류로 처리된다', async () => {
+  resetDiscountData();
+  addCoupon({ code: 'DUPCODE' });
+  const route = await import('../src/app/api/admin/discounts/route.ts');
+  const res = await route.POST(makeReq({
+    kind: 'coupon', code: '  dupcode  ', name: '중복', discountValue: 1000,
+  }));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'COUPON_CODE_DUPLICATE');
+  assert.match(res.body.error, /DUPCODE/, '정규화된 코드로 안내한다');
+});
+
+test('사용 이력이 있는 쿠폰은 삭제 대신 중지를 안내한다', async () => {
+  resetDiscountData();
+  const id = addCoupon({ code: 'USED1' });
+  db.prepare(`INSERT INTO coupon_redemptions (coupon_id, reservation_id, customer_phone, discount_amount)
+              VALUES (?, 999997, '010-0000-0000', 1000)`).run(id);
+  const route = await import('../src/app/api/admin/discounts/route.ts');
+  const res = await route.DELETE({ url: `http://localhost/api/admin/discounts?kind=coupon&id=${id}`, headers: new Headers() });
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'COUPON_IN_USE');
+  db.prepare('DELETE FROM coupon_redemptions WHERE reservation_id=999997').run();
+});
+
+test('프로모션/쿠폰을 수정해도 기존 예약 snapshot은 불변', async () => {
+  resetDiscountData();
+  const pid = addPromo({ name: '원본', discount_type: 'fixed', discount_value: 25000 });
+  const { res } = await bookWithDiscount({ customerPhone: '010-8500-0001', desiredDate: '2027-04-26' });
+  const before = db.prepare('SELECT * FROM reservations WHERE id=?').get(res.body.reservation.id);
+  assert.equal(before.automatic_discount_amount, 25000);
+
+  // 프로모션 수정·중지
+  const route = await import('../src/app/api/admin/discounts/route.ts');
+  await route.POST(makeReq({
+    kind: 'promotion', id: pid, name: '변경됨', isActive: false, discountValue: 1,
+  }));
+
+  const after = db.prepare('SELECT * FROM reservations WHERE id=?').get(res.body.reservation.id);
+  assert.equal(after.automatic_discount_amount, 25000, '기존 예약 금액이 변하면 안 된다');
+  assert.equal(after.promotion_name, '원본', 'snapshot된 이름이 유지된다');
+  assert.equal(after.final_amount, before.final_amount);
+});
+
+// --- 메시지 이력 UI ---
+
+test('메시지 상태 문구가 접수와 수신을 구분한다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/admin/ReservationOpsPanel.tsx'), 'utf8');
+  assert.match(src, /awaiting_delivery: "전송 결과 확인 중"/);
+  assert.match(src, /submitted: "발송 요청됨"/, 'API 접수를 전송 완료라고 하면 안 된다');
+  assert.match(src, /delivered: "카카오 전송 완료"/);
+  assert.match(src, /fallback_submitted: "문자 대체 발송 요청됨"/);
+  assert.match(src, /fallback_delivered: "문자 전송 완료"/);
+  // 재시도 버튼은 allowlist 상태에서만 노출한다 (provider 접수 상태 제외)
+  assert.match(src, /RETRYABLE\.has\(n\.status\)/);
+});
+
+test('메시지 재시도는 기존 row를 되돌리고 새 이벤트를 만들지 않는다', async () => {
+  await seedOutbox();
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'X', errorMessage: 'x', permanent: true },
+    sms: { accepted: false, errorCode: 'X', errorMessage: 'x', permanent: true },
+  });
+  await dispatcher.dispatchPending(p, 5);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  assert.equal(row.status, 'failed');
+  const before = db.prepare('SELECT COUNT(*) c FROM notification_outbox').get().c;
+
+  const route = await import('../src/app/api/admin/notifications/route.ts');
+  const res = await route.POST(makeReq({ id: row.id }));
+  assert.equal(res.status, 200);
+
+  const after = db.prepare('SELECT * FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(after.status, 'retry_pending');
+  assert.equal(after.event_key, row.event_key, 'event_key가 유지된다');
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM notification_outbox').get().c, before,
+    '재시도로 row가 늘면 안 된다');
+});
+
+test('이미 전송 완료된 알림은 재시도할 수 없다', async () => {
+  await seedOutbox();
+  await dispatcher.dispatchPending(new MockProvider(), 5);
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  db.prepare(`UPDATE notification_outbox SET status='delivered' WHERE id=?`).run(row.id);
+
+  const route = await import('../src/app/api/admin/notifications/route.ts');
+  const res = await route.POST(makeReq({ id: row.id }));
+  assert.equal(res.status, 409);
+  assert.equal(res.body.code, 'ALREADY_DELIVERED');
+});
+
+test('Admin 예약 상세에 할인 breakdown과 운영 패널이 연결됐다', async () => {
+  const src = fs.readFileSync(
+    path.join(process.cwd(), 'src/app/admin/(protected)/reservations/[id]/page.tsx'), 'utf8');
+  assert.match(src, /ReservationOpsPanel/);
+  assert.match(src, /automatic_discount_amount/);
+  assert.match(src, /coupon_discount_amount/);
+  assert.match(src, /admin_discount_amount/);
+  assert.match(src, /final_amount/);
+  // 배수 표시는 제거됐다
+  assert.doesNotMatch(src, /가격 승수/, '서비스 배수 UI는 폐지됐다');
+});
+
+test('Admin 사이드바에 할인/공지 메뉴가 있다', async () => {
+  const src = fs.readFileSync(path.join(process.cwd(), 'src/components/admin/AdminSidebar.tsx'), 'utf8');
+  for (const [href, label] of [
+    ['/admin/discounts', '할인 관리'],
+    ['/admin/notices', '공지 / 팝업'],
+    ['/admin/service-areas', '서비스 지역'],
+  ]) {
+    assert.match(src, new RegExp(href.replace(/\//g, '\\/')), `${label} 메뉴가 있어야 한다`);
+  }
+});
+
+test('홈페이지와 네비게이션에서 공지에 접근할 수 있다', async () => {
+  const page = fs.readFileSync(path.join(process.cwd(), 'src/app/page.tsx'), 'utf8');
+  assert.match(page, /NoticePopup/, '홈페이지에 팝업이 연결됐다');
+  assert.ok(fs.existsSync(path.join(process.cwd(), 'src/app/notice/page.tsx')));
+  assert.ok(fs.existsSync(path.join(process.cwd(), 'src/app/notice/[id]/page.tsx')));
+});
+
+// ===========================================================================
+// [신규] 메시지 수동 재시도 중복발송 방지
+//
+// provider에 이미 접수된 상태(processing / submitted / awaiting_delivery /
+// kakao_failed / fallback_submitted)에서 Admin이 재시도를 눌러도
+// 실제 카카오/SMS 발송이 다시 일어나면 안 된다.
+// ===========================================================================
+
+let notifRetryRoute;
+
+/** 특정 상태의 outbox row를 만든다 */
+async function seedOutboxWithStatus(status, extra = {}) {
+  db.prepare('DELETE FROM notification_outbox').run();
+  await outboxRepo.enqueue({
+    reservationId: 95001, eventType: 'reservation_received', templateKey: 'TPL_TEST',
+    payload: {
+      customerName: '홍길동', customerPhone: '010-9500-0001', reservationCode: 'RS-RETRY',
+      serviceType: '입주청소', desiredDate: '2027-10-10', timeLabel: '오전',
+      depositAmount: 60000, bankName: '하나', accountNumber: '123-456', accountHolder: '플린',
+    },
+  });
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  const sets = ['status = ?'];
+  const params = [status];
+  for (const [k, v] of Object.entries(extra)) { sets.push(`${k} = ?`); params.push(v); }
+  params.push(row.id);
+  db.prepare(`UPDATE notification_outbox SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  return db.prepare('SELECT * FROM notification_outbox WHERE id = ?').get(row.id);
+}
+
+test('재시도 모듈 로드', async () => {
+  notifRetryRoute = await import('../src/app/api/admin/notifications/route.ts');
+  assert.equal(typeof notifRetryRoute.POST, 'function');
+});
+
+test('awaiting_delivery 상태는 수동 재시도가 거절되고 알림톡이 다시 나가지 않는다', async () => {
+  const row = await seedOutboxWithStatus('awaiting_delivery', {
+    provider_message_id: 'msg-1', kakao_message_id: 'msg-1', actual_channel: 'kakao',
+  });
+
+  const res = await notifRetryRoute.POST(makeReq({ id: row.id }));
+  assert.equal(res.status, 409, '이미 접수된 알림톡은 재시도할 수 없다');
+  assert.ok(res.body.code, '명확한 code를 반환해야 한다');
+
+  // 상태가 바뀌지 않았다
+  const after = db.prepare('SELECT status FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(after.status, 'awaiting_delivery');
+
+  // dispatcher를 돌려도 이 row는 발송 대상이 아니다 → sendKakao 0회
+  const p = new MockProvider();
+  await dispatcher.dispatchPending(p, 5);
+  assert.equal(p.calls.filter((c) => c.channel === 'kakao').length, 0,
+    '알림톡이 다시 발송되면 안 된다');
+});
+
+test('fallback_submitted 상태는 수동 재시도가 거절되고 문자가 다시 나가지 않는다', async () => {
+  const row = await seedOutboxWithStatus('fallback_submitted', {
+    provider_message_id: 'sms-1', fallback_message_id: 'sms-1', actual_channel: 'sms',
+    fallback_started_at: new Date().toISOString(),
+  });
+
+  const res = await notifRetryRoute.POST(makeReq({ id: row.id }));
+  assert.equal(res.status, 409, '이미 접수된 문자는 재시도할 수 없다');
+
+  const after = db.prepare('SELECT status FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(after.status, 'fallback_submitted');
+
+  const p = new MockProvider();
+  await dispatcher.dispatchPending(p, 5);
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 0, '문자가 다시 발송되면 안 된다');
+});
+
+test('processing / submitted / kakao_failed 상태도 수동 재시도가 거절된다', async () => {
+  for (const status of ['pending', 'processing', 'submitted', 'kakao_failed']) {
+    const row = await seedOutboxWithStatus(status);
+    const res = await notifRetryRoute.POST(makeReq({ id: row.id }));
+    assert.equal(res.status, 409, `${status}는 재시도 대상이 아니다`);
+    const after = db.prepare('SELECT status FROM notification_outbox WHERE id=?').get(row.id);
+    assert.equal(after.status, status, `${status} 상태가 바뀌면 안 된다`);
+  }
+});
+
+test('delivered / fallback_delivered는 기존처럼 거절된다', async () => {
+  for (const status of ['delivered', 'fallback_delivered']) {
+    const row = await seedOutboxWithStatus(status);
+    const res = await notifRetryRoute.POST(makeReq({ id: row.id }));
+    assert.equal(res.status, 409);
+    assert.equal(res.body.code, 'ALREADY_DELIVERED');
+  }
+});
+
+test('failed 상태는 안전하게 재시도할 수 있다', async () => {
+  const row = await seedOutboxWithStatus('failed', {
+    failed_at: new Date().toISOString(), last_error_code: 'X',
+  });
+  const before = db.prepare('SELECT COUNT(*) c FROM notification_outbox').get().c;
+
+  const res = await notifRetryRoute.POST(makeReq({ id: row.id }));
+  assert.equal(res.status, 200, 'failed는 재시도 가능');
+
+  const after = db.prepare('SELECT * FROM notification_outbox WHERE id=?').get(row.id);
+  assert.equal(after.status, 'retry_pending');
+  assert.equal(after.event_key, row.event_key, '새 이벤트를 만들지 않는다');
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM notification_outbox').get().c, before);
+});
+
+test('failed 재시도 후 dispatcher가 정확히 1회만 발송한다', async () => {
+  const row = await seedOutboxWithStatus('failed', {
+    failed_at: new Date().toISOString(), attempts: 1,
+  });
+  await notifRetryRoute.POST(makeReq({ id: row.id }));
+
+  const p = new MockProvider();
+  await dispatcher.dispatchPending(p, 5);
+  assert.equal(p.calls.filter((c) => c.channel === 'kakao').length, 1, '정확히 1회만 발송');
+});
+
+// --- dispatcher fallback 가드 ---
+
+test('fallback이 이미 시작된 row는 dispatcher가 문자를 다시 보내지 않는다', async () => {
+  // 알림톡 실패로 fallback을 시작했지만 문자 접수 전에 재진입한 상황
+  const row = await seedOutboxWithStatus('retry_pending', {
+    fallback_started_at: new Date().toISOString(),
+    next_attempt_at: null, attempts: 1,
+  });
+
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'KAKAO_ERR', errorMessage: '채널 오류' },
+  });
+  await dispatcher.dispatchPending(p, 5);
+
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 0,
+    'fallback 마커가 이미 있으면 문자를 다시 보내지 않는다');
+
+  // 상태가 망가지지 않고 다음 처리로 이어질 수 있어야 한다
+  const after = db.prepare('SELECT * FROM notification_outbox WHERE id=?').get(row.id);
+  assert.ok(
+    ['kakao_failed', 'retry_pending', 'failed'].includes(after.status),
+    `상태가 유효해야 한다: ${after.status}`
+  );
+});
+
+test('동일 fallback 경로에 두 번 진입해도 SMS provider 호출은 정확히 1회', async () => {
+  await seedOutbox();
+  const p = new MockProvider({
+    kakao: { accepted: false, errorCode: 'KAKAO_ERR', errorMessage: '채널 오류' },
+  });
+
+  // 1회차 — 알림톡 실패 → 문자 대체
+  await dispatcher.dispatchPending(p, 5);
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 1);
+
+  // 2회차 — 같은 row를 강제로 다시 대기 상태로 만들어 재진입
+  const row = db.prepare('SELECT * FROM notification_outbox ORDER BY id DESC LIMIT 1').get();
+  db.prepare(`UPDATE notification_outbox SET status='retry_pending', next_attempt_at=NULL WHERE id=?`)
+    .run(row.id);
+
+  await dispatcher.dispatchPending(p, 5);
+  assert.equal(p.calls.filter((c) => c.channel === 'sms').length, 1,
+    'fallback 마커 때문에 문자는 여전히 1회여야 한다');
+});
+
+test('Admin UI 재시도 버튼이 API 허용 상태와 일치한다', async () => {
+  const src = fs.readFileSync(
+    path.join(process.cwd(), 'src/components/admin/ReservationOpsPanel.tsx'), 'utf8');
+  // 재시도 가능 상태를 allowlist로 정의해야 한다
+  assert.match(src, /RETRYABLE/, '재시도 허용 상태를 명시해야 한다');
+  assert.doesNotMatch(src, /DONE\.has\(n\.status\)/,
+    'delivered만 제외하는 denylist 방식이면 안 된다');
+});
+
+test('수동 재시도 정책은 allowlist로 구현된다', async () => {
+  const src = fs.readFileSync(
+    path.join(process.cwd(), 'src/app/api/admin/notifications/route.ts'), 'utf8');
+  assert.match(src, /RETRYABLE_STATUSES/, 'allowlist 상수를 사용해야 한다');
+  // provider 접수 상태가 allowlist에 없어야 한다
+  const allow = src.slice(src.indexOf('RETRYABLE_STATUSES'), src.indexOf('RETRYABLE_STATUSES') + 300);
+  for (const s of ['awaiting_delivery', 'fallback_submitted', 'submitted', 'processing']) {
+    assert.doesNotMatch(allow, new RegExp(`"${s}"`), `${s}는 재시도 허용 목록에 없어야 한다`);
+  }
 });

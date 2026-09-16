@@ -247,6 +247,18 @@ export interface Reservation {
   privacy_agreed_at: string | null;
   reservation_status: ReservationStatus;
   admin_memo: string | null;
+  // --- 광고 attribution snapshot ---
+  visitor_id?: string | null;
+  first_source?: string | null;
+  first_medium?: string | null;
+  first_campaign?: string | null;
+  first_keyword?: string | null;
+  last_source?: string | null;
+  last_medium?: string | null;
+  last_campaign?: string | null;
+  last_keyword?: string | null;
+  landing_page?: string | null;
+  first_visit_at?: string | null;
   created_at: string;
   updated_at: string;
 }

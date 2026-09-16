@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type HTMLAttributes } from "react";
+import { useEffect, useRef, useState, type HTMLAttributes } from "react";
 import {
   SERVICE_TYPES,
   HOUSE_TYPES_FIXED,
@@ -21,6 +21,7 @@ import DepositAccountPanel, { type DepositAccountInfo } from "./DepositAccountPa
 import { bookingMaxDate, bookingMinDate, isWithinBookingWindow, outOfWindowMessage } from "@/lib/booking-window";
 import { callApi } from "@/lib/error-messages";
 import { formatPhoneInput, isValidKoreanPhone } from "@/lib/utils";
+import { getMarketingAttribution, sendMarketingEvent } from "@/lib/marketing-attribution";
 
 /**
  * 고객 예약 4단계.
@@ -75,17 +76,18 @@ interface BookingFormProps {
   selectedSlot: SelectedSlot | null;
   selectedDate?: string | null;
   onServiceChange?: (serviceType: ServiceType) => void;
+  mode?: "default" | "one-room";
 }
 
-export default function BookingForm({ selectedSlot, selectedDate, onServiceChange }: BookingFormProps) {
+export default function BookingForm({ selectedSlot, selectedDate, onServiceChange, mode = "default" }: BookingFormProps) {
   const [step, setStep] = useState<Step>(1);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [result, setResult] = useState<Result | null>(null);
 
   // 1단계 — 지역 + 서비스
-  const [serviceType, setServiceType] = useState<ServiceType>(SERVICE_TYPES[0]);
-  const [houseTypeKey, setHouseTypeKey] = useState("");
+  const [serviceType, setServiceType] = useState<ServiceType>(mode === "one-room" ? "입주청소" : SERVICE_TYPES[0]);
+  const [houseTypeKey, setHouseTypeKey] = useState(mode === "one-room" ? "원룸" : "");
   const [isApartment, setIsApartment] = useState(false);
   const [apartmentSize, setApartmentSize] = useState<number>(24);
   const [actualPyeong, setActualPyeong] = useState("");
@@ -124,9 +126,27 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [quote, setQuote] = useState<Quote | null>(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState(false);
+  const [quoteToken, setQuoteToken] = useState<string | null>(null);
+  // 쿠폰 — 적용/해제 시 /api/quote를 다시 호출해 새 quoteToken을 받는다.
+  // 브라우저에서 금액이나 토큰 payload를 직접 수정하지 않는다.
+  const [couponInput, setCouponInput] = useState("");
+  const [appliedCoupon, setAppliedCoupon] = useState<string | null>(null);
+  const [couponError, setCouponError] = useState<string | null>(null);
+  const [discount, setDiscount] = useState<{
+    originalAmount: number;
+    automaticDiscountAmount: number;
+    promotionName: string | null;
+    couponDiscountAmount: number;
+    couponCode: string | null;
+    finalAmount: number;
+    depositAmount: number;
+    balanceAmount: number;
+  } | null>(null);
   const [priceCatalog, setPriceCatalog] = useState<PriceCatalogItem[]>([]);
   const [priceCatalogLoading, setPriceCatalogLoading] = useState(true);
+  const quoteStartedTrackedRef = useRef(false);
 
+  const isOneRoomMode = mode === "one-room";
   const resolvedKey = isApartment
     ? apartmentSize === 40 ? "40평" : `${apartmentSize}평`
     : houseTypeKey;
@@ -154,6 +174,19 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const consultRequired = quote?.consultRequired === true || baseCatalogQuote?.consultRequired === true || regionConsultRequired;
 
   useEffect(() => {
+    if (mode !== "one-room") return;
+    void Promise.resolve().then(() => {
+      setServiceType("입주청소");
+      setHouseTypeKey("원룸");
+      setIsApartment(false);
+      onServiceChange?.("입주청소");
+    });
+  }, [mode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    // 캘린더 선택을 폼 상태에 반영한다.
+    // effect 내 동기 setState 경고를 피하기 위해 microtask로 넘긴다.
+    void Promise.resolve().then(() => {
     if (serviceType === "사이청소") {
       if (!selectedDate) return;
       setDesiredDate(selectedDate);
@@ -163,6 +196,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     if (!selectedSlot) return;
     setDesiredDate(selectedSlot.date);
     setTimeSlot(selectedSlot.timeSlot);
+    });
   }, [selectedSlot, selectedDate, serviceType]);
 
   useEffect(() => {
@@ -200,6 +234,10 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
       if (controller.signal.aborted) return;
       setQuoteError(false);
       setQuoteLoading(true);
+      if (!quoteStartedTrackedRef.current) {
+        quoteStartedTrackedRef.current = true;
+        void sendMarketingEvent("quote_started");
+      }
       try {
         const res = await fetch("/api/quote", {
           method: "POST",
@@ -213,20 +251,42 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
             entryRoute,
             desiredDate: desiredDate || undefined,
             timeSlot: serviceType === "사이청소" ? "all_day" : timeSlot || undefined,
+            areaSidoCode: region.sidoCode || undefined,
+            areaSigunguCode: region.sigunguCode || undefined,
+            areaDongCode: region.dongCode || undefined,
+            moveOutTime: serviceType === "사이청소" ? moveOutTime || undefined : undefined,
+            moveInTime: serviceType === "사이청소" ? moveInTime || undefined : undefined,
+            couponCode: appliedCoupon || undefined,
+            customerPhone: customerPhone || undefined,
           }),
         });
         const data = await res.json();
         if (controller.signal.aborted) return;
         if (!res.ok) {
+          // 쿠폰 오류는 견적 실패가 아니라 쿠폰 입력 문제로 안내한다
+          if (typeof data?.code === "string" && data.code.startsWith("COUPON_")) {
+            setCouponError(data.error ?? "쿠폰을 사용할 수 없습니다.");
+            setAppliedCoupon(null);
+            return;
+          }
           setQuote(null);
+          setQuoteToken(null);
+          setDiscount(null);
           setQuoteError(true);
           return;
         }
+        setCouponError(null);
         setQuote(data.quote ?? null);
+        // 서버가 서명한 견적 토큰. 예약 제출 시 이 토큰만 보낸다.
+        setQuoteToken(typeof data.quoteToken === "string" ? data.quoteToken : null);
+        // 서버가 계산한 snapshot만 표시한다 (브라우저에서 금액을 계산하지 않는다)
+        setDiscount(data.discount ?? null);
         setQuoteError(!data.quote);
       } catch {
         if (controller.signal.aborted) return;
         setQuote(null);
+        setQuoteToken(null);
+        setDiscount(null);
         setQuoteError(true);
       } finally {
         if (!controller.signal.aborted) setQuoteLoading(false);
@@ -234,7 +294,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     });
 
     return () => controller.abort();
-  }, [regionReadyForPricing, serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot]);
+  }, [regionReadyForPricing, serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot, appliedCoupon, region.sidoCode, region.sigunguCode, region.dongCode, moveOutTime, moveInTime, customerPhone]);
 
   function toggle(list: string[], v: string) {
     return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
@@ -327,6 +387,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     setError(null);
 
     if (step < 4) {
+      if (step === 1) void sendMarketingEvent("booking_started");
       setStep((s) => Math.min(s + 1, 4) as Step);
       return;
     }
@@ -388,6 +449,10 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
 
   async function submitReservation() {
     const clientQuote = displayQuote;
+    if (!quoteToken) {
+      setError("견적 정보를 불러오는 중입니다. 잠시 후 다시 시도해주세요.");
+      return;
+    }
     if (!clientQuote || clientQuote.priceConfirmed !== true) {
       setError("견적금액을 확인할 수 없습니다. 표시된 견적을 확인해주세요.");
       return;
@@ -431,14 +496,9 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         corePrinciplesAgreed: agreement.corePrinciplesAgreed,
         serviceTermsAgreed: agreement.serviceTermsAgreed,
         additionalChargeAgreed: agreement.additionalChargeAgreed,
-        clientQuote: {
-          basePrice: clientQuote.basePrice,
-          estimatedTotal: clientQuote.estimatedTotal,
-          depositAmount: clientQuote.depositAmount,
-          estimatedBalance: clientQuote.estimatedBalance,
-          priceConfirmed: clientQuote.priceConfirmed,
-          optionBreakdown: clientQuote.optionBreakdown,
-        },
+        marketingAttribution: getMarketingAttribution() ?? undefined,
+        // 금액이 아니라 서버 서명 토큰을 보낸다 (브라우저 조작 차단)
+        quoteToken,
       }),
     });
 
@@ -512,6 +572,16 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
               <Field label="상세 주소" required value={address} onChange={setAddress} placeholder="도로명 또는 지번 상세주소" />
             </div>
           </div>
+          {isOneRoomMode ? (
+            <div className="rounded-2xl border border-[var(--mint)] bg-[var(--mint-soft)] p-5">
+              <p className="text-xs font-semibold text-[var(--mint)]">광고 전용 상품</p>
+              <p className="mt-1 font-display text-lg font-bold text-[var(--navy)]">일반 단층 원룸 입주·퇴실청소</p>
+              <p className="mt-2 text-xs leading-relaxed text-[var(--ink-soft)]">
+                1.5룸·복층·투룸 이상은 이 온라인 원룸 상품 대상이 아닙니다. 해당 구조는 카카오톡 상담으로 문의해주세요.
+              </p>
+            </div>
+          ) : (
+            <>
           <div>
             <label className="mb-2 block text-sm font-semibold">청소 종류</label>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -599,6 +669,9 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
             </>
           )}
 
+            </>
+          )}
+
           {regionReadyForPricing && (resolvedKey || serviceType === "집정리") && (
             <div className="rounded-2xl border-2 border-[var(--mint)] bg-[var(--mint-soft)] p-5">
               {priceCatalogLoading ? (
@@ -614,6 +687,30 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
                     <p className="mt-2 text-xs leading-relaxed text-[var(--amber)]">{displayQuote.consultNotice}</p>
                   ) : (
                     <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">날짜를 선택하면 최종 예약금액이 확정됩니다.</p>
+                  )}
+
+                  {/* 할인 breakdown — 서버 snapshot만 표시한다 */}
+                  <DiscountBreakdown discount={discount} />
+
+                  {/* 쿠폰 입력 */}
+                  {!displayQuote.consultRequired && (
+                    <CouponBox
+                      value={couponInput}
+                      onChange={setCouponInput}
+                      applied={appliedCoupon}
+                      error={couponError}
+                      onApply={() => {
+                        const code = couponInput.trim();
+                        if (!code) return;
+                        setCouponError(null);
+                        setAppliedCoupon(code);
+                      }}
+                      onClear={() => {
+                        setAppliedCoupon(null);
+                        setCouponInput("");
+                        setCouponError(null);
+                      }}
+                    />
                   )}
                 </>
               ) : quoteError ? (
@@ -715,7 +812,9 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
             <div className="md:col-span-2">
               <label className="mb-2 block text-sm font-semibold">입주 상태</label>
               <div className="flex flex-wrap gap-2">
-                {(Object.entries(OCCUPANCY_STATUS_LABEL) as [OccupancyStatus, string][]).map(([k, v]) => (
+                {(Object.entries(OCCUPANCY_STATUS_LABEL) as [OccupancyStatus, string][])
+                  .filter(([k]) => !isOneRoomMode || k === "before_move_in" || k === "after_move_out")
+                  .map(([k, v]) => (
                   <button key={k} type="button" onClick={() => setOccupancyStatus(k)}
                     className={`min-h-[44px] rounded-full border px-4 text-sm font-medium ${
                       occupancyStatus === k ? "border-[var(--navy)] bg-[var(--navy)] text-white" : "border-[var(--line)] text-[var(--ink-soft)]"}`}>
@@ -901,6 +1000,137 @@ function SummaryRow({ label, value }: { label: string; value: string }) {
     <div className="flex justify-between gap-3">
       <dt className="shrink-0 text-[var(--ink-soft)]">{label}</dt>
       <dd className="text-right font-medium">{value || "-"}</dd>
+    </div>
+  );
+}
+
+/**
+ * 할인 breakdown.
+ *
+ * 서버가 계산해 내려준 snapshot만 표시한다. 브라우저에서 금액을 계산하지 않는다.
+ * 할인이 없는 항목은 -0원으로 표시하지 않는다.
+ */
+function DiscountBreakdown({
+  discount,
+}: {
+  discount: {
+    originalAmount: number;
+    automaticDiscountAmount: number;
+    promotionName: string | null;
+    couponDiscountAmount: number;
+    couponCode: string | null;
+    finalAmount: number;
+    depositAmount: number;
+    balanceAmount: number;
+  } | null;
+}) {
+  if (!discount) return null;
+  const hasDiscount =
+    discount.automaticDiscountAmount > 0 || discount.couponDiscountAmount > 0;
+  const won = (n: number) => `${n.toLocaleString("ko-KR")}원`;
+
+  return (
+    <div className="mt-4 space-y-1.5 border-t border-[var(--line)] pt-4 text-sm">
+      {hasDiscount && (
+        <>
+          <Row label="기본 견적" value={won(discount.originalAmount)} />
+          {discount.automaticDiscountAmount > 0 && (
+            <Row
+              label={discount.promotionName || "자동 할인"}
+              value={`-${won(discount.automaticDiscountAmount)}`}
+              tone="discount"
+            />
+          )}
+          {discount.couponDiscountAmount > 0 && (
+            <Row
+              label={`${discount.couponCode ?? "쿠폰"} 쿠폰`}
+              value={`-${won(discount.couponDiscountAmount)}`}
+              tone="discount"
+            />
+          )}
+          <div className="!mt-3 border-t border-dashed border-[var(--line)] pt-2.5" />
+        </>
+      )}
+      <Row label="최종 견적" value={won(discount.finalAmount)} strong />
+      <Row label="예약금" value={won(discount.depositAmount)} />
+      <Row label="잔금" value={won(discount.balanceAmount)} />
+    </div>
+  );
+}
+
+function Row({
+  label, value, strong, tone,
+}: { label: string; value: string; strong?: boolean; tone?: "discount" }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className={`text-xs ${tone === "discount" ? "text-[var(--mint)]" : "text-[var(--ink-soft)]"}`}>
+        {label}
+      </span>
+      <span
+        className={
+          strong
+            ? "font-display text-base font-bold text-[var(--ink)]"
+            : tone === "discount"
+              ? "text-sm font-medium text-[var(--mint)]"
+              : "text-sm text-[var(--ink)]"
+        }
+      >
+        {value}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * 쿠폰 입력.
+ *
+ * 적용/해제는 상태만 바꾸고, 실제 금액은 /api/quote 재호출로 새 quoteToken과 함께 받는다.
+ */
+function CouponBox({
+  value, onChange, applied, error, onApply, onClear,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  applied: string | null;
+  error: string | null;
+  onApply: () => void;
+  onClear: () => void;
+}) {
+  if (applied) {
+    return (
+      <div className="mt-3 flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2.5">
+        <span className="text-xs text-[var(--ink-soft)]">
+          쿠폰 <b className="text-[var(--ink)]">{applied.toUpperCase()}</b> 적용됨
+        </span>
+        <button
+          type="button"
+          onClick={onClear}
+          className="shrink-0 text-xs font-medium text-[var(--ink-soft)] underline"
+        >
+          적용 해제
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3">
+      <div className="flex gap-2">
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="쿠폰 코드"
+          className="min-h-[40px] flex-1 rounded-lg border border-[var(--line)] px-3 text-sm uppercase"
+        />
+        <button
+          type="button"
+          onClick={onApply}
+          disabled={!value.trim()}
+          className="min-h-[40px] shrink-0 rounded-lg border border-[var(--navy)] px-4 text-xs font-semibold text-[var(--navy)] disabled:opacity-40"
+        >
+          적용
+        </button>
+      </div>
+      {error && <p className="mt-1.5 text-xs text-[var(--rose)]">{error}</p>}
     </div>
   );
 }

@@ -7,7 +7,11 @@ import type { SelectedSlot } from "./ReservationCalendar";
 import { SERVICE_TYPES } from "@/lib/types";
 import type { ServiceType } from "@/lib/types";
 
-export default function BookingSection() {
+export interface BookingSectionProps {
+  mode?: "default" | "one-room";
+}
+
+export default function BookingSection({ mode = "default" }: BookingSectionProps) {
   const [selectedSlot, setSelectedSlot] = useState<SelectedSlot | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [activeService, setActiveService] = useState<ServiceType>(SERVICE_TYPES[0]);
@@ -50,7 +54,12 @@ export default function BookingSection() {
         />
       </div>
       <div id="booking" ref={bookingRef} className="scroll-mt-24">
-        <BookingForm selectedSlot={selectedSlot} selectedDate={selectedDate} onServiceChange={handleServiceChange} />
+        <BookingForm
+          selectedSlot={selectedSlot}
+          selectedDate={selectedDate}
+          onServiceChange={handleServiceChange}
+          mode={mode}
+        />
       </div>
     </div>
   );

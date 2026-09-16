@@ -59,7 +59,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   return (
     <html lang="ko" className={`${pretendard.variable} h-full antialiased`}>
       <body className="flex min-h-full flex-col bg-[var(--sand)] text-[var(--ink)]">
-        <SiteHeader companyName={company.brandName} />
+        <SiteHeader companyName={company.brandName} kakaoUrl={company.kakaoUrl} />
         <main className="flex-1">{children}</main>
         <SiteFooter company={company} />
       </body>

@@ -89,6 +89,114 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS notification_outbox (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reservation_id INTEGER,
+      event_type TEXT NOT NULL,
+      event_key TEXT NOT NULL,
+      template_key TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      preferred_channel TEXT NOT NULL DEFAULT 'kakao',
+      actual_channel TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT,
+      provider TEXT,
+      provider_message_id TEXT,
+      provider_status TEXT,
+      last_error_code TEXT,
+      last_error_message TEXT,
+      payload_snapshot TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      processing_started_at TEXT,
+      submitted_at TEXT,
+      delivered_at TEXT,
+      failed_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_outbox_event_key ON notification_outbox(event_key);
+    CREATE INDEX IF NOT EXISTS idx_outbox_dispatchable ON notification_outbox(status, next_attempt_at);
+    CREATE INDEX IF NOT EXISTS idx_outbox_reservation ON notification_outbox(reservation_id);
+
+    CREATE TABLE IF NOT EXISTS notices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      title TEXT NOT NULL,
+      content TEXT NOT NULL,
+      notice_type TEXT NOT NULL DEFAULT 'normal',
+      is_published INTEGER NOT NULL DEFAULT 0,
+      is_pinned INTEGER NOT NULL DEFAULT 0,
+      is_popup INTEGER NOT NULL DEFAULT 0,
+      publish_start_at TEXT,
+      publish_end_at TEXT,
+      created_by INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_notices_published ON notices(is_published, publish_start_at, publish_end_at);
+
+    CREATE TABLE IF NOT EXISTS discount_promotions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      description TEXT,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      discount_type TEXT NOT NULL DEFAULT 'fixed',
+      discount_value INTEGER NOT NULL DEFAULT 0,
+      starts_at TEXT,
+      ends_at TEXT,
+      service_type TEXT,
+      product_key TEXT,
+      min_amount INTEGER NOT NULL DEFAULT 0,
+      max_discount_amount INTEGER,
+      priority INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS coupons (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL,
+      name TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      discount_type TEXT NOT NULL DEFAULT 'fixed',
+      discount_value INTEGER NOT NULL DEFAULT 0,
+      starts_at TEXT,
+      ends_at TEXT,
+      service_type TEXT,
+      product_key TEXT,
+      min_amount INTEGER NOT NULL DEFAULT 0,
+      max_discount_amount INTEGER,
+      total_usage_limit INTEGER,
+      per_phone_limit INTEGER,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_coupons_code ON coupons(code);
+
+    CREATE TABLE IF NOT EXISTS coupon_redemptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      coupon_id INTEGER NOT NULL,
+      reservation_id INTEGER NOT NULL,
+      customer_phone TEXT,
+      discount_amount INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_redemption_reservation ON coupon_redemptions(reservation_id);
+    CREATE INDEX IF NOT EXISTS idx_redemption_coupon ON coupon_redemptions(coupon_id);
+
+    CREATE TABLE IF NOT EXISTS reservation_discount_adjustments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reservation_id INTEGER NOT NULL,
+      admin_id INTEGER,
+      admin_name TEXT,
+      discount_type TEXT NOT NULL,
+      discount_value INTEGER NOT NULL DEFAULT 0,
+      calculated_amount INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL,
+      previous_final_amount INTEGER NOT NULL DEFAULT 0,
+      new_final_amount INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_adjustments_reservation ON reservation_discount_adjustments(reservation_id);
+
     CREATE TABLE IF NOT EXISTS administrative_areas (
       code TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -190,6 +298,21 @@ export function migrate() {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS marketing_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reservation_id INTEGER REFERENCES reservations(id) ON DELETE SET NULL,
+      visitor_id TEXT NOT NULL,
+      event_name TEXT NOT NULL,
+      source TEXT,
+      medium TEXT,
+      campaign TEXT,
+      keyword TEXT,
+      landing_page TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_marketing_events_visitor ON marketing_events(visitor_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_marketing_events_name ON marketing_events(event_name, created_at);
+
     CREATE TABLE IF NOT EXISTS posts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       slug TEXT UNIQUE NOT NULL,
@@ -269,6 +392,40 @@ function runIncrementalMigrations() {
   tryExec("ALTER TABLE consultation_requests ADD COLUMN area_sigungu_code TEXT");
   tryExec("ALTER TABLE consultation_requests ADD COLUMN area_dong_code TEXT");
   tryExec("UPDATE price_rules SET product_key = note WHERE product_key IS NULL");
+  // 20260915 예약 제출 idempotency
+  tryExec("ALTER TABLE reservations ADD COLUMN quote_id TEXT");
+  tryExec("CREATE UNIQUE INDEX IF NOT EXISTS idx_reservations_quote_id ON reservations(quote_id) WHERE quote_id IS NOT NULL");
+  tryExec("CREATE INDEX IF NOT EXISTS idx_reservations_active_slot ON reservations(desired_date, time_slot)");
+  // 20260915 할인 시스템 — 전부 DEFAULT/NULL 허용
+  tryExec("ALTER TABLE reservations ADD COLUMN original_amount INTEGER");
+  tryExec("ALTER TABLE reservations ADD COLUMN automatic_discount_amount INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN coupon_discount_amount INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN admin_discount_amount INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE reservations ADD COLUMN final_amount INTEGER");
+  tryExec("ALTER TABLE reservations ADD COLUMN promotion_id INTEGER");
+  tryExec("ALTER TABLE reservations ADD COLUMN promotion_name TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN coupon_id INTEGER");
+  tryExec("ALTER TABLE reservations ADD COLUMN coupon_code TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN admin_discount_reason TEXT");
+  // 20260916 광고 attribution snapshot
+  tryExec("ALTER TABLE reservations ADD COLUMN visitor_id TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN first_source TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN first_medium TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN first_campaign TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN first_keyword TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN last_source TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN last_medium TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN last_campaign TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN last_keyword TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN landing_page TEXT");
+  tryExec("ALTER TABLE reservations ADD COLUMN first_visit_at TEXT");
+  tryExec("CREATE INDEX IF NOT EXISTS idx_reservations_first_source ON reservations(first_source)");
+  // 20260915 알림 delivery reconciliation
+  tryExec("ALTER TABLE notification_outbox ADD COLUMN kakao_message_id TEXT");
+  tryExec("ALTER TABLE notification_outbox ADD COLUMN fallback_message_id TEXT");
+  tryExec("ALTER TABLE notification_outbox ADD COLUMN fallback_started_at TEXT");
+  tryExec("ALTER TABLE notification_outbox ADD COLUMN reconcile_attempts INTEGER NOT NULL DEFAULT 0");
+  tryExec("ALTER TABLE notification_outbox ADD COLUMN next_reconcile_at TEXT");
 }
 
 function seedDefaultSettings() {

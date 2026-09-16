@@ -487,18 +487,38 @@ export async function lockReservationSlot(date: string, timeSlot: string): Promi
   );
 }
 
+/**
+ * SQLite 트랜잭션 직렬화 큐.
+ *
+ * node:sqlite는 단일 동기 연결이라 BEGIN이 중첩되면
+ * "cannot start a transaction within a transaction"으로 실패한다.
+ * 동시 요청이 들어와도 트랜잭션은 한 번에 하나만 실행되도록 직렬화한다.
+ * (PostgreSQL 경로는 서버가 동시성을 처리하므로 이 큐를 쓰지 않는다)
+ */
+let sqliteTxChain: Promise<unknown> = Promise.resolve();
+
+function runSerializedSqlite<T>(fn: () => Promise<T>): Promise<T> {
+  const next = sqliteTxChain.then(fn, fn);
+  // 체인이 거부돼도 다음 작업이 막히지 않게 한다
+  sqliteTxChain = next.then(() => undefined, () => undefined);
+  return next;
+}
+
 export async function withTransaction<T>(fn: () => Promise<T>): Promise<T> {
   if (getDatabaseBackend() === "sqlite") {
-    const db = getDb();
-    db.exec("BEGIN IMMEDIATE");
-    try {
-      const result = await fn();
-      db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      db.exec("ROLLBACK");
-      throw error;
-    }
+    // 단일 연결이므로 트랜잭션을 직렬화한다 (BEGIN 중첩 방지)
+    return runSerializedSqlite(async () => {
+      const db = getDb();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const result = await fn();
+        db.exec("COMMIT");
+        return result;
+      } catch (error) {
+        try { db.exec("ROLLBACK"); } catch { /* 이미 롤백된 경우 무시 */ }
+        throw error;
+      }
+    });
   }
 
   const client = await getPostgresClient();

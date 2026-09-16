@@ -3,14 +3,13 @@
 import Image from "next/image";
 import { useEffect, useState } from "react";
 import { HERO_SLIDES } from "@/lib/images";
+import OneRoomOfferPrice from "@/components/OneRoomOfferPrice";
 
 /**
- * Hero — 제공된 2장을 모두 사용하는 fade carousel.
+ * 메인 Hero.
  *
- * - 약 6초 자동 전환, 수동 dot 제공, 키보드 접근 가능
- * - prefers-reduced-motion: reduce 에서는 자동 전환을 멈춘다
- * - 사진의 밝기가 살아나도록 어두운 전면 오버레이를 쓰지 않고
- *   텍스트 영역에만 약한 그라데이션을 적용한다
+ * 브랜드 사이트의 정체성은 유지하되 현재 주력상품인 일반 단층 원룸을 가장 먼저 판매한다.
+ * 가격은 공개 offer API에서 가져와 실제 자동 프로모션 결과와 일치시킨다.
  */
 export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phone: string }) {
   const [index, setIndex] = useState(0);
@@ -46,61 +45,67 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
         />
       ))}
 
-      {/* 텍스트 영역에만 약한 그라데이션 — 사진 밝기를 유지한다 */}
       <div
-        className="absolute inset-0 bg-gradient-to-r from-white/92 via-white/70 to-white/10 md:to-transparent"
+        className="absolute inset-0 bg-gradient-to-r from-white/95 via-white/78 to-white/15 md:to-transparent"
         aria-hidden
       />
 
-      <div className="relative mx-auto max-w-6xl px-5 py-24 md:px-8 md:py-32">
-        <p className="mb-4 inline-block rounded-full bg-[var(--mint-soft)] px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint)]">
-          예약 가능 날짜 실시간 확인
+      <div className="relative mx-auto max-w-6xl px-5 py-20 md:px-8 md:py-28">
+        <p className="mb-3 inline-block rounded-full bg-[var(--mint-soft)] px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint)]">
+          일반 단층 원룸 전용 온라인 예약
         </p>
-        <h1 className="font-display max-w-3xl text-3xl font-bold leading-tight text-[var(--navy)] md:text-5xl">
-          입주청소 예약 가능 날짜를
+        <h1 className="font-display max-w-3xl text-4xl font-bold leading-tight text-[var(--navy)] md:text-6xl">
+          원룸 입주·퇴실청소
           <br />
-          바로 확인하세요
+          복잡하게 견적받지 마세요.
         </h1>
         <p className="mt-5 max-w-xl text-base leading-relaxed text-[var(--ink-soft)] md:text-lg">
-          캘린더에서 가능한 날짜를 선택하거나, 바로 예약하기를 통해 예약을 진행할 수 있습니다.
+          작업 전 추가비용을 먼저 안내하고, 작업 완료 후 주요 결과사진을 제공합니다.
         </p>
 
-        <div className="mt-9 flex flex-wrap gap-3">
+        <div className="mt-7">
+          <p className="mb-1 text-xs font-bold tracking-[0.16em] text-[var(--mint)]">CLYN OPEN PRICE</p>
+          <OneRoomOfferPrice showLabel={false} />
+        </div>
+        <p className="mt-4 max-w-2xl text-xs leading-relaxed text-[var(--ink-soft)]">
+          일반 단층 원룸 기본 청소범위 기준 · 1.5룸 · 원룸 복층 · 투룸 이상 제외 · 특수오염·폐기물·별도 요청 작업은 작업 전 안내 후 진행
+        </p>
+
+        <div className="mt-8 flex flex-wrap gap-3">
           <button
             onClick={() => scrollTo("calendar")}
             className="min-h-[52px] rounded-full bg-[var(--navy)] px-7 text-sm font-semibold text-white transition hover:bg-[var(--navy-deep)]"
           >
-            예약 가능 날짜 보기
+            예약 가능일 확인
           </button>
           <button
             onClick={() => scrollTo("booking")}
-            className="min-h-[52px] rounded-full border border-[var(--navy)] bg-white/70 px-7 text-sm font-semibold text-[var(--navy)] backdrop-blur transition hover:bg-white"
+            className="min-h-[52px] rounded-full border border-[var(--navy)] bg-white/80 px-7 text-sm font-semibold text-[var(--navy)] backdrop-blur transition hover:bg-white"
           >
-            바로 예약하기
+            빠른 견적 받기
           </button>
           {kakaoUrl ? (
             <a
               href={kakaoUrl}
               target="_blank"
               rel="noreferrer"
-              className="flex min-h-[52px] items-center rounded-full border border-[var(--line)] bg-white/70 px-7 text-sm font-semibold text-[var(--ink-soft)] backdrop-blur transition hover:bg-white"
+              className="flex min-h-[52px] items-center rounded-full border border-[var(--line)] bg-white/80 px-7 text-sm font-semibold text-[var(--ink-soft)] backdrop-blur transition hover:bg-white"
             >
-              상담 문의
+              카카오톡 문의
             </a>
           ) : (
             <a
               href="/consultation"
-              className="flex min-h-[52px] items-center rounded-full border border-[var(--line)] bg-white/70 px-7 text-sm font-semibold text-[var(--ink-soft)] backdrop-blur transition hover:bg-white"
+              className="flex min-h-[52px] items-center rounded-full border border-[var(--line)] bg-white/80 px-7 text-sm font-semibold text-[var(--ink-soft)] backdrop-blur transition hover:bg-white"
             >
               상담 접수
             </a>
           )}
         </div>
 
-        {phone && <p className="mt-6 text-sm text-[var(--ink-soft)]">전화 문의 {phone}</p>}
+        {phone && <p className="mt-5 text-sm text-[var(--ink-soft)]">전화 문의 {phone}</p>}
 
-        {/* 슬라이드 인디케이터 — 키보드 접근 가능 */}
-        <div className="mt-9 flex gap-2" role="tablist" aria-label="대표 이미지 선택">
+        <div className="mt-8 flex gap-2" role="tablist" aria-label="대표 이미지 선택">
           {HERO_SLIDES.map((slide, i) => (
             <button
               key={slide.src}

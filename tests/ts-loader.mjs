@@ -8,6 +8,7 @@ const connectionUrl = pathToFileURL(path.join(root, 'src/database/connection.ts'
 const stubMap = new Map([
   ['next/server', pathToFileURL(path.join(root, 'tests/stubs/next-server.mjs')).href],
   ['@/lib/session', pathToFileURL(path.join(root, 'tests/stubs/session.mjs')).href],
+  ['next/cache', pathToFileURL(path.join(root, 'tests/stubs/next-cache.mjs')).href],
 ]);
 
 export async function resolve(specifier, context, nextResolve) {

@@ -2,6 +2,7 @@
 
 import { useEffect, useState, use as usePromise } from "react";
 import Link from "next/link";
+import ReservationOpsPanel from "@/components/admin/ReservationOpsPanel";
 import {
   RESERVATION_STATUS_LABEL,
   PAYMENT_STATUS_LABEL,
@@ -77,6 +78,9 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
     ? new Date(payment.payment_due_date) < new Date() && payment.payment_status === "pending"
     : false;
 
+  // 할인 snapshot은 구 예약에 없을 수 있으므로 느슨하게 읽는다
+  const r = reservation as unknown as Record<string, number | string | null>;
+
   return (
     <div>
       <Link href="/admin/reservations" className="text-sm font-medium text-[var(--mint)] hover:underline">← 예약 목록</Link>
@@ -102,6 +106,13 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
             <Field label="예약자명" value={reservation.customer_name} />
             <Field label="연락처" value={reservation.customer_phone} />
             <Field label="이메일" value={reservation.customer_email || "-"} />
+          </Section>
+
+          <Section title="유입정보">
+            <Field label="최초 유입" value={reservation.first_source || "DIRECT"} />
+            <Field label="캠페인" value={reservation.first_campaign || "-"} />
+            <Field label="검색어" value={reservation.first_keyword || "-"} />
+            <Field label="랜딩" value={reservation.landing_page || "-"} />
           </Section>
 
           <Section title="청소 정보">
@@ -154,9 +165,7 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
             {reservation.base_price_snapshot != null && (
               <Field label="자동견적 기준가" value={`${reservation.base_price_snapshot.toLocaleString("ko-KR")}원`} />
             )}
-            {reservation.price_multiplier !== 1 && (
-              <Field label="가격 승수" value={`× ${reservation.price_multiplier} (${reservation.service_type})`} />
-            )}
+
             {reservation.estimated_total_snapshot != null && (
               <Field
                 label={reservation.price_confirmed_snapshot === 0 ? "자동견적 (미확정 시작가)" : "자동견적 합계"}
@@ -171,6 +180,37 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
                 ⚠ 이 예약은 40평 이상 등 미확정 견적입니다. 관리자가 고객과 협의 후 최종 견적금액을 아래에 입력해주세요.
               </div>
             )}
+            {/* 할인 breakdown — snapshot이 없는 구 예약은 0원/미표시로 안전하게 처리 */}
+            {Number(r.automatic_discount_amount ?? 0) > 0 && (
+              <Field
+                label={`자동 할인${r.promotion_name ? ` (${r.promotion_name})` : ""}`}
+                value={`-${Number(r.automatic_discount_amount).toLocaleString("ko-KR")}원`}
+              />
+            )}
+            {Number(r.coupon_discount_amount ?? 0) > 0 && (
+              <Field
+                label={`쿠폰 할인${r.coupon_code ? ` (${r.coupon_code})` : ""}`}
+                value={`-${Number(r.coupon_discount_amount).toLocaleString("ko-KR")}원`}
+              />
+            )}
+            {Number(r.admin_discount_amount ?? 0) > 0 && (
+              <Field
+                label="관리자 할인"
+                value={`-${Number(r.admin_discount_amount).toLocaleString("ko-KR")}원`}
+              />
+            )}
+            {r.final_amount != null && (
+              <Field label="최종금액" value={`${Number(r.final_amount).toLocaleString("ko-KR")}원`} bold />
+            )}
+            {r.deposit_amount_snapshot != null && (
+              <Field label="예약금" value={`${Number(r.deposit_amount_snapshot).toLocaleString("ko-KR")}원`} />
+            )}
+            {r.estimated_balance_snapshot != null && (
+              <Field label="잔금" value={`${Number(r.estimated_balance_snapshot).toLocaleString("ko-KR")}원`} />
+            )}
+            {r.admin_discount_reason && (
+              <Field label="관리자 할인 사유" value={String(r.admin_discount_reason)} />
+            )}
             <Field
               label="즉시예약 할인"
               value={reservation.instant_discount_eligible
@@ -178,6 +218,15 @@ export default function AdminReservationDetailPage({ params }: { params: Promise
                 : "자격 없음"}
             />
           </Section>
+
+          {/* 운영 패널 — 관리자 할인 / 할인 audit / 메시지 발송이력 */}
+          <div className="rounded-2xl border border-[var(--line)] bg-[var(--sand)] p-5">
+            <ReservationOpsPanel
+              reservationId={reservation.id}
+              finalAmount={Number(r.final_amount ?? r.total_amount_snapshot ?? r.estimated_total_snapshot ?? 0)}
+              depositAmount={Number(r.deposit_amount_snapshot ?? 0)}
+            />
+          </div>
 
           <Section title="처리 로그">
             {logs.length === 0 ? (

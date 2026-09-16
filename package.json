@@ -7,7 +7,9 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:regression": "node --experimental-loader ./tests/ts-loader.mjs --experimental-strip-types --test --test-concurrency=1 tests/regression.test.mjs"
+    "test:regression": "node --experimental-loader ./tests/ts-loader.mjs --experimental-strip-types --test --test-concurrency=1 tests/regression.test.mjs",
+    "test:pg": "node --experimental-loader ./tests/ts-loader.mjs --experimental-strip-types --test --test-concurrency=1 tests/pg/*.test.mjs",
+    "test:all": "node --experimental-loader ./tests/ts-loader.mjs --experimental-strip-types --test --test-concurrency=1 tests/*.test.mjs tests/pg/*.test.mjs"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
@@ -19,6 +21,7 @@
     "pretendard": "^1.3.9",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "solapi": "^6.0.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {

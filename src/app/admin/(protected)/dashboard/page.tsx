@@ -1,16 +1,52 @@
 export const dynamic = "force-dynamic";
 import Link from "next/link";
 import { getDashboardStats, listReservations } from "@/lib/reservations";
+import { newRequestId, safeStage } from "@/lib/observability";
 import { RESERVATION_STATUS_LABEL, PAYMENT_STATUS_LABEL } from "@/lib/types";
 import type { ReservationStatus, PaymentStatus } from "@/lib/types";
 
+/**
+ * 대시보드.
+ *
+ * 통계와 최근 예약을 각각 독립적으로 조회한다. 한쪽이 실패해도
+ * 다른 쪽과 사이드바/네비게이션은 그대로 보여야 하므로 실패를 위젯 단위로 격리한다.
+ * 실패 원인(stage / code / durationMs / requestId)은 서버 로그에 남는다.
+ */
 export default async function AdminDashboardPage() {
-  const stats = await getDashboardStats();
-  const recent = (await listReservations()).slice(0, 8);
+  const requestId = newRequestId();
+
+  const statsResult = await safeStage(
+    "admin-dashboard",
+    "getDashboardStats",
+    requestId,
+    () => getDashboardStats(),
+    { total: 0, received: 0, awaitingDeposit: 0, confirmed: 0, consultRequired: 0, cancelled: 0, completed: 0 }
+  );
+  const recentResult = await safeStage(
+    "admin-dashboard",
+    "listReservations",
+    requestId,
+    async () => (await listReservations()).slice(0, 8),
+    [] as Awaited<ReturnType<typeof listReservations>>
+  );
+
+  const stats = statsResult.data;
+  const recent = recentResult.data;
 
   return (
     <div>
       <h1 className="font-display text-xl font-bold">대시보드</h1>
+
+      {(!statsResult.ok || !recentResult.ok) && (
+        <div className="mt-4 rounded-xl bg-[#FBE9D3] px-4 py-3 text-sm leading-relaxed text-[var(--amber)]" role="alert">
+          <p className="font-semibold">일부 데이터를 불러오지 못했습니다.</p>
+          <ul className="mt-1.5 list-disc space-y-0.5 pl-4 text-xs">
+            {!statsResult.ok && <li>통계 ({statsResult.failure.code})</li>}
+            {!recentResult.ok && <li>최근 예약 ({recentResult.failure.code})</li>}
+          </ul>
+          <p className="mt-1.5 text-xs">요청 ID {requestId} — 서버 로그에서 상세 원인을 확인할 수 있습니다.</p>
+        </div>
+      )}
 
       <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard label="전체 예약" value={stats.total} />

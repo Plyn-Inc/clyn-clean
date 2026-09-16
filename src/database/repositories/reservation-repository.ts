@@ -1,4 +1,4 @@
-import { execute, executeReturningCount, insertReturningId, queryRow, queryRows } from "../connection";
+import { execute, executeReturningCount, insertReturningId, queryRow, queryRows, getDatabaseBackend } from "../connection";
 import type { Reservation, Payment, ReservationStatus, PaymentStatus, ConfirmationLog } from "@/lib/types";
 
 export interface CreateReservationRow {
@@ -56,6 +56,8 @@ export interface CreateReservationRow {
   areaSidoCode: string | null;
   areaSigunguCode: string | null;
   areaDongCode: string | null;
+  /** 예약 제출 idempotency 키 (견적 토큰의 quoteId) */
+  quoteId?: string | null;
   /** 날짜 조건 가격 보정 내부 감사용 */
   dateAdjustmentApplied: number;
   dateAdjustmentAmount: number;
@@ -85,7 +87,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       has_pet, date_adjustment_applied, date_adjustment_amount,
       product_key, holiday_surcharge_snapshot, total_amount_snapshot,
       move_out_time, move_in_time,
-      area_sido_code, area_sigungu_code, area_dong_code,
+      area_sido_code, area_sigungu_code, area_dong_code, quote_id,
       final_confirmed_total, account_revealed_at, reservation_status
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
@@ -96,7 +98,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       ?, ?, ?,
       ?, ?, ?,
       ?, ?,
-      ?, ?, ?,
+      ?, ?, ?, ?,
       ?, CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?
     )`,
     [
@@ -114,7 +116,7 @@ export function insertReservation(row: CreateReservationRow): Promise<number> {
       row.hasPet, row.dateAdjustmentApplied, row.dateAdjustmentAmount,
       row.productKey, row.holidaySurchargeSnapshot, row.totalAmountSnapshot,
       row.moveOutTime, row.moveInTime,
-      row.areaSidoCode, row.areaSigunguCode, row.areaDongCode,
+      row.areaSidoCode, row.areaSigunguCode, row.areaDongCode, row.quoteId ?? null,
       row.finalConfirmedTotal ?? null, row.accountRevealed ? 1 : 0, row.reservationStatus ?? "received",
     ]
   );
@@ -166,7 +168,7 @@ export async function insertReservationBundlePostgres(
         has_pet, date_adjustment_applied, date_adjustment_amount,
         product_key, holiday_surcharge_snapshot, total_amount_snapshot,
         move_out_time, move_in_time,
-        area_sido_code, area_sigungu_code, area_dong_code,
+        area_sido_code, area_sigungu_code, area_dong_code, quote_id,
         final_confirmed_total, account_revealed_at, reservation_status
       ) VALUES (
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0,
@@ -177,7 +179,7 @@ export async function insertReservationBundlePostgres(
         ?, ?, ?,
         ?, ?, ?,
         ?, ?,
-        ?, ?, ?,
+        ?, ?, ?, ?,
         ?, CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END, ?
       )
       RETURNING id
@@ -215,7 +217,7 @@ export async function insertReservationBundlePostgres(
       row.hasPet, row.dateAdjustmentApplied, row.dateAdjustmentAmount,
       row.productKey, row.holidaySurchargeSnapshot, row.totalAmountSnapshot,
       row.moveOutTime, row.moveInTime,
-      row.areaSidoCode, row.areaSigunguCode, row.areaDongCode,
+      row.areaSidoCode, row.areaSigunguCode, row.areaDongCode, row.quoteId ?? null,
       row.finalConfirmedTotal ?? null, row.accountRevealed ? 1 : 0, row.reservationStatus ?? "received",
       params.payment.amount, params.payment.depositorName, params.payment.dueDate,
       params.historyDetail,
@@ -583,4 +585,301 @@ export async function countByStatus(status: ReservationStatus): Promise<number> 
 export async function countAll(): Promise<number> {
   const row = await queryRow<{ c: number | string }>("SELECT COUNT(*) as c FROM reservations");
   return Number(row?.c ?? 0);
+}
+
+/**
+ * quoteId로 기존 예약을 찾는다 (예약 제출 idempotency).
+ *
+ * 같은 견적으로 재요청이 오면 새 예약을 만들지 않고 이 결과를 반환한다.
+ */
+export async function findReservationByQuoteId(
+  quoteId: string
+): Promise<(Reservation & { payment_id: number | null; payment_due_date: string | null }) | undefined> {
+  return queryRow<Reservation & { payment_id: number | null; payment_due_date: string | null }>(
+    `SELECT r.*, p.id AS payment_id, p.payment_due_date AS payment_due_date
+       FROM reservations r
+       LEFT JOIN payments p ON p.reservation_id = r.id
+      WHERE r.quote_id = ?
+      ORDER BY r.id ASC
+      LIMIT 1`,
+    [quoteId]
+  );
+}
+
+/**
+ * unique violation 여부.
+ *
+ * idempotency 경합으로 취급할 오류만 좁게 인식한다.
+ * timeout / connection failure / syntax error를 unique violation으로 오판하면
+ * 실제 장애가 "정상 재요청"으로 둔갑하므로 조건을 넓히지 않는다.
+ */
+export function isUniqueViolation(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  const err = e as { code?: string; message?: string };
+
+  // PostgreSQL: 23505 unique_violation
+  if (err.code === "23505") return true;
+
+  // SQLite: node:sqlite는 ERR_SQLITE_ERROR + 명시적 메시지를 준다
+  if (err.code === "ERR_SQLITE_ERROR" || err.code === undefined) {
+    return /UNIQUE constraint failed/i.test(String(err.message ?? ""));
+  }
+  return false;
+}
+
+/** 슬롯이 이미 점유됐을 때 던지는 오류 */
+export class SlotConflictError extends Error {
+  code = "SLOT_UNAVAILABLE";
+  constructor(message: string) {
+    super(message);
+    this.name = "SlotConflictError";
+  }
+}
+
+/**
+ * 예약 저장 직전 슬롯 충돌 최소 방어.
+ *
+ * 기존 capacity 정책을 그대로 따른다:
+ *   - capacity는 슬롯별이다 (calendar_days PK = date + time_slot)
+ *   - 해당 슬롯 row가 없으면 settings.default_daily_capacity를 쓴다
+ *   - all_day row가 있으면 그 값을 슬롯 기본값으로 쓴다 (calendar.ts와 동일 규칙)
+ *
+ * capacity=1을 하드코딩하지 않는다. 오전 capacity 2면 2건까지 받는다.
+ *
+ * 동시성: PostgreSQL advisory transaction lock으로 같은 날짜 저장을 직렬화한다.
+ * lock · capacity 조회 · active count · INSERT가 모두 같은 트랜잭션 안에서
+ * 실행되어야 한다 (호출부가 withTransaction / 단일 statement 안에서 부른다).
+ *
+ * 조회는 calendar_days 2행 + settings 1건 + count 1건뿐이다.
+ * 캘린더 전체 조회나 가격 재계산은 하지 않는다.
+ */
+const ACTIVE_STATUSES =
+  `('received','approved_awaiting_deposit','awaiting_deposit','awaiting_admin_check','confirmed')`;
+
+async function effectiveCapacity(date: string, timeSlot: string): Promise<number> {
+  const rows = await queryRows<{ time_slot: string; capacity: number; status: string }>(
+    `SELECT time_slot, capacity, status FROM calendar_days
+      WHERE date = ? AND time_slot IN (?, 'all_day')`,
+    [date, timeSlot]
+  );
+  const slotRow = rows.find((r) => r.time_slot === timeSlot);
+  const allDayRow = rows.find((r) => r.time_slot === "all_day");
+
+  // 관리자가 닫은 슬롯은 capacity와 무관하게 접수 불가
+  const status = allDayRow?.status ?? slotRow?.status ?? "available";
+  if (status !== "available") return 0;
+
+  if (slotRow?.capacity != null) return Number(slotRow.capacity);
+  if (allDayRow?.capacity != null) return Number(allDayRow.capacity);
+
+  const setting = await queryRow<{ value: string }>(
+    "SELECT value FROM settings WHERE key = 'default_daily_capacity'",
+    []
+  );
+  const v = Number(setting?.value ?? 1);
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+export async function assertSlotAvailableForInsert(
+  date: string,
+  timeSlot: string
+): Promise<void> {
+  if (getDatabaseBackend() === "postgres") {
+    // 같은 날짜 저장을 직렬화한다. all_day와 오전/오후가 서로 배타적이므로
+    // 슬롯이 아니라 날짜 단위로 잠근다.
+    await queryRows(
+      "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+      [`clyn-clean:slot-insert:${date}`]
+    );
+  }
+
+  if (timeSlot === "all_day") {
+    // 사이청소는 종일 점유 — 그날 활성 예약이 하나라도 있으면 접수 불가
+    const row = await queryRow<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM reservations
+        WHERE desired_date = ? AND reservation_status IN ${ACTIVE_STATUSES}`,
+      [date]
+    );
+    if (Number(row?.c ?? 0) > 0) {
+      throw new SlotConflictError("선택하신 날짜에 이미 예약이 있습니다. 다른 날짜를 선택해주세요.");
+    }
+    // all_day 자체도 capacity가 0이면(관리자 마감) 접수 불가
+    if ((await effectiveCapacity(date, "all_day")) <= 0) {
+      throw new SlotConflictError("선택하신 날짜는 예약할 수 없습니다. 다른 날짜를 선택해주세요.");
+    }
+    return;
+  }
+
+  // 일반 예약 — 그날 all_day(사이청소) 점유가 있으면 차단
+  const allDayTaken = await queryRow<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM reservations
+      WHERE desired_date = ? AND time_slot = 'all_day'
+        AND reservation_status IN ${ACTIVE_STATUSES}`,
+    [date]
+  );
+  if (Number(allDayTaken?.c ?? 0) > 0) {
+    throw new SlotConflictError("선택하신 날짜는 종일 작업이 예정되어 있습니다. 다른 날짜를 선택해주세요.");
+  }
+
+  // 같은 슬롯의 활성 예약이 capacity 미만일 때만 허용한다
+  const capacity = await effectiveCapacity(date, timeSlot);
+  const active = await queryRow<{ c: number }>(
+    `SELECT COUNT(*) AS c FROM reservations
+      WHERE desired_date = ? AND time_slot = ?
+        AND reservation_status IN ${ACTIVE_STATUSES}`,
+    [date, timeSlot]
+  );
+  if (Number(active?.c ?? 0) >= capacity) {
+    throw new SlotConflictError("선택하신 시간은 이미 예약이 마감되었습니다. 다른 시간을 선택해주세요.");
+  }
+}
+
+/** 쿠폰 한도 소진 오류 */
+export class CouponExhaustedError extends Error {
+  code = "COUPON_EXHAUSTED";
+  constructor(message = "쿠폰 사용 한도가 모두 소진되었습니다. 새로 견적을 받아주세요.") {
+    super(message);
+    this.name = "CouponExhaustedError";
+  }
+}
+
+/**
+ * 쿠폰 사용을 원자적으로 확정한다.
+ *
+ * **반드시 예약 저장과 같은 transaction 안에서 호출해야 한다.**
+ * 그래야 "한도 확인 → 예약 저장 → redemption 기록"이 하나의 원자 단위가 된다.
+ *
+ * 동시성: PostgreSQL에서 쿠폰 row를 FOR UPDATE로 잠근 뒤 사용수를 센다.
+ * 서로 다른 quoteId 두 건이 마지막 1개를 동시에 노려도 정확히 하나만 통과한다.
+ * (단순 SELECT count → INSERT 경쟁조건을 남기지 않는다)
+ *
+ * 한도가 이미 찼으면 가격을 몰래 재계산하지 않고 CouponExhaustedError를 던진다.
+ */
+export async function redeemCouponInTransaction(input: {
+  couponId: number;
+  reservationId: number;
+  customerPhone: string | null;
+  discountAmount: number;
+}): Promise<void> {
+  if (getDatabaseBackend() === "postgres") {
+    // 쿠폰 row lock — 같은 쿠폰의 동시 사용을 직렬화한다
+    await queryRows("SELECT id FROM coupons WHERE id = ? FOR UPDATE", [input.couponId]);
+  }
+
+  const coupon = await queryRow<{ total_usage_limit: number | null; per_phone_limit: number | null }>(
+    "SELECT total_usage_limit, per_phone_limit FROM coupons WHERE id = ?",
+    [input.couponId]
+  );
+  if (!coupon) throw new CouponExhaustedError("쿠폰 정보를 찾을 수 없습니다.");
+
+  if (coupon.total_usage_limit != null) {
+    const used = await queryRow<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM coupon_redemptions WHERE coupon_id = ?",
+      [input.couponId]
+    );
+    if (Number(used?.c ?? 0) >= coupon.total_usage_limit) {
+      throw new CouponExhaustedError();
+    }
+  }
+  if (coupon.per_phone_limit != null && input.customerPhone) {
+    const used = await queryRow<{ c: number }>(
+      "SELECT COUNT(*) AS c FROM coupon_redemptions WHERE coupon_id = ? AND customer_phone = ?",
+      [input.couponId, input.customerPhone]
+    );
+    if (Number(used?.c ?? 0) >= coupon.per_phone_limit) {
+      throw new CouponExhaustedError("이미 사용하신 쿠폰입니다.");
+    }
+  }
+
+  await execute(
+    `INSERT INTO coupon_redemptions (coupon_id, reservation_id, customer_phone, discount_amount)
+     VALUES (?, ?, ?, ?)`,
+    [input.couponId, input.reservationId, input.customerPhone, input.discountAmount]
+  );
+}
+
+/** 예약의 할인 snapshot을 기록한다 (예약 생성 직후, 같은 transaction) */
+export function setReservationDiscountSnapshot(
+  reservationId: number,
+  snap: {
+    originalAmount: number;
+    automaticDiscountAmount: number;
+    couponDiscountAmount: number;
+    finalAmount: number;
+    promotionId: number | null;
+    promotionName: string | null;
+    couponId: number | null;
+    couponCode: string | null;
+  }
+): Promise<void> {
+  return execute(
+    `UPDATE reservations SET
+       original_amount = ?, automatic_discount_amount = ?, coupon_discount_amount = ?,
+       final_amount = ?, promotion_id = ?, promotion_name = ?, coupon_id = ?, coupon_code = ?
+     WHERE id = ?`,
+    [
+      snap.originalAmount, snap.automaticDiscountAmount, snap.couponDiscountAmount,
+      snap.finalAmount, snap.promotionId, snap.promotionName, snap.couponId, snap.couponCode,
+      reservationId,
+    ]
+  );
+}
+
+/** 관리자 수동 할인 결과를 예약 snapshot에 반영한다 */
+export function applyAdminDiscountSnapshot(input: {
+  reservationId: number;
+  adminDiscountAmount: number;
+  adminDiscountReason: string;
+  finalAmount: number;
+  estimatedBalance: number;
+}): Promise<void> {
+  return execute(
+    `UPDATE reservations SET
+       admin_discount_amount = ?, admin_discount_reason = ?,
+       final_amount = ?, estimated_balance_snapshot = ?, final_confirmed_total = ?,
+       updated_at = datetime('now')
+     WHERE id = ?`,
+    [
+      input.adminDiscountAmount, input.adminDiscountReason,
+      input.finalAmount, input.estimatedBalance, input.finalAmount,
+      input.reservationId,
+    ]
+  );
+}
+
+/** 관리자 할인 변경 이력 (audit) */
+export function insertDiscountAdjustment(input: {
+  reservationId: number;
+  adminId: number | null;
+  adminName: string;
+  discountType: string;
+  discountValue: number;
+  calculatedAmount: number;
+  reason: string;
+  previousFinalAmount: number;
+  newFinalAmount: number;
+}): Promise<void> {
+  return execute(
+    `INSERT INTO reservation_discount_adjustments
+       (reservation_id, admin_id, admin_name, discount_type, discount_value,
+        calculated_amount, reason, previous_final_amount, new_final_amount)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      input.reservationId, input.adminId, input.adminName, input.discountType,
+      input.discountValue, input.calculatedAmount, input.reason,
+      input.previousFinalAmount, input.newFinalAmount,
+    ]
+  );
+}
+
+/** 예약별 관리자 할인 이력 */
+export function listDiscountAdjustments(reservationId: number) {
+  return queryRows<{
+    id: number; admin_name: string | null; discount_type: string; discount_value: number;
+    calculated_amount: number; reason: string; previous_final_amount: number;
+    new_final_amount: number; created_at: string;
+  }>(
+    `SELECT * FROM reservation_discount_adjustments WHERE reservation_id = ? ORDER BY id DESC`,
+    [reservationId]
+  );
 }

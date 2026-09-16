@@ -427,11 +427,191 @@ export interface CreateReservationAndDepositResult {
  * 캘린더, 가격표, 특수일, 서비스지역을 다시 조회하지 않는다. 화면에 표시된
  * 견적 snapshot을 그대로 저장하고 pending payment와 관리자 이력을 한 트랜잭션에 만든다.
  */
+/**
+ * 할인 snapshot 기록 + 쿠폰 사용 확정.
+ * 반드시 예약 저장과 같은 transaction 안에서 호출한다.
+ */
+async function applyDiscountSnapshot(
+  reservationId: number,
+  discount: DiscountSnapshotInput | null | undefined,
+  input: CreateReservationInput,
+  totalAmount: number,
+  depositAmount: number
+): Promise<void> {
+  const snap = discount ?? {
+    originalAmount: totalAmount,
+    automaticDiscountAmount: 0,
+    couponDiscountAmount: 0,
+    promotionId: null,
+    promotionName: null,
+    couponId: null,
+    couponCode: null,
+  };
+  await reservationRepo.setReservationDiscountSnapshot(reservationId, {
+    ...snap,
+    // finalAmount는 quoteToken이 서명한 금액(totalAmount)과 동일해야 한다
+    finalAmount: totalAmount,
+  });
+  void depositAmount;
+
+  if (snap.couponId) {
+    await reservationRepo.redeemCouponInTransaction({
+      couponId: snap.couponId,
+      reservationId,
+      customerPhone: input.customerPhone ?? null,
+      discountAmount: snap.couponDiscountAmount,
+    });
+  }
+}
+
+/**
+ * 예약 접수 알림을 outbox에 넣는다.
+ *
+ * business transaction 안에서 INSERT만 한다. 외부 provider는 호출하지 않는다.
+ * event_key UNIQUE 때문에 retry로 같은 알림이 두 번 생기지 않는다.
+ * 상세주소 등 불필요한 개인정보는 payload에 넣지 않는다.
+ */
+async function enqueueReservationReceived(
+  reservationId: number,
+  code: string,
+  input: CreateReservationInput,
+  depositAmount: number,
+  dueDate: string
+): Promise<void> {
+  try {
+    const { enqueue } = await import("@/database/repositories/outbox-repository");
+    const { timeSlotLabel } = await import("./notifications/messages");
+    const { getBankSettings } = await import("./settings");
+    const bank = await getBankSettings();
+    await enqueue({
+      reservationId,
+      eventType: "reservation_received",
+      templateKey: process.env.SOLAPI_TEMPLATE_RESERVATION_RECEIVED ?? null,
+      payload: {
+        customerName: input.customerName,
+        customerPhone: input.customerPhone,
+        reservationCode: code,
+        serviceType: input.serviceType,
+        desiredDate: input.desiredDate ?? "",
+        timeLabel: timeSlotLabel(input.serviceType === "사이청소" ? "all_day" : input.timeSlot),
+        depositAmount,
+        bankName: bank.bankName,
+        accountNumber: bank.accountNumber,
+        accountHolder: bank.accountHolder,
+        depositDeadline: dueDate,
+      },
+    });
+  } catch (e) {
+    // 알림 enqueue 실패가 예약 저장을 막지 않는다
+    console.error(`[notify] enqueue failed event=reservation_received code=${(e as { code?: string })?.code ?? "UNKNOWN"}`);
+  }
+}
+
+/**
+ * 예약 기준 알림을 outbox에 넣는다 (입금확인 / 예약확정).
+ * business 처리가 끝난 뒤 호출하며, 실패해도 business 결과를 되돌리지 않는다.
+ */
+async function enqueueReservationEvent(
+  reservationId: number,
+  eventType: "deposit_confirmed" | "reservation_confirmed"
+): Promise<void> {
+  try {
+    const { enqueue } = await import("@/database/repositories/outbox-repository");
+    const { timeSlotLabel } = await import("./notifications/messages");
+    const r = await reservationRepo.findReservationById(reservationId);
+    if (!r) return;
+    const row = r as unknown as Record<string, string | null>;
+    const templateEnv =
+      eventType === "deposit_confirmed"
+        ? process.env.SOLAPI_TEMPLATE_DEPOSIT_CONFIRMED
+        : process.env.SOLAPI_TEMPLATE_RESERVATION_CONFIRMED;
+
+    await enqueue({
+      reservationId,
+      eventType,
+      templateKey: templateEnv ?? null,
+      payload: {
+        customerName: row.customer_name ?? "",
+        customerPhone: row.customer_phone ?? "",
+        reservationCode: row.reservation_code ?? "",
+        serviceType: row.service_type ?? "",
+        desiredDate: row.desired_date ?? "",
+        timeLabel: timeSlotLabel(row.time_slot),
+      },
+    });
+  } catch (e) {
+    console.error(`[notify] enqueue failed event=${eventType} code=${(e as { code?: string })?.code ?? "UNKNOWN"}`);
+  }
+}
+
+/** ReservationPersistenceError로 감싸진 원본 DB 오류를 꺼낸다 */
+/**
+ * 오류 cause 체인을 펼친다.
+ *
+ * ReservationPersistenceError가 원본 DB 오류를 cause로 감싸므로,
+ * idempotency 경합 판정을 위해 체인을 확인해야 한다.
+ * depth를 제한하고 순환 참조를 방지한다.
+ */
+const MAX_CAUSE_DEPTH = 5;
+
+function unwrapPersistenceError(e: unknown): unknown[] {
+  const chain: unknown[] = [];
+  const seen = new Set<unknown>();
+  let cur: unknown = e;
+  for (let i = 0; i < MAX_CAUSE_DEPTH && cur; i++) {
+    if (seen.has(cur)) break; // 순환 cause 방지
+    seen.add(cur);
+    chain.push(cur);
+    cur = (cur as { cause?: unknown })?.cause;
+  }
+  return chain;
+}
+
+/** 기존 예약 row를 생성 결과 형태로 변환한다 (idempotent 재요청 응답용) */
+function toCreateResult(
+  row: { id: number; reservation_code: string; total_amount_snapshot: number | null;
+         estimated_total_snapshot: number | null; deposit_amount_snapshot: number | null;
+         estimated_balance_snapshot: number | null; payment_id?: number | null;
+         payment_due_date?: string | null }
+): CreateReservationAndDepositResult {
+  const total = Number(row.total_amount_snapshot ?? row.estimated_total_snapshot ?? 0);
+  const deposit = Number(row.deposit_amount_snapshot ?? 0);
+  return {
+    reservationId: row.id,
+    reservationCode: row.reservation_code,
+    paymentId: Number(row.payment_id ?? 0),
+    totalAmount: total,
+    depositAmount: deposit,
+    balanceAmount: Number(row.estimated_balance_snapshot ?? Math.max(total - deposit, 0)),
+    depositDeadline: row.payment_due_date ?? "",
+  };
+}
+
+export interface DiscountSnapshotInput {
+  originalAmount: number;
+  automaticDiscountAmount: number;
+  couponDiscountAmount: number;
+  promotionId: number | null;
+  promotionName: string | null;
+  couponId: number | null;
+  couponCode: string | null;
+}
+
 export async function createReservationAndDeposit(
   input: CreateReservationInput,
   quote: SubmittedQuoteSnapshot,
-  paymentDueHours: number
+  paymentDueHours: number,
+  quoteId?: string | null,
+  discount?: DiscountSnapshotInput | null
 ): Promise<CreateReservationAndDepositResult> {
+  // ── 예약 제출 idempotency ────────────────────────────────────────────────
+  // 더블클릭·네트워크 재시도로 같은 견적이 다시 오면 새 예약을 만들지 않고
+  // 기존 예약의 성공 결과를 그대로 반환한다 (고객에게 오류를 보이지 않는다).
+  if (quoteId) {
+    const existing = await reservationRepo.findReservationByQuoteId(quoteId);
+    if (existing) return toCreateResult(existing);
+  }
+
   const allAgreed = isAllAgreed({
     corePrinciplesAgreed: input.corePrinciplesAgreed === true,
     serviceTermsAgreed: input.serviceTermsAgreed === true,
@@ -516,10 +696,18 @@ export async function createReservationAndDeposit(
     areaSidoCode: input.areaSidoCode ?? null,
     areaSigunguCode: input.areaSigunguCode ?? null,
     areaDongCode: input.areaDongCode ?? null,
+    quoteId: quoteId ?? null,
     finalConfirmedTotal: totalAmount,
     accountRevealed: true,
     reservationStatus: "awaiting_deposit",
   };
+
+  // ── B2: 슬롯 충돌 최소 방어 (mutable state) ──────────────────────────
+  // 가격 재계산이나 캘린더 전체 조회는 하지 않는다.
+  // advisory lock으로 같은 (날짜, 슬롯) 저장을 직렬화한 뒤 활성 예약만 확인한다.
+  // 단순 SELECT count → INSERT 경쟁조건으로 남기지 않는다.
+  const slotDate = input.desiredDate || null;
+  const slotKind = input.serviceType === "사이청소" ? "all_day" : input.timeSlot;
 
   const historyDetail = `고객 예약 접수 / 계좌 안내 — 총 ${totalAmount.toLocaleString("ko-KR")}원 / 예약금 ${depositAmount.toLocaleString("ko-KR")}원`;
   const depositorName = input.depositorName || input.customerName;
@@ -529,20 +717,37 @@ export async function createReservationAndDeposit(
 
   try {
     if (getDatabaseBackend() === "postgres") {
-      // Production: explicit BEGIN을 열지 않는다. 한 PostgreSQL statement가
-      // 예약 + payment + 관리자 이력을 원자적으로 기록한다.
-      const saved = await reservationRepo.insertReservationBundlePostgres({
-        reservation: reservationRow,
-        payment: {
-          amount: depositAmount,
-          depositorName,
-          dueDate,
-        },
-        historyDetail,
+      // 슬롯 검증과 저장은 반드시 같은 transaction이어야 한다.
+      // pg_advisory_xact_lock은 트랜잭션 종료 시 해제되므로,
+      // lock → capacity 조회 → active count → INSERT를 하나로 묶는다.
+      // (분리하면 lock이 먼저 풀려 동시 요청이 둘 다 통과한다)
+      const saved = await withTransaction(async () => {
+        if (slotDate) {
+          await reservationRepo.assertSlotAvailableForInsert(slotDate, slotKind);
+        }
+        const bundle = await reservationRepo.insertReservationBundlePostgres({
+          reservation: reservationRow,
+          payment: {
+            amount: depositAmount,
+            depositorName,
+            dueDate,
+          },
+          historyDetail,
+        });
+        // 할인 snapshot과 쿠폰 사용 확정을 같은 transaction에서 처리한다.
+        // 쿠폰 한도가 찼으면 여기서 throw되어 예약 전체가 롤백된다.
+        await applyDiscountSnapshot(bundle.reservationId, discount, input, totalAmount, depositAmount);
+        // outbox INSERT만 transaction 안에서. 외부 발송은 여기서 하지 않는다.
+        await enqueueReservationReceived(bundle.reservationId, code, input, depositAmount, dueDate);
+        return bundle;
       });
       reservationId = saved.reservationId;
       paymentId = saved.paymentId;
     } else {
+      if (slotDate) {
+        // SQLite는 withTransaction이 직렬화되므로 사전 확인으로 충분하다
+        await reservationRepo.assertSlotAvailableForInsert(slotDate, slotKind);
+      }
       // Local/SQLite: 기존 직렬 transaction을 유지한다.
       let stage: ReservationPersistenceError["stage"] = "transaction";
       try {
@@ -557,6 +762,9 @@ export async function createReservationAndDeposit(
             depositorName,
             dueDate,
           });
+
+          await applyDiscountSnapshot(reservationId, discount, input, totalAmount, depositAmount);
+          await enqueueReservationReceived(reservationId, code, input, depositAmount, dueDate);
 
           stage = "history_insert";
           await reservationRepo.insertLog(
@@ -574,6 +782,24 @@ export async function createReservationAndDeposit(
       }
     }
   } catch (error) {
+    // 동시 요청 경합: 같은 quoteId로 두 요청이 동시에 INSERT하면
+    // 한쪽은 unique violation이 난다. 이때 오류가 아니라 먼저 성공한
+    // 예약을 반환해 idempotent하게 처리한다 (generic 500 금지).
+    // 슬롯 충돌은 저장 실패가 아니라 "이미 마감됨"이라는 정상 비즈니스 결과다.
+    // ReservationPersistenceError로 감싸면 route가 409로 매핑하지 못하고
+    // generic 500(RESERVATION_SAVE_FAILED)이 된다.
+    // 슬롯 충돌 / 쿠폰 소진은 저장 실패가 아니라 정상 비즈니스 결과다.
+    // 감싸면 route가 409로 매핑하지 못하고 generic 500이 된다.
+    const businessError = unwrapPersistenceError(error).find((x) => {
+      const c = (x as { code?: string })?.code;
+      return c === "SLOT_UNAVAILABLE" || c === "COUPON_EXHAUSTED";
+    });
+    if (businessError) throw businessError;
+
+    if (quoteId && unwrapPersistenceError(error).some((x) => reservationRepo.isUniqueViolation(x))) {
+      const existing = await reservationRepo.findReservationByQuoteId(quoteId);
+      if (existing) return toCreateResult(existing);
+    }
     if (error instanceof ReservationPersistenceError) throw error;
     throw new ReservationPersistenceError("transaction", error);
   }
@@ -998,6 +1224,10 @@ export async function confirmPayment(
     prevStatus,
     nextStatus
   );
+
+  // 입금확인이 commit된 뒤 알림을 enqueue한다.
+  // 중복 입금확인은 compareAndSet으로 막히고, event_key UNIQUE가 이중 방어한다.
+  await enqueueReservationEvent(reservationId, "deposit_confirmed");
 }
 
 /**
@@ -1043,6 +1273,10 @@ export async function confirmReservation(
     "awaiting_admin_check",
     "confirmed"
   );
+
+  // 예약확정이 commit된 뒤 알림을 enqueue한다.
+  // 발송 실패가 확정을 되돌리지 않는다. 더블클릭은 event_key UNIQUE로 차단된다.
+  await enqueueReservationEvent(reservationId, "reservation_confirmed");
 }
 
 const ALLOWED_PAYMENT_TRANSITIONS: Record<PaymentStatus, PaymentStatus[]> = {
@@ -1237,4 +1471,103 @@ export async function releaseExpiredDepositReservations(): Promise<number> {
     }
   }
   return released;
+}
+
+
+// ---------------------------------------------------------------------------
+// 관리자 수동 할인 (예약 생성 이후 adjustment)
+// ---------------------------------------------------------------------------
+
+export class AdminDiscountError extends Error {
+  code: string;
+  constructor(message: string, code = "ADMIN_DISCOUNT_INVALID") {
+    super(message);
+    this.name = "AdminDiscountError";
+    this.code = code;
+  }
+}
+
+/**
+ * 관리자 수동 할인을 적용한다.
+ *
+ * 계산 순서상 마지막 단계다: 정상가 → 자동 → 쿠폰 → **관리자 할인** → 최종금액
+ *
+ * 규칙:
+ *   - 할인 사유는 필수
+ *   - finalAmount >= 0
+ *   - 이미 받은 금액(예약금)보다 낮아지는 할인은 차단한다.
+ *     환불은 별도 절차이며 여기서 임의로 처리하지 않는다.
+ *   - 변경 이력을 reservation_discount_adjustments에 남긴다
+ */
+export async function applyAdminDiscount(input: {
+  reservationId: number;
+  discountType: "fixed" | "percent";
+  discountValue: number;
+  reason: string;
+  adminId: number | null;
+  adminName: string;
+}): Promise<{ previousFinalAmount: number; newFinalAmount: number; calculatedAmount: number }> {
+  const reason = input.reason?.trim();
+  if (!reason) {
+    throw new AdminDiscountError("할인 사유를 입력해주세요.", "ADMIN_DISCOUNT_REASON_REQUIRED");
+  }
+  if (!Number.isFinite(input.discountValue) || input.discountValue <= 0) {
+    throw new AdminDiscountError("할인 금액(또는 비율)을 확인해주세요.");
+  }
+
+  const r = await reservationRepo.findReservationById(input.reservationId);
+  if (!r) throw new AdminDiscountError("예약을 찾을 수 없습니다.", "RESERVATION_NOT_FOUND");
+
+  const row = r as unknown as Record<string, number | null>;
+  const previousFinal = Number(
+    row.final_amount ?? row.total_amount_snapshot ?? row.estimated_total_snapshot ?? 0
+  );
+  const deposit = Number(row.deposit_amount_snapshot ?? 0);
+
+  const calculated =
+    input.discountType === "percent"
+      ? Math.floor((previousFinal * input.discountValue) / 100)
+      : Math.round(input.discountValue);
+
+  const newFinal = previousFinal - calculated;
+  if (newFinal < 0) {
+    throw new AdminDiscountError("할인 후 금액이 0원 미만이 될 수 없습니다.");
+  }
+
+  // 이미 입금된 예약금보다 최종금액이 낮아지면 환불이 필요하다.
+  // 자동 처리하지 않고 명확히 거부한다.
+  const payment = await reservationRepo.findPaymentByReservationId(input.reservationId);
+  const paid = payment?.payment_status === "confirmed" ? Number(payment.amount ?? 0) : 0;
+  if (paid > 0 && newFinal < paid) {
+    throw new AdminDiscountError(
+      `이미 입금된 금액(${paid.toLocaleString("ko-KR")}원)보다 낮은 최종금액으로는 할인할 수 없습니다. 환불은 별도로 처리해주세요.`,
+      "ADMIN_DISCOUNT_BELOW_PAID"
+    );
+  }
+
+  const newBalance = Math.max(newFinal - deposit, 0);
+  const prevAdmin = Number(row.admin_discount_amount ?? 0);
+
+  await withTransaction(async () => {
+    await reservationRepo.applyAdminDiscountSnapshot({
+      reservationId: input.reservationId,
+      adminDiscountAmount: prevAdmin + calculated,
+      adminDiscountReason: reason,
+      finalAmount: newFinal,
+      estimatedBalance: newBalance,
+    });
+    await reservationRepo.insertDiscountAdjustment({
+      reservationId: input.reservationId,
+      adminId: input.adminId,
+      adminName: input.adminName,
+      discountType: input.discountType,
+      discountValue: input.discountValue,
+      calculatedAmount: calculated,
+      reason,
+      previousFinalAmount: previousFinal,
+      newFinalAmount: newFinal,
+    });
+  });
+
+  return { previousFinalAmount: previousFinal, newFinalAmount: newFinal, calculatedAmount: calculated };
 }

@@ -53,7 +53,10 @@ export default function AdminServiceAreasPage() {
     }
   }
 
-  useEffect(() => { void load(); }, []);
+  useEffect(() => {
+    // effect 내 동기 setState 경고 회피 — microtask로 넘긴다
+    void Promise.resolve().then(() => { void load(); });
+  }, []);
 
   async function pickSido(code: string) {
     setSido(code);

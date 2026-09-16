@@ -11,6 +11,8 @@ const NAV = [
   { href: "/admin/special-days", label: "공휴일 관리" },
   { href: "/admin/slot-reopen", label: "사이청소 슬롯" },
   { href: "/admin/service-areas", label: "서비스 지역" },
+  { href: "/admin/discounts", label: "할인 관리" },
+  { href: "/admin/notices", label: "공지 / 팝업" },
   { href: "/admin/pricing", label: "가격 설정" },
   { href: "/admin/settings", label: "요금/계좌 설정" },
   { href: "/admin/reviews", label: "후기 관리" },
