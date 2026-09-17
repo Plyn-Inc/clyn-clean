@@ -112,7 +112,7 @@ export const BRAND_FALLBACK = {
   legalCompanyName: "주식회사 플린",
   legalCompanyNameEn: "Plyn Inc.",
   phone: "070-4155-5403",
-  address: "경기도 의정부시 경의로 19, 경원빌딘 301호",
+  address: "경기도 의정부시 경의로 19, 경원빌딩 301호",
   bizNumber: "792-81-04045",
   mailOrderNumber: "제 2026-의정부흥선-0327 호",
 } as const;
