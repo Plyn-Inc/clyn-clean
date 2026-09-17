@@ -4,12 +4,12 @@ import Image from "next/image";
 import { useEffect, useState } from "react";
 import { HERO_SLIDES } from "@/lib/images";
 import OneRoomOfferPrice from "@/components/OneRoomOfferPrice";
+import BookingSection from "@/components/booking/BookingSection";
 
 /**
  * 메인 Hero.
- *
- * 브랜드 사이트의 정체성은 유지하되 현재 주력상품인 일반 단층 원룸을 가장 먼저 판매한다.
- * 가격은 공개 offer API에서 가져와 실제 자동 프로모션 결과와 일치시킨다.
+ * 데스크톱은 판매 메시지와 예약 캘린더를 같은 첫 화면의 좌/우에 배치하고,
+ * 모바일은 메시지 다음에 캘린더와 예약폼을 세로로 이어서 즉시 예약할 수 있게 한다.
  */
 export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phone: string }) {
   const [index, setIndex] = useState(0);
@@ -19,15 +19,9 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
       typeof window !== "undefined" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     if (reduce) return;
-    const timer = setInterval(() => {
-      setIndex((i) => (i + 1) % HERO_SLIDES.length);
-    }, 6000);
+    const timer = setInterval(() => setIndex((i) => (i + 1) % HERO_SLIDES.length), 6000);
     return () => clearInterval(timer);
   }, []);
-
-  function scrollTo(id: string) {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }
 
   return (
     <section className="relative overflow-hidden bg-white">
@@ -39,85 +33,62 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
           fill
           priority={i === 0}
           sizes="100vw"
-          className={`object-cover object-center transition-opacity duration-1000 ${
-            i === index ? "opacity-100" : "opacity-0"
-          }`}
+          className={`object-cover object-center transition-opacity duration-1000 ${i === index ? "opacity-100" : "opacity-0"}`}
         />
       ))}
+      <div className="absolute inset-0 bg-gradient-to-r from-white/95 via-white/88 to-white/55" aria-hidden />
 
-      <div
-        className="absolute inset-0 bg-gradient-to-r from-white/95 via-white/78 to-white/15 md:to-transparent"
-        aria-hidden
-      />
+      <div className="relative mx-auto max-w-7xl px-4 py-8 sm:px-5 sm:py-10 md:px-8 lg:py-12">
+        <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,0.88fr)_minmax(520px,1.12fr)] lg:gap-8">
+          <div className="pt-2 lg:sticky lg:top-24 lg:pt-8">
+            <p className="mb-3 inline-block rounded-full bg-[var(--mint-soft)] px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint)]">
+              일반 단층 원룸 전용 온라인 예약
+            </p>
+            <h1 className="font-display text-3xl font-bold leading-tight text-[var(--navy)] sm:text-4xl lg:text-5xl xl:text-6xl">
+              원룸 입주·퇴실청소
+              <br />
+              복잡하게 견적받지 마세요.
+            </h1>
+            <p className="mt-4 max-w-xl text-sm leading-relaxed text-[var(--ink-soft)] sm:text-base lg:text-lg">
+              작업 전 추가비용을 먼저 안내하고, 작업 완료 후 주요 결과사진을 제공합니다.
+            </p>
 
-      <div className="relative mx-auto max-w-6xl px-5 py-20 md:px-8 md:py-28">
-        <p className="mb-3 inline-block rounded-full bg-[var(--mint-soft)] px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint)]">
-          일반 단층 원룸 전용 온라인 예약
-        </p>
-        <h1 className="font-display max-w-3xl text-4xl font-bold leading-tight text-[var(--navy)] md:text-6xl">
-          원룸 입주·퇴실청소
-          <br />
-          복잡하게 견적받지 마세요.
-        </h1>
-        <p className="mt-5 max-w-xl text-base leading-relaxed text-[var(--ink-soft)] md:text-lg">
-          작업 전 추가비용을 먼저 안내하고, 작업 완료 후 주요 결과사진을 제공합니다.
-        </p>
+            <div className="mt-5 rounded-2xl border border-white/70 bg-white/82 p-4 shadow-sm backdrop-blur sm:inline-block sm:min-w-[320px]">
+              <p className="mb-1 text-xs font-bold tracking-[0.16em] text-[var(--mint)]">CLYN OPEN PRICE</p>
+              <OneRoomOfferPrice showLabel={false} />
+            </div>
+            <p className="mt-3 max-w-xl text-[11px] leading-relaxed text-[var(--ink-soft)] sm:text-xs">
+              일반 단층 원룸 기본 청소범위 기준 · 1.5룸 · 원룸 복층 · 투룸 이상 제외 · 특수오염·폐기물·별도 요청 작업은 작업 전 안내 후 진행
+            </p>
 
-        <div className="mt-7">
-          <p className="mb-1 text-xs font-bold tracking-[0.16em] text-[var(--mint)]">CLYN OPEN PRICE</p>
-          <OneRoomOfferPrice showLabel={false} />
-        </div>
-        <p className="mt-4 max-w-2xl text-xs leading-relaxed text-[var(--ink-soft)]">
-          일반 단층 원룸 기본 청소범위 기준 · 1.5룸 · 원룸 복층 · 투룸 이상 제외 · 특수오염·폐기물·별도 요청 작업은 작업 전 안내 후 진행
-        </p>
+            <div className="mt-5 flex flex-wrap gap-2">
+              {kakaoUrl ? (
+                <a href={kakaoUrl} target="_blank" rel="noreferrer" className="flex min-h-[48px] items-center rounded-full border border-[var(--navy)] bg-white/90 px-5 text-sm font-semibold text-[var(--navy)]">
+                  카카오톡 문의
+                </a>
+              ) : (
+                <a href="/consultation" className="flex min-h-[48px] items-center rounded-full border border-[var(--navy)] bg-white/90 px-5 text-sm font-semibold text-[var(--navy)]">
+                  상담 접수
+                </a>
+              )}
+              {phone && <a href={`tel:${phone.replace(/[^0-9+]/g, "")}`} className="flex min-h-[48px] items-center rounded-full bg-[var(--navy)] px-5 text-sm font-semibold text-white">전화 문의</a>}
+            </div>
 
-        <div className="mt-8 flex flex-wrap gap-3">
-          <button
-            onClick={() => scrollTo("calendar")}
-            className="min-h-[52px] rounded-full bg-[var(--navy)] px-7 text-sm font-semibold text-white transition hover:bg-[var(--navy-deep)]"
-          >
-            예약 가능일 확인
-          </button>
-          <button
-            onClick={() => scrollTo("booking")}
-            className="min-h-[52px] rounded-full border border-[var(--navy)] bg-white/80 px-7 text-sm font-semibold text-[var(--navy)] backdrop-blur transition hover:bg-white"
-          >
-            빠른 견적 받기
-          </button>
-          {kakaoUrl ? (
-            <a
-              href={kakaoUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="flex min-h-[52px] items-center rounded-full border border-[var(--line)] bg-white/80 px-7 text-sm font-semibold text-[var(--ink-soft)] backdrop-blur transition hover:bg-white"
-            >
-              카카오톡 문의
-            </a>
-          ) : (
-            <a
-              href="/consultation"
-              className="flex min-h-[52px] items-center rounded-full border border-[var(--line)] bg-white/80 px-7 text-sm font-semibold text-[var(--ink-soft)] backdrop-blur transition hover:bg-white"
-            >
-              상담 접수
-            </a>
-          )}
-        </div>
+            <div className="mt-5 flex gap-2" role="tablist" aria-label="대표 이미지 선택">
+              {HERO_SLIDES.map((slide, i) => (
+                <button key={slide.src} role="tab" aria-selected={i === index} aria-label={`${i + 1}번째 이미지: ${slide.alt}`} onClick={() => setIndex(i)} className={`h-2.5 rounded-full transition-all ${i === index ? "w-8 bg-[var(--navy)]" : "w-2.5 bg-[var(--navy)]/25"}`} />
+              ))}
+            </div>
+          </div>
 
-        {phone && <p className="mt-5 text-sm text-[var(--ink-soft)]">전화 문의 {phone}</p>}
-
-        <div className="mt-8 flex gap-2" role="tablist" aria-label="대표 이미지 선택">
-          {HERO_SLIDES.map((slide, i) => (
-            <button
-              key={slide.src}
-              role="tab"
-              aria-selected={i === index}
-              aria-label={`${i + 1}번째 이미지: ${slide.alt}`}
-              onClick={() => setIndex(i)}
-              className={`h-2.5 rounded-full transition-all ${
-                i === index ? "w-8 bg-[var(--navy)]" : "w-2.5 bg-[var(--navy)]/25"
-              }`}
-            />
-          ))}
+          <div className="rounded-3xl border border-white/80 bg-white/94 p-3 shadow-xl backdrop-blur sm:p-5 lg:p-6">
+            <div className="mb-4 px-1">
+              <p className="text-xs font-bold tracking-[0.14em] text-[var(--mint)]">바로 예약</p>
+              <h2 className="mt-1 text-xl font-bold text-[var(--navy)] sm:text-2xl">예약 가능한 날짜와 지역을 바로 확인하세요</h2>
+              <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)] sm:text-sm">날짜를 선택한 뒤 지역과 고객정보를 입력하면 같은 화면에서 예약을 이어갈 수 있습니다.</p>
+            </div>
+            <BookingSection mode="one-room" layout="hero" />
+          </div>
         </div>
       </div>
     </section>
