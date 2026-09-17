@@ -8,8 +8,8 @@ import BookingSection from "@/components/booking/BookingSection";
 
 /**
  * 메인 Hero.
- * 데스크톱은 판매 메시지와 예약 캘린더를 같은 첫 화면의 좌/우에 배치하고,
- * 모바일은 메시지 다음에 캘린더와 예약폼을 세로로 이어서 즉시 예약할 수 있게 한다.
+ * 데스크톱은 판매 메시지 42% / 예약 58%로 배치하고,
+ * 우측 예약영역은 날짜 선택 전 캘린더, 선택 후 예약폼으로 전환한다.
  */
 export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phone: string }) {
   const [index, setIndex] = useState(0);
@@ -39,7 +39,7 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
       <div className="absolute inset-0 bg-gradient-to-r from-white/95 via-white/88 to-white/55" aria-hidden />
 
       <div className="relative mx-auto max-w-7xl px-4 py-6 sm:px-5 sm:py-8 md:px-8 lg:py-10">
-        <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-7">
+        <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,0.72fr)_minmax(0,1fr)] lg:gap-7">
           <div className="pt-1 lg:pt-5">
             <p className="mb-3 inline-block rounded-full bg-[var(--mint-soft)] px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint)]">
               일반 단층 원룸 전용 온라인 예약
