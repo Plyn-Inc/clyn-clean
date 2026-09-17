@@ -43,9 +43,10 @@ export default function BookingSection({ mode = "default", layout = "default" }:
   }
 
   const heroLayout = layout === "hero";
+  const heroCompactClass = "grid gap-3 [&_#calendar>div]:p-3 [&_#calendar>div>div:first-child]:mb-2 [&_#calendar_button]:min-h-[30px] [&_#calendar_button]:py-0.5 [&_#booking>div]:p-4 [&_#booking_ol]:mb-4";
 
   return (
-    <div className={heroLayout ? "grid gap-3" : "grid gap-6 lg:grid-cols-[420px_1fr]"}>
+    <div className={heroLayout ? heroCompactClass : "grid gap-6 lg:grid-cols-[420px_1fr]"}>
       <div id="calendar" className="scroll-mt-24">
         <ReservationCalendar
           onSelectSlot={handleSelectSlot}
@@ -54,7 +55,6 @@ export default function BookingSection({ mode = "default", layout = "default" }:
           selectedSlot={selectedSlot}
           selectedDate={selectedDate}
           dateOnly={activeService === "사이청소"}
-          compact={heroLayout}
         />
       </div>
       <div id="booking" ref={bookingRef} className="scroll-mt-24">
@@ -63,7 +63,6 @@ export default function BookingSection({ mode = "default", layout = "default" }:
           selectedDate={selectedDate}
           onServiceChange={handleServiceChange}
           mode={mode}
-          compact={heroLayout}
         />
       </div>
     </div>
