@@ -294,7 +294,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
     });
 
     return () => controller.abort();
-  }, [regionReadyForPricing, serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot, appliedCoupon, region.sidoCode, region.sigunguCode, region.dongCode, moveOutTime, moveInTime, customerPhone]);
+  }, [regionReadyForPricing, serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot, appliedCoupon, region.sidoCode, region.sigunguCode, region.dongCode, moveOutTime, moveInTime]);
 
   function toggle(list: string[], v: string) {
     return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
