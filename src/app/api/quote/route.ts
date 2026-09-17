@@ -298,8 +298,28 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // 할인 결과를 quote DTO에도 반영한다.
+    //
+    // quote DTO / discount DTO / quoteToken / 예약 snapshot의 최종금액은
+    // 반드시 같은 값이어야 한다. 이전에는 quote DTO만 할인 전 금액을 담아
+    // 화면에 179,000원이 뜨고 실제 결제는 139,000원이 되는 이중 상태가 있었다.
+    //
+    // 금액을 하드코딩하지 않는다. discount(= Admin 프로모션 계산 결과)를 단일 원천으로 쓴다.
+    const quoteForClient = discount
+      ? {
+          ...publicQuote,
+          estimatedTotal: discount.finalAmount,
+          depositAmount: deposit,
+          estimatedBalance: finalBalance,
+          // 표시 문자열도 같은 금액을 가리켜야 한다
+          displayPriceLabel: publicQuote.isStartingPrice
+            ? `${discount.finalAmount.toLocaleString("ko-KR")}원부터`
+            : `${discount.finalAmount.toLocaleString("ko-KR")}원`,
+        }
+      : publicQuote;
+
     return NextResponse.json({
-      quote: publicQuote,
+      quote: quoteForClient,
       quoteToken,
       // 고객 화면에 할인 전후를 명확히 보여주기 위한 breakdown
       discount: discount
