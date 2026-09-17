@@ -18,22 +18,20 @@ test('할인 중에는 정상가를 빨간 취소선으로 함께 보여준다',
   assert.match(offer, /offer\.basePrice/);
   assert.match(offer, /line-through/);
   assert.match(offer, /text-\[#D14343\]/);
+  assert.match(offer, /decoration-2/);
 });
 
-test('Hero 예약은 compact 캘린더와 compact 폼을 사용한다', () => {
+test('Hero 예약은 기존 로직을 유지하면서 캘린더와 폼의 세로 길이를 줄인다', () => {
   const section = read('src/components/booking/BookingSection.tsx');
-  const matches = section.match(/compact=\{heroLayout\}/g) || [];
-  assert.equal(matches.length, 2);
-
-  const calendar = read('src/components/booking/ReservationCalendar.tsx');
-  assert.match(calendar, /compact\?: boolean/);
-
-  const form = read('src/components/booking/BookingForm.tsx');
-  assert.match(form, /compact\?: boolean/);
-  assert.match(form, /!compact && isOneRoomMode/);
+  assert.match(section, /heroCompactClass/);
+  assert.match(section, /\[&_#calendar_button\]:min-h-\[30px\]/);
+  assert.match(section, /\[&_#calendar>div\]:p-3/);
+  assert.match(section, /\[&_#booking>div\]:p-4/);
+  assert.doesNotMatch(section, /compact=\{heroLayout\}/);
 });
 
-test('헤더 로고는 투명 배경 자산을 사용한다', () => {
-  const images = read('src/lib/images.ts');
-  assert.match(images, /clyn-clean-care-logo-transparent\.png/);
+test('헤더 로고의 흰 사각 배경이 보이지 않도록 블렌딩한다', () => {
+  const header = read('src/components/SiteHeader.tsx');
+  const matches = header.match(/mix-blend-multiply/g) || [];
+  assert.equal(matches.length, 2);
 });
