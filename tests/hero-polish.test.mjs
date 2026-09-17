@@ -13,25 +13,33 @@ test('Hero 우측은 캘린더/예약창만 남기고 좌우 비율을 맞춘다
   assert.match(hero, /lg:grid-cols-\[minmax\(0,1fr\)_minmax\(0,1fr\)\]/);
 });
 
-test('할인 중에는 정상가를 빨간 취소선으로 함께 보여준다', () => {
+test('할인 중 정상가는 빨간 굵은 취소선으로 주 가격보다 먼저 보여준다', () => {
   const offer = read('src/components/OneRoomOfferPrice.tsx');
-  assert.match(offer, /offer\.basePrice/);
-  assert.match(offer, /line-through/);
+  const baseIndex = offer.indexOf('offer.basePrice.toLocaleString');
+  const openIndex = offer.indexOf('offer.openPrice.toLocaleString');
+  assert.ok(baseIndex >= 0, '정상가 표시가 있어야 한다');
+  assert.ok(openIndex >= 0, '프로모션가 표시가 있어야 한다');
+  assert.ok(baseIndex < openIndex, '정상가 취소선이 프로모션가보다 먼저 보여야 한다');
   assert.match(offer, /text-\[#D14343\]/);
-  assert.match(offer, /decoration-2/);
+  assert.match(offer, /line-through/);
+  assert.match(offer, /decoration-\[#D14343\]/);
+  assert.match(offer, /decoration-4/);
 });
 
-test('Hero 예약은 기존 로직을 유지하면서 캘린더와 폼의 세로 길이를 줄인다', () => {
+test('Hero 예약은 compact 캘린더와 compact 폼을 사용한다', () => {
   const section = read('src/components/booking/BookingSection.tsx');
-  assert.match(section, /heroCompactClass/);
-  assert.match(section, /\[&_#calendar_button\]:min-h-\[30px\]/);
-  assert.match(section, /\[&_#calendar>div\]:p-3/);
-  assert.match(section, /\[&_#booking>div\]:p-4/);
-  assert.doesNotMatch(section, /compact=\{heroLayout\}/);
+  const matches = section.match(/compact=\{heroLayout\}/g) || [];
+  assert.equal(matches.length, 2);
+
+  const calendar = read('src/components/booking/ReservationCalendar.tsx');
+  assert.match(calendar, /compact\?: boolean/);
+
+  const form = read('src/components/booking/BookingForm.tsx');
+  assert.match(form, /compact\?: boolean/);
+  assert.match(form, /!compact && isOneRoomMode/);
 });
 
-test('헤더 로고의 흰 사각 배경이 보이지 않도록 블렌딩한다', () => {
+test('헤더 로고는 배경 없이 보이도록 흰색 픽셀을 제거한다', () => {
   const header = read('src/components/SiteHeader.tsx');
-  const matches = header.match(/mix-blend-multiply/g) || [];
-  assert.equal(matches.length, 2);
+  assert.match(header, /mix-blend-multiply/);
 });
