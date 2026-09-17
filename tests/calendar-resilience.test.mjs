@@ -22,6 +22,12 @@ test('캘린더 상태 조회는 사용자 버튼 없이 자동 재시도한다'
   assert.doesNotMatch(source, />\s*다시 불러오기\s*</);
 });
 
+test('초기 재시도 이후에도 캘린더 상태를 주기적으로 자동 복구한다', () => {
+  const source = read('src/components/booking/StableReservationCalendar.tsx');
+  assert.match(source, /RECOVERY_RETRY_DELAY_MS/);
+  assert.match(source, /setTimeout\(\(\) => void load\(0\), RECOVERY_RETRY_DELAY_MS\)/);
+});
+
 test('BookingSection은 안정형 캘린더를 사용한다', () => {
   const source = read('src/components/booking/BookingSection.tsx');
   assert.match(source, /StableReservationCalendar/);
