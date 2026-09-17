@@ -44,7 +44,7 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
             <p className="mb-3 inline-block rounded-full bg-[var(--mint-soft)] px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint)]">
               일반 단층 원룸 전용 온라인 예약
             </p>
-            <h1 className="font-display text-3xl font-bold leading-tight text-[var(--navy)] sm:text-4xl lg:text-5xl xl:text-[3.4rem]">
+            <h1 className="font-display text-3xl font-bold leading-tight text-[var(--navy)] sm:text-4xl lg:text-[2rem] xl:text-[2.7rem]">
               원룸 입주·퇴실청소
               <br />
               복잡하게 견적받지 마세요.
