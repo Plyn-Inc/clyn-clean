@@ -24,6 +24,7 @@ interface PublicDay {
 
 const MAX_AUTO_RETRIES = 2;
 const RETRY_DELAY_MS = 1200;
+const RECOVERY_RETRY_DELAY_MS = 10000;
 const slotClass: Record<PublicSlotStatus, string> = {
   "예약가능": "bg-[#E3F5EE] text-[#1FA37A] hover:bg-[#1FA37A] hover:text-white",
   "예약진행 중": "bg-[#FBE9D3] text-[#C77C1E] cursor-not-allowed",
@@ -59,7 +60,6 @@ export default function StableReservationCalendar({
   const [days, setDays] = useState<Record<string, PublicDay>>({});
   const [loading, setLoading] = useState(true);
   const [statusError, setStatusError] = useState(false);
-  const [requestKey, setRequestKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -90,6 +90,7 @@ export default function StableReservationCalendar({
         }
         setStatusError(true);
         setLoading(false);
+        retryTimer = setTimeout(() => void load(0), RECOVERY_RETRY_DELAY_MS);
       }
     }
 
@@ -98,7 +99,7 @@ export default function StableReservationCalendar({
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [cursor, requestKey]);
+  }, [cursor]);
 
   const monthLabel = `${cursor.year}년 ${cursor.month + 1}월`;
   const firstDay = new Date(cursor.year, cursor.month, 1).getDay();
@@ -127,7 +128,7 @@ export default function StableReservationCalendar({
         <div className="text-center">
           <p className="font-display text-base font-bold">{monthLabel}</p>
           <p className="mt-0.5 min-h-4 text-[10px] text-[var(--ink-soft)]">
-            {loading ? "예약 상태 확인 중..." : statusError ? "상태를 확인하지 못했습니다 · 자동으로 다시 확인합니다" : ""}
+            {loading ? "예약 상태 확인 중..." : statusError ? "예약 상태 연결을 복구 중입니다" : ""}
           </p>
         </div>
         <button type="button" aria-label="다음 달" disabled={cursorIndex >= maxIndex} onClick={() => moveMonth(1)} className="h-9 w-9 rounded-lg border border-[var(--line)] disabled:opacity-30">›</button>
@@ -164,7 +165,7 @@ export default function StableReservationCalendar({
                   disabled={!known || (!dateSelectable && !consult)}
                   onClick={() => consult ? onSelectConsultDate(date) : dateSelectable ? onSelectDate?.(date) : undefined}
                   className={`min-h-[54px] w-full rounded-md text-[10px] font-medium ${known ? slotClass[dateStatus] : unknownClass} ${selectedDate === date ? "ring-2 ring-[var(--navy)]" : ""}`}
-                >날짜<span className="block text-[9px]">{known ? (consult ? "상담" : label[dateStatus]) : "-"}</span></button>
+                >날짜<span className="block text-[9px]">{known ? (consult ? "상담" : label[dateStatus]) : "확인중"}</span></button>
               ) : (
                 <>
                   {(["morning", "afternoon"] as const).map((timeSlot) => {
@@ -177,7 +178,7 @@ export default function StableReservationCalendar({
                         disabled={!slot || (!slot.selectable && !slot.consultRequired)}
                         onClick={() => selectSlot(date, timeSlot, slot)}
                         className={`${timeSlot === "morning" ? "mb-0.5" : ""} min-h-[36px] w-full rounded-md text-[10px] font-medium ${slot ? slotClass[slot.publicStatus] : unknownClass} ${selected ? "ring-2 ring-[var(--navy)]" : ""}`}
-                      >{timeSlot === "morning" ? "오전" : "오후"}<span className="block text-[9px]">{slot ? (slot.consultRequired ? "상담" : label[slot.publicStatus]) : "-"}</span></button>
+                      >{timeSlot === "morning" ? "오전" : "오후"}<span className="block text-[9px]">{slot ? (slot.consultRequired ? "상담" : label[slot.publicStatus]) : "확인중"}</span></button>
                     );
                   })}
                 </>
@@ -186,10 +187,6 @@ export default function StableReservationCalendar({
           );
         })}
       </div>
-
-      {statusError && (
-        <button type="button" className="sr-only" onClick={() => setRequestKey((value) => value + 1)}>상태 다시 확인</button>
-      )}
     </div>
   );
 }
