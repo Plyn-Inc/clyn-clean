@@ -17,17 +17,19 @@ export default function BookingSection({ mode = "default", layout = "default" }:
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [activeService, setActiveService] = useState<ServiceType>(SERVICE_TYPES[0]);
   const bookingRef = useRef<HTMLDivElement | null>(null);
+  const heroLayout = layout === "hero";
+  const hasSelection = Boolean(selectedSlot || selectedDate);
 
   function handleSelectSlot(slot: SelectedSlot) {
     setSelectedSlot(slot);
     setSelectedDate(null);
-    bookingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!heroLayout) bookingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function handleSelectDate(date: string) {
     setSelectedDate(date);
     setSelectedSlot(null);
-    bookingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!heroLayout) bookingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function handleServiceChange(nextService: ServiceType) {
@@ -42,29 +44,52 @@ export default function BookingSection({ mode = "default", layout = "default" }:
     alert(`${date}는 상담이 필요한 날짜입니다. 문의하기를 통해 상담을 진행해주세요.`);
   }
 
-  const heroLayout = layout === "hero";
-  const heroCompactClass = "grid gap-3 [&_#calendar>div]:p-3 [&_#calendar>div>div:first-child]:mb-2 [&_#calendar_button]:min-h-[30px] [&_#calendar_button]:py-0.5 [&_#booking>div]:p-4 [&_#booking_ol]:mb-4";
+  function resetHeroDate() {
+    setSelectedSlot(null);
+    setSelectedDate(null);
+  }
 
-  return (
-    <div className={heroLayout ? heroCompactClass : "grid gap-6 lg:grid-cols-[420px_1fr]"}>
-      <div id="calendar" className="scroll-mt-24">
-        <ReservationCalendar
-          onSelectSlot={handleSelectSlot}
-          onSelectDate={handleSelectDate}
-          onSelectConsultDate={handleSelectConsult}
-          selectedSlot={selectedSlot}
-          selectedDate={selectedDate}
-          dateOnly={activeService === "사이청소"}
-        />
-      </div>
-      <div id="booking" ref={bookingRef} className="scroll-mt-24">
-        <BookingForm
-          selectedSlot={selectedSlot}
-          selectedDate={selectedDate}
-          onServiceChange={handleServiceChange}
-          mode={mode}
-        />
-      </div>
+  const calendar = (
+    <div id="calendar" className="scroll-mt-24">
+      <ReservationCalendar
+        onSelectSlot={handleSelectSlot}
+        onSelectDate={handleSelectDate}
+        onSelectConsultDate={handleSelectConsult}
+        selectedSlot={selectedSlot}
+        selectedDate={selectedDate}
+        dateOnly={activeService === "사이청소"}
+      />
     </div>
   );
+
+  const booking = (
+    <div id="booking" ref={bookingRef} className="scroll-mt-24">
+      {heroLayout && hasSelection && (
+        <button
+          type="button"
+          onClick={resetHeroDate}
+          className="mb-3 min-h-[40px] rounded-full border border-[var(--line)] bg-white px-4 text-xs font-semibold text-[var(--navy)]"
+        >
+          ← 날짜 다시 선택
+        </button>
+      )}
+      <BookingForm
+        selectedSlot={selectedSlot}
+        selectedDate={selectedDate}
+        onServiceChange={handleServiceChange}
+        mode={mode}
+      />
+    </div>
+  );
+
+  if (heroLayout) {
+    return (
+      <div className="grid gap-3 [&_#calendar>div]:p-3 [&_#calendar>div>div:first-child]:mb-2 [&_#calendar_button]:min-h-[30px] [&_#calendar_button]:py-0.5 [&_#booking>div]:p-4 [&_#booking_ol]:mb-4">
+        {heroLayout && !hasSelection ? calendar : null}
+        {heroLayout && hasSelection ? booking : null}
+      </div>
+    );
+  }
+
+  return <div className="grid gap-6 lg:grid-cols-[420px_1fr]">{calendar}{booking}</div>;
 }
