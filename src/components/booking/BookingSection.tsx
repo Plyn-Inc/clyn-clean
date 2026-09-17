@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
-import ReservationCalendar from "./ReservationCalendar";
+import StableReservationCalendar from "./StableReservationCalendar";
 import BookingForm from "./BookingForm";
 import type { SelectedSlot } from "./ReservationCalendar";
 import { SERVICE_TYPES } from "@/lib/types";
@@ -51,7 +51,7 @@ export default function BookingSection({ mode = "default", layout = "default" }:
 
   const calendar = (
     <div id="calendar" className="scroll-mt-24">
-      <ReservationCalendar
+      <StableReservationCalendar
         onSelectSlot={handleSelectSlot}
         onSelectDate={handleSelectDate}
         onSelectConsultDate={handleSelectConsult}
