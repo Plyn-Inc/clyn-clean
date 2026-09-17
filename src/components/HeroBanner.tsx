@@ -38,13 +38,13 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
       ))}
       <div className="absolute inset-0 bg-gradient-to-r from-white/95 via-white/88 to-white/55" aria-hidden />
 
-      <div className="relative mx-auto max-w-7xl px-4 py-8 sm:px-5 sm:py-10 md:px-8 lg:py-12">
-        <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,0.88fr)_minmax(520px,1.12fr)] lg:gap-8">
-          <div className="pt-2 lg:sticky lg:top-24 lg:pt-8">
+      <div className="relative mx-auto max-w-7xl px-4 py-6 sm:px-5 sm:py-8 md:px-8 lg:py-10">
+        <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] lg:gap-7">
+          <div className="pt-1 lg:pt-5">
             <p className="mb-3 inline-block rounded-full bg-[var(--mint-soft)] px-4 py-1.5 text-xs font-semibold tracking-wide text-[var(--mint)]">
               일반 단층 원룸 전용 온라인 예약
             </p>
-            <h1 className="font-display text-3xl font-bold leading-tight text-[var(--navy)] sm:text-4xl lg:text-5xl xl:text-6xl">
+            <h1 className="font-display text-3xl font-bold leading-tight text-[var(--navy)] sm:text-4xl lg:text-5xl xl:text-[3.4rem]">
               원룸 입주·퇴실청소
               <br />
               복잡하게 견적받지 마세요.
@@ -53,7 +53,7 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
               작업 전 추가비용을 먼저 안내하고, 작업 완료 후 주요 결과사진을 제공합니다.
             </p>
 
-            <div className="mt-5 rounded-2xl border border-white/70 bg-white/82 p-4 shadow-sm backdrop-blur sm:inline-block sm:min-w-[320px]">
+            <div className="mt-5 rounded-2xl border border-white/70 bg-white/88 p-4 shadow-sm backdrop-blur sm:inline-block sm:min-w-[360px]">
               <p className="mb-1 text-xs font-bold tracking-[0.16em] text-[var(--mint)]">CLYN OPEN PRICE</p>
               <OneRoomOfferPrice showLabel={false} />
             </div>
@@ -81,12 +81,7 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
             </div>
           </div>
 
-          <div className="rounded-3xl border border-white/80 bg-white/94 p-3 shadow-xl backdrop-blur sm:p-5 lg:p-6">
-            <div className="mb-4 px-1">
-              <p className="text-xs font-bold tracking-[0.14em] text-[var(--mint)]">바로 예약</p>
-              <h2 className="mt-1 text-xl font-bold text-[var(--navy)] sm:text-2xl">예약 가능한 날짜와 지역을 바로 확인하세요</h2>
-              <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)] sm:text-sm">날짜를 선택한 뒤 지역과 고객정보를 입력하면 같은 화면에서 예약을 이어갈 수 있습니다.</p>
-            </div>
+          <div className="rounded-3xl border border-white/80 bg-white/94 p-2.5 shadow-xl backdrop-blur sm:p-3 lg:p-4">
             <BookingSection mode="one-room" layout="hero" />
           </div>
         </div>
