@@ -23,7 +23,7 @@ export default function SiteHeader({ companyName, kakaoUrl = "" }: { companyName
               height={BRAND_LOGO.height}
               priority
               sizes="(max-width: 768px) 120px, 148px"
-              className="h-10 w-auto md:h-12"
+              className="h-10 w-auto mix-blend-multiply md:h-12"
             />
           </Link>
           <div className="flex items-center gap-2">
@@ -60,7 +60,7 @@ export default function SiteHeader({ companyName, kakaoUrl = "" }: { companyName
             height={BRAND_LOGO.height}
             priority
             sizes="(max-width: 768px) 132px, 168px"
-            className="h-11 w-auto md:h-14"
+            className="h-11 w-auto mix-blend-multiply md:h-14"
           />
         </Link>
 
