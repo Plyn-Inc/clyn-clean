@@ -9,9 +9,10 @@ import type { ServiceType } from "@/lib/types";
 
 export interface BookingSectionProps {
   mode?: "default" | "one-room";
+  layout?: "default" | "hero";
 }
 
-export default function BookingSection({ mode = "default" }: BookingSectionProps) {
+export default function BookingSection({ mode = "default", layout = "default" }: BookingSectionProps) {
   const [selectedSlot, setSelectedSlot] = useState<SelectedSlot | null>(null);
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [activeService, setActiveService] = useState<ServiceType>(SERVICE_TYPES[0]);
@@ -41,8 +42,10 @@ export default function BookingSection({ mode = "default" }: BookingSectionProps
     alert(`${date}는 상담이 필요한 날짜입니다. 문의하기를 통해 상담을 진행해주세요.`);
   }
 
+  const heroLayout = layout === "hero";
+
   return (
-    <div className="grid gap-6 lg:grid-cols-[420px_1fr]">
+    <div className={heroLayout ? "grid gap-4" : "grid gap-6 lg:grid-cols-[420px_1fr]"}>
       <div id="calendar" className="scroll-mt-24">
         <ReservationCalendar
           onSelectSlot={handleSelectSlot}
