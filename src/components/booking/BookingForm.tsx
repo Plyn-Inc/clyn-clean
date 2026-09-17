@@ -63,6 +63,9 @@ function createHalfHourOptions() {
 }
 
 const TIME_OPTIONS = createHalfHourOptions();
+const QUOTE_MAX_AUTO_RETRIES = 2;
+const QUOTE_RETRY_DELAY_MS = 900;
+const QUOTE_RECOVERY_RETRY_DELAY_MS = 5000;
 
 type Step = 1 | 2 | 3 | 4;
 type BookingTimeSlot = "" | "morning" | "afternoon" | "all_day";
@@ -127,6 +130,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [quoteError, setQuoteError] = useState(false);
   const [quoteToken, setQuoteToken] = useState<string | null>(null);
+  const successfulQuoteKeyRef = useRef<string | null>(null);
   // 쿠폰 — 적용/해제 시 /api/quote를 다시 호출해 새 quoteToken을 받는다.
   // 브라우저에서 금액이나 토큰 payload를 직접 수정하지 않는다.
   const [couponInput, setCouponInput] = useState("");
@@ -172,6 +176,21 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   } : null;
   const displayQuote = desiredDate ? (quote ?? baseCatalogQuote) : baseCatalogQuote;
   const consultRequired = quote?.consultRequired === true || baseCatalogQuote?.consultRequired === true || regionConsultRequired;
+  const quoteRequestKey = JSON.stringify({
+    serviceType,
+    resolvedKey,
+    jipjeongriPackage,
+    actualPyeong,
+    entryRoute,
+    desiredDate,
+    timeSlot: serviceType === "사이청소" ? "all_day" : timeSlot,
+    appliedCoupon,
+    sidoCode: region.sidoCode,
+    sigunguCode: region.sigunguCode,
+    dongCode: region.dongCode,
+    moveOutTime: serviceType === "사이청소" ? moveOutTime : "",
+    moveInTime: serviceType === "사이청소" ? moveInTime : "",
+  });
 
   useEffect(() => {
     if (mode !== "one-room") return;
@@ -217,27 +236,43 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
 
 
   // 최신 견적 요청만 화면 상태를 갱신한다.
-  // 이전 요청은 abort하여 서비스/평형을 빠르게 바꿀 때 오래된 응답이 덮어쓰지 않게 한다.
+  // 이름/연락처 입력은 견적 조건이 아니다. 가격 조건이 바뀔 때만 새 토큰으로 교체한다.
   useEffect(() => {
     const hasProduct = serviceType === "집정리" || !!resolvedKey;
     if (!regionReadyForPricing || !hasProduct || !desiredDate) {
       void Promise.resolve().then(() => {
         setQuote(null);
+        setQuoteToken(null);
+        setDiscount(null);
+        successfulQuoteKeyRef.current = null;
         setQuoteError(false);
         setQuoteLoading(false);
       });
       return;
     }
 
-    const controller = new AbortController();
-    void Promise.resolve().then(async () => {
-      if (controller.signal.aborted) return;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let controller: AbortController | null = null;
+
+    // 다른 가격 조건으로 이동한 경우에만 이전 견적/토큰을 폐기한다.
+    if (successfulQuoteKeyRef.current !== quoteRequestKey) {
+      setQuote(null);
+      setQuoteToken(null);
+      setDiscount(null);
+    }
+
+    async function loadQuote(attempt: number) {
+      if (cancelled) return;
+      controller?.abort();
+      controller = new AbortController();
       setQuoteError(false);
       setQuoteLoading(true);
       if (!quoteStartedTrackedRef.current) {
         quoteStartedTrackedRef.current = true;
         void sendMarketingEvent("quote_started");
       }
+
       try {
         const res = await fetch("/api/quote", {
           method: "POST",
@@ -261,40 +296,63 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
           }),
         });
         const data = await res.json();
-        if (controller.signal.aborted) return;
+        if (cancelled || controller.signal.aborted) return;
+
         if (!res.ok) {
-          // 쿠폰 오류는 견적 실패가 아니라 쿠폰 입력 문제로 안내한다
           if (typeof data?.code === "string" && data.code.startsWith("COUPON_")) {
             setCouponError(data.error ?? "쿠폰을 사용할 수 없습니다.");
             setAppliedCoupon(null);
+            setQuoteLoading(false);
             return;
           }
+
+          if (res.status >= 500) {
+            if (attempt < QUOTE_MAX_AUTO_RETRIES) {
+              retryTimer = setTimeout(() => void loadQuote(attempt + 1), QUOTE_RETRY_DELAY_MS * (attempt + 1));
+              return;
+            }
+            setQuoteError(true);
+            setQuoteLoading(false);
+            retryTimer = setTimeout(() => void loadQuote(0), QUOTE_RECOVERY_RETRY_DELAY_MS);
+            return;
+          }
+
           setQuote(null);
           setQuoteToken(null);
           setDiscount(null);
+          successfulQuoteKeyRef.current = null;
           setQuoteError(true);
+          setQuoteLoading(false);
           return;
         }
+
+        const nextToken = typeof data.quoteToken === "string" ? data.quoteToken : null;
         setCouponError(null);
         setQuote(data.quote ?? null);
-        // 서버가 서명한 견적 토큰. 예약 제출 시 이 토큰만 보낸다.
-        setQuoteToken(typeof data.quoteToken === "string" ? data.quoteToken : null);
-        // 서버가 계산한 snapshot만 표시한다 (브라우저에서 금액을 계산하지 않는다)
+        setQuoteToken(nextToken);
         setDiscount(data.discount ?? null);
-        setQuoteError(!data.quote);
+        setQuoteError(!data.quote || !nextToken);
+        setQuoteLoading(false);
+        successfulQuoteKeyRef.current = nextToken ? quoteRequestKey : null;
       } catch {
-        if (controller.signal.aborted) return;
-        setQuote(null);
-        setQuoteToken(null);
-        setDiscount(null);
+        if (cancelled || controller.signal.aborted) return;
+        if (attempt < QUOTE_MAX_AUTO_RETRIES) {
+          retryTimer = setTimeout(() => void loadQuote(attempt + 1), QUOTE_RETRY_DELAY_MS * (attempt + 1));
+          return;
+        }
         setQuoteError(true);
-      } finally {
-        if (!controller.signal.aborted) setQuoteLoading(false);
+        setQuoteLoading(false);
+        retryTimer = setTimeout(() => void loadQuote(0), QUOTE_RECOVERY_RETRY_DELAY_MS);
       }
-    });
+    }
 
-    return () => controller.abort();
-  }, [regionReadyForPricing, serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot, appliedCoupon, region.sidoCode, region.sigunguCode, region.dongCode, moveOutTime, moveInTime]);
+    void loadQuote(0);
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [regionReadyForPricing, serviceType, resolvedKey, jipjeongriPackage, actualPyeong, entryRoute, desiredDate, timeSlot, appliedCoupon, region.sidoCode, region.sigunguCode, region.dongCode, moveOutTime, moveInTime, quoteRequestKey]);
 
   function toggle(list: string[], v: string) {
     return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
@@ -353,11 +411,14 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
         if (moveOutTime >= moveInTime) {
           return "새 입주자 입주 예정시간은 퇴거 완료 예정시간보다 이후여야 합니다.";
         }
-        return null;
+      } else if (timeSlot !== "morning" && timeSlot !== "afternoon") {
+        return "오전 또는 오후를 선택해주세요.";
       }
 
-      if (timeSlot !== "morning" && timeSlot !== "afternoon") {
-        return "오전 또는 오후를 선택해주세요.";
+      if (!regionConsultRequired && !quoteToken) {
+        return quoteError
+          ? "견적 연결을 자동 복구 중입니다. 잠시 후 다시 시도해주세요."
+          : "최종 견적을 확인 중입니다. 잠시만 기다려주세요.";
       }
       return null;
     }
@@ -450,7 +511,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
   async function submitReservation() {
     const clientQuote = displayQuote;
     if (!quoteToken) {
-      setError("견적 정보를 불러오는 중입니다. 잠시 후 다시 시도해주세요.");
+      setError(quoteError ? "견적 연결을 자동 복구 중입니다. 잠시 후 다시 시도해주세요." : "최종 견적을 확인 중입니다. 잠시만 기다려주세요.");
       return;
     }
     if (!clientQuote || clientQuote.priceConfirmed !== true) {
@@ -714,7 +775,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
                   )}
                 </>
               ) : quoteError ? (
-                <p className="text-sm text-[var(--ink-soft)]">가격 정보를 불러올 수 없습니다. 다시 선택해주세요.</p>
+                <p className="text-sm text-[var(--ink-soft)]">견적 연결을 자동 복구 중입니다. 잠시 후 다시 확인해주세요.</p>
               ) : (
                 <p className="text-sm text-[var(--ink-soft)]">가격 정보를 확인 중입니다.</p>
               )}
@@ -863,7 +924,7 @@ export default function BookingForm({ selectedSlot, selectedDate, onServiceChang
                 <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">{EXTRA_SERVICE_NOTICE}</p>
               </>
             ) : quoteError ? (
-              <p className="text-sm text-[var(--ink-soft)]">가격 정보를 불러올 수 없습니다. 다시 선택해주세요.</p>
+              <p className="text-sm text-[var(--ink-soft)]">견적 연결을 자동 복구 중입니다. 잠시 후 다시 확인해주세요.</p>
             ) : (
               <p className="text-sm text-[var(--ink-soft)]">가격 정보를 확인 중입니다.</p>
             )}
