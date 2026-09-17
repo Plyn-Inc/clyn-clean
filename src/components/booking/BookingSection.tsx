@@ -76,7 +76,7 @@ export default function BookingSection({ mode = "default", layout = "default" }:
       <BookingForm
         selectedSlot={selectedSlot}
         selectedDate={selectedDate}
-        onServiceChange={handleServiceChange}
+        onServiceChange={mode === "one-room" ? undefined : handleServiceChange}
         mode={mode}
       />
     </div>
