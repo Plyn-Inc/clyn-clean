@@ -9,7 +9,7 @@ export default function MobileStickyCta({ kakaoUrl }: { kakaoUrl: string }) {
   }
 
   return (
-    <div className="fixed inset-x-0 bottom-0 z-50 border-t border-[var(--line)] bg-white/95 p-3 backdrop-blur md:hidden">
+    <div className="fixed inset-x-0 bottom-0 z-50 border-t border-[var(--line)] bg-white/95 p-3 md:hidden">
       <div className="mx-auto grid max-w-xl grid-cols-2 gap-2">
         <button onClick={scrollBooking} className="min-h-[48px] rounded-full bg-[var(--navy)] px-4 text-sm font-semibold text-white">견적 받기</button>
         <a
