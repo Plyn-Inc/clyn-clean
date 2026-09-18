@@ -9,7 +9,7 @@ import { SectionHeading } from "./ServiceList";
  */
 export default function CleaningPortfolio() {
   return (
-    <section className="bg-white py-20">
+    <section className="render-later bg-white py-20">
       <div className="mx-auto max-w-6xl px-5 md:px-8">
         <SectionHeading
           eyebrow="작업 사례"
