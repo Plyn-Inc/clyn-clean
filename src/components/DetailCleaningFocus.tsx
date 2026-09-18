@@ -24,6 +24,8 @@ export default function DetailCleaningFocus() {
                   src={c.image.src}
                   alt={c.image.alt}
                   fill
+
+                  quality={65}
                   sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
                   className="object-cover"
                 />
