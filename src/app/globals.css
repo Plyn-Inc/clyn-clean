@@ -46,3 +46,10 @@ body {
   background: var(--mint-bright);
   color: var(--navy-deep);
 }
+
+
+/* 화면 아래의 무거운 이미지 섹션은 viewport 근처까지 layout/paint를 미룬다. */
+.render-later {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 900px;
+}
