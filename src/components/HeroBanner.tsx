@@ -55,7 +55,7 @@ export default function HeroBanner({ kakaoUrl, phone, offer }: { kakaoUrl: strin
               작업 전 추가비용을 먼저 안내하고, 작업 완료 후 주요 결과사진을 제공합니다.
             </p>
 
-            <div className="mt-5 rounded-2xl border border-white/70 bg-white/88 p-4 shadow-sm backdrop-blur sm:inline-block sm:min-w-[360px]">
+            <div className="mt-5 rounded-2xl border border-white/70 bg-white/88 p-4 shadow-sm sm:inline-block sm:min-w-[360px]">
               <p className="mb-1 text-xs font-bold tracking-[0.16em] text-[var(--mint)]">CLYN OPEN PRICE</p>
               <OneRoomOfferPrice showLabel={false} initialOffer={offer} />
             </div>
@@ -83,7 +83,7 @@ export default function HeroBanner({ kakaoUrl, phone, offer }: { kakaoUrl: strin
             </div>
           </div>
 
-          <div className="rounded-3xl border border-white/80 bg-white/94 p-2.5 shadow-xl backdrop-blur sm:p-3 lg:p-4">
+          <div className="rounded-3xl border border-white/80 bg-white/94 p-2.5 shadow-xl sm:p-3 lg:p-4">
             <BookingSection mode="one-room" layout="hero" />
           </div>
         </div>
