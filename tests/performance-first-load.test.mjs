@@ -61,6 +61,7 @@ const beforeAfter = read("src/components/BeforeAfterGallery.tsx");
 const portfolio = read("src/components/CleaningPortfolio.tsx");
 const detail = read("src/components/DetailCleaningFocus.tsx");
 const nextConfig = read("next.config.ts");
+const vercelConfig = read("vercel.json");
 
 test("Pretendard 대용량 로컬 폰트는 initial preload 경쟁에서 제외한다", () => {
   assert.match(layout, /preload:\s*false/);
@@ -98,4 +99,9 @@ test("하단 작업 사진은 허용된 저용량 품질로 제공한다", () =>
     assert.match(src, /quality=\{65\}/);
   }
   assert.match(nextConfig, /qualities:\s*\[65,\s*75\]/);
+});
+
+
+test("DB를 사용하는 Vercel Functions는 Supabase와 같은 서울 리전에서 실행한다", () => {
+  assert.match(vercelConfig, /"regions"\s*:\s*\[\s*"icn1"\s*\]/);
 });
