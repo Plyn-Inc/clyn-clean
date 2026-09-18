@@ -21,11 +21,12 @@ function loadOfferOnce(): Promise<Offer> {
   return sharedOfferPromise;
 }
 
-export default function OneRoomOfferPrice({ compact = false, showLabel = true }: { compact?: boolean; showLabel?: boolean }) {
-  const [offer, setOffer] = useState<Offer | null>(null);
+export default function OneRoomOfferPrice({ compact = false, showLabel = true, initialOffer = null }: { compact?: boolean; showLabel?: boolean; initialOffer?: Offer | null }) {
+  const [offer, setOffer] = useState<Offer | null>(initialOffer);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
+    if (initialOffer) return;
     let cancelled = false;
     loadOfferOnce()
       .then((data) => {
@@ -35,7 +36,7 @@ export default function OneRoomOfferPrice({ compact = false, showLabel = true }:
         if (!cancelled) setFailed(true);
       });
     return () => { cancelled = true; };
-  }, []);
+  }, [initialOffer]);
 
   if (!offer) {
     return (
