@@ -8,7 +8,7 @@ import { SectionHeading } from "./ServiceList";
  */
 export default function DetailCleaningFocus() {
   return (
-    <section className="bg-[var(--sand)] py-20">
+    <section className="render-later bg-[var(--sand)] py-20">
       <div className="mx-auto max-w-6xl px-5 md:px-8">
         <SectionHeading
           eyebrow="디테일"
