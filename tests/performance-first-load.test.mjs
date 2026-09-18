@@ -60,6 +60,7 @@ const oneRoomPage = read("src/app/one-room/page.tsx");
 const beforeAfter = read("src/components/BeforeAfterGallery.tsx");
 const portfolio = read("src/components/CleaningPortfolio.tsx");
 const detail = read("src/components/DetailCleaningFocus.tsx");
+const nextConfig = read("next.config.ts");
 
 test("Pretendard 대용량 로컬 폰트는 initial preload 경쟁에서 제외한다", () => {
   assert.match(layout, /preload:\s*false/);
@@ -92,8 +93,9 @@ test("원룸 전용 랜딩 Hero는 client hydration과 가격 API 대기를 제�
 });
 
 
-test("하단 작업 사진은 전송량을 줄인 품질로 제공한다", () => {
+test("하단 작업 사진은 허용된 저용량 품질로 제공한다", () => {
   for (const src of [beforeAfter, portfolio, detail]) {
     assert.match(src, /quality=\{65\}/);
   }
+  assert.match(nextConfig, /qualities:\s*\[65,\s*75\]/);
 });
