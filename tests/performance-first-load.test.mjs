@@ -38,3 +38,12 @@ test("첫 Hero 이미지만 높은 네트워크 우선순위를 사용한다", (
   assert.match(hero, /fetchPriority=\\{i === 0 \\? "high" : "low"\\}/);
   assert.match(hero, /loading=\\{i === 0 \\? "eager" : "lazy"\\}/);
 });
+
+
+test("원룸 대표 가격은 첫 HTML에 서버에서 주입되어 hydration 후 추가 API를 기다리지 않는다", () => {
+  assert.match(home, /getOneRoomOffer/);
+  assert.match(home, /const offer = await getOneRoomOffer\(\)/);
+  assert.match(home, /<HeroBanner[^>]*offer=\{offer\}/s);
+  assert.match(home, /<OneRoomOfferSection[^>]*offer=\{offer\}/s);
+  assert.match(offer, /initialOffer/);
+});
