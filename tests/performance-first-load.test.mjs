@@ -17,10 +17,11 @@ test("홈페이지 shell은 force-dynamic으로 매 요청 서버 렌더링을 �
   assert.match(home, /export const revalidate\s*=\s*60/);
 });
 
-test("원룸 가격 컴포넌트 여러 개가 같은 API 요청을 공유한다", () => {
-  assert.match(offer, /let sharedOfferPromise/);
-  assert.match(offer, /function loadOfferOnce/);
-  assert.match(offer, /sharedOfferPromise \?\?=/);
+test("원룸 가격 표시 컴포넌트는 브라우저 API 요청과 hydration이 필요 없다", () => {
+  assert.doesNotMatch(offer, /^"use client"/);
+  assert.doesNotMatch(offer, /fetch\("/);
+  assert.doesNotMatch(offer, /useEffect|useState/);
+  assert.match(offer, /initialOffer/);
 });
 
 test("공지 조회는 첫 paint 직후의 critical request 경쟁에서 제외한다", () => {
