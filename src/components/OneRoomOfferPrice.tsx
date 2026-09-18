@@ -9,19 +9,32 @@ type Offer = {
   promotionName: string | null;
 };
 
+let sharedOfferPromise: Promise<Offer> | null = null;
+
+function loadOfferOnce(): Promise<Offer> {
+  sharedOfferPromise ??= fetch("/api/offers/one-room")
+    .then((response) => response.ok ? response.json() : Promise.reject(new Error("offer fetch failed")))
+    .catch((error) => {
+      sharedOfferPromise = null;
+      throw error;
+    });
+  return sharedOfferPromise;
+}
+
 export default function OneRoomOfferPrice({ compact = false, showLabel = true }: { compact?: boolean; showLabel?: boolean }) {
   const [offer, setOffer] = useState<Offer | null>(null);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
-    const controller = new AbortController();
-    fetch("/api/offers/one-room", { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error("offer fetch failed")))
-      .then((data: Offer) => setOffer(data))
-      .catch((error) => {
-        if ((error as Error).name !== "AbortError") setFailed(true);
+    let cancelled = false;
+    loadOfferOnce()
+      .then((data) => {
+        if (!cancelled) setOffer(data);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
       });
-    return () => controller.abort();
+    return () => { cancelled = true; };
   }, []);
 
   if (!offer) {
