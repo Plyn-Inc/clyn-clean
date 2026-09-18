@@ -13,7 +13,7 @@ export default function SiteHeader({ companyName, kakaoUrl = "" }: { companyName
 
   if (pathname === "/one-room") {
     return (
-      <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-white/95 backdrop-blur">
+      <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-white/95">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-3 md:px-8">
           <Link href="/" className="flex items-center" aria-label={companyName}>
             <Image
@@ -50,7 +50,7 @@ export default function SiteHeader({ companyName, kakaoUrl = "" }: { companyName
   }
 
   return (
-    <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--sand)]/90 backdrop-blur">
+    <header className="sticky top-0 z-50 border-b border-[var(--line)] bg-[var(--sand)]/90">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-5 py-4 md:px-8">
         <Link href="/" className="flex items-center" aria-label={companyName}>
           <Image
