@@ -90,3 +90,10 @@ test("원룸 전용 랜딩 Hero는 client hydration과 가격 API 대기를 제�
   assert.match(oneRoomPage, /getOneRoomOffer/);
   assert.match(oneRoomPage, /<OneRoomLandingHero\s+offer=\{offer\}/);
 });
+
+
+test("하단 작업 사진은 전송량을 줄인 품질로 제공한다", () => {
+  for (const src of [beforeAfter, portfolio, detail]) {
+    assert.match(src, /quality=\{65\}/);
+  }
+});
