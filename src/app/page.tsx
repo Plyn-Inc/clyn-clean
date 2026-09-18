@@ -1,4 +1,4 @@
-export const dynamic = "force-dynamic";
+export const revalidate = 60;
 
 import { Suspense } from "react";
 import NoticePopup from "@/components/NoticePopup";
@@ -17,11 +17,6 @@ import BlogPreview from "@/components/BlogPreview";
 import ContactSection from "@/components/ContactSection";
 import { fallbackCompanySettings, getCompanySettingsSafe } from "@/lib/settings";
 
-/**
- * 브랜드 홈페이지.
- * 첫 화면에서 원룸 상품/OPEN PRICE/캘린더/예약을 한 번에 제공하고,
- * 이후 신뢰 → 가격 → 범위 → 실제 결과 → 후기 → 기타 서비스 순서로 설득을 이어간다.
- */
 export default function Home() {
   const company = fallbackCompanySettings();
 
