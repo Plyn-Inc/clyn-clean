@@ -9,5 +9,8 @@
       "path": "/api/cron/expired-reservations",
       "schedule": "0 17 * * *"
     }
+  ],
+  "regions": [
+    "icn1"
   ]
 }
