@@ -1,3 +1,5 @@
+export const revalidate = 60;
+
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import OneRoomLandingHero from "@/components/OneRoomLandingHero";
@@ -10,6 +12,7 @@ import ReviewsPreview from "@/components/ReviewsPreview";
 import MobileStickyCta from "@/components/MobileStickyCta";
 import { SectionHeading } from "@/components/ServiceList";
 import { fallbackCompanySettings } from "@/lib/settings";
+import { getOneRoomOffer } from "@/lib/offers";
 
 export const metadata: Metadata = {
   title: "일반 원룸 입주·퇴실청소",
@@ -17,13 +20,14 @@ export const metadata: Metadata = {
   alternates: { canonical: "/one-room" },
 };
 
-export default function OneRoomPage() {
+export default async function OneRoomPage() {
   const company = fallbackCompanySettings();
+  const offer = await getOneRoomOffer().catch(() => null);
 
   return (
     <>
       <MarketingAttributionCapture />
-      <OneRoomLandingHero />
+      <OneRoomLandingHero offer={offer} />
       <OneRoomTrustPoints />
       <BeforeAfterGallery />
       <OneRoomScope />
