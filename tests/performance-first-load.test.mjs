@@ -47,3 +47,45 @@ test("원룸 대표 가격은 첫 HTML에 서버에서 주입되어 hydration �
   assert.match(home, /<OneRoomOfferSection[^>]*offer=\{offer\}/s);
   assert.match(offer, /initialOffer/);
 });
+
+
+const layout = read("src/app/layout.tsx");
+const globals = read("src/app/globals.css");
+const header = read("src/components/SiteHeader.tsx");
+const heroBanner = read("src/components/HeroBanner.tsx");
+const ctaBanner = read("src/components/CtaBanner.tsx");
+const landingHero = read("src/components/OneRoomLandingHero.tsx");
+const oneRoomPage = read("src/app/one-room/page.tsx");
+const beforeAfter = read("src/components/BeforeAfterGallery.tsx");
+const portfolio = read("src/components/CleaningPortfolio.tsx");
+const detail = read("src/components/DetailCleaningFocus.tsx");
+
+test("Pretendard 대용량 로컬 폰트는 initial preload 경쟁에서 제외한다", () => {
+  assert.match(layout, /preload:\s*false/);
+});
+
+test("모바일에서 큰 backdrop blur를 사용하지 않는다", () => {
+  assert.doesNotMatch(header, /\sbackdrop-blur(?:\s|")/);
+  assert.doesNotMatch(heroBanner, /\sbackdrop-blur(?:\s|")/);
+});
+
+test("화면 아래 이미지 섹션은 content-visibility로 초기 렌더 비용을 미룬다", () => {
+  assert.match(globals, /\.render-later[\s\S]*content-visibility:\s*auto/);
+  for (const src of [beforeAfter, portfolio, detail]) {
+    assert.match(src, /render-later/);
+  }
+});
+
+test("하단 CTA는 client hydration 없이 앵커로 이동한다", () => {
+  assert.doesNotMatch(ctaBanner, /^"use client"/);
+  assert.match(ctaBanner, /href="#calendar"/);
+});
+
+test("원룸 전용 랜딩 Hero는 client hydration과 가격 API 대기를 제거한다", () => {
+  assert.doesNotMatch(landingHero, /^"use client"/);
+  assert.match(landingHero, /offer:\s*OneRoomOffer\s*\|\s*null/);
+  assert.match(landingHero, /href="#calendar"/);
+  assert.match(oneRoomPage, /export const revalidate\s*=\s*60/);
+  assert.match(oneRoomPage, /getOneRoomOffer/);
+  assert.match(oneRoomPage, /<OneRoomLandingHero\s+offer=\{offer\}/);
+});
