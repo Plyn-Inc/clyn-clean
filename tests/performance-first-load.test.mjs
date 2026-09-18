@@ -35,9 +35,11 @@ test("landing_view 저장도 idle 시점으로 미뤄 초기 렌더와 경쟁하
 });
 
 
-test("첫 Hero 이미지만 높은 네트워크 우선순위를 사용한다", () => {
+test("첫 Hero 이미지만 초기 DOM에 넣고 나머지는 idle 이후 마운트한다", () => {
+  assert.match(hero, /const \\[slidesReady, setSlidesReady\\]/);
+  assert.match(hero, /requestIdleCallback|setTimeout/);
+  assert.match(hero, /i === 0 \\|\\| slidesReady/);
   assert.match(hero, /fetchPriority=\\{i === 0 \\? "high" : "low"\\}/);
-  assert.match(hero, /loading=\\{i === 0 \\? "eager" : "lazy"\\}/);
 });
 
 
