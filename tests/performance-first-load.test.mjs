@@ -10,6 +10,7 @@ const home = read("src/app/page.tsx");
 const offer = read("src/components/OneRoomOfferPrice.tsx");
 const notice = read("src/components/NoticePopup.tsx");
 const attribution = read("src/components/MarketingAttributionCapture.tsx");
+const hero = read("src/components/HeroBanner.tsx");
 
 test("홈페이지 shell은 force-dynamic으로 매 요청 서버 렌더링을 강제하지 않는다", () => {
   assert.doesNotMatch(home, /export const dynamic\s*=\s*["']force-dynamic["']/);
@@ -30,4 +31,10 @@ test("공지 조회는 첫 paint 직후의 critical request 경쟁에서 제외�
 test("landing_view 저장도 idle 시점으로 미뤄 초기 렌더와 경쟁하지 않는다", () => {
   assert.match(attribution, /requestIdleCallback|setTimeout\(sendLanding/);
   assert.match(attribution, /sendMarketingEvent\("landing_view"\)/);
+});
+
+
+test("첫 Hero 이미지만 높은 네트워크 우선순위를 사용한다", () => {
+  assert.match(hero, /fetchPriority=\\{i === 0 \\? "high" : "low"\\}/);
+  assert.match(hero, /loading=\\{i === 0 \\? "eager" : "lazy"\\}/);
 });
