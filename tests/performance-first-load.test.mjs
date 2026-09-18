@@ -55,6 +55,7 @@ test("원룸 대표 가격은 첫 HTML에 서버에서 주입되어 hydration �
 const layout = read("src/app/layout.tsx");
 const globals = read("src/app/globals.css");
 const header = read("src/components/SiteHeader.tsx");
+const mobileSticky = read("src/components/MobileStickyCta.tsx");
 const heroBanner = read("src/components/HeroBanner.tsx");
 const ctaBanner = read("src/components/CtaBanner.tsx");
 const landingHero = read("src/components/OneRoomLandingHero.tsx");
