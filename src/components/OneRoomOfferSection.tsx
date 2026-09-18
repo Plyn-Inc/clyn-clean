@@ -1,6 +1,7 @@
 import OneRoomOfferPrice from "@/components/OneRoomOfferPrice";
+import type { OneRoomOffer } from "@/lib/offers";
 
-export default function OneRoomOfferSection() {
+export default function OneRoomOfferSection({ offer }: { offer: OneRoomOffer | null }) {
   return (
     <section className="bg-white py-16 md:py-20">
       <div className="mx-auto max-w-6xl px-5 md:px-8">
@@ -22,7 +23,7 @@ export default function OneRoomOfferSection() {
             </div>
           </div>
           <div className="flex flex-col justify-center rounded-2xl bg-white p-6">
-            <OneRoomOfferPrice />
+            <OneRoomOfferPrice initialOffer={offer} />
             <p className="mt-4 text-xs leading-relaxed text-[var(--ink-soft)]">
               1.5룸 · 원룸 복층 · 투룸 이상은 이 온라인 원룸 상품 대상에서 제외됩니다.
               특수오염·폐기물·별도 요청 작업은 작업 전 안내 후 진행합니다.
