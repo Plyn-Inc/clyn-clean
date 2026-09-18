@@ -32,6 +32,8 @@ export default function BeforeAfterGallery() {
                       src={pair.before.src}
                       alt={pair.before.alt}
                       fill
+
+                      quality={65}
                       sizes="(max-width: 768px) 50vw, 25vw"
                       className="object-cover"
                     />
@@ -46,6 +48,8 @@ export default function BeforeAfterGallery() {
                       src={pair.after.src}
                       alt={pair.after.alt}
                       fill
+
+                      quality={65}
                       sizes="(max-width: 768px) 50vw, 25vw"
                       className="object-cover"
                     />
