@@ -16,18 +16,20 @@ import ReviewsPreview from "@/components/ReviewsPreview";
 import BlogPreview from "@/components/BlogPreview";
 import ContactSection from "@/components/ContactSection";
 import { fallbackCompanySettings, getCompanySettingsSafe } from "@/lib/settings";
+import { getOneRoomOffer } from "@/lib/offers";
 
-export default function Home() {
+export default async function Home() {
   const company = fallbackCompanySettings();
+  const offer = await getOneRoomOffer().catch(() => null);
 
   return (
     <>
       <MarketingAttributionCapture />
       <NoticePopup />
-      <HeroBanner kakaoUrl={company.kakaoUrl} phone={company.phone} />
+      <HeroBanner kakaoUrl={company.kakaoUrl} phone={company.phone} offer={offer} />
 
       <OneRoomTrustPoints />
-      <OneRoomOfferSection />
+      <OneRoomOfferSection offer={offer} />
       <OneRoomScope />
       <BeforeAfterGallery />
 
