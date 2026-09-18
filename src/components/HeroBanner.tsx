@@ -5,13 +5,14 @@ import { useEffect, useState } from "react";
 import { HERO_SLIDES } from "@/lib/images";
 import OneRoomOfferPrice from "@/components/OneRoomOfferPrice";
 import BookingSection from "@/components/booking/BookingSection";
+import type { OneRoomOffer } from "@/lib/offers";
 
 /**
  * 메인 Hero.
  * 데스크톱은 판매 메시지 42% / 예약 58%로 배치하고,
  * 우측 예약영역은 날짜 선택 전 캘린더, 선택 후 예약폼으로 전환한다.
  */
-export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phone: string }) {
+export default function HeroBanner({ kakaoUrl, phone, offer }: { kakaoUrl: string; phone: string; offer: OneRoomOffer | null }) {
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
@@ -56,7 +57,7 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
 
             <div className="mt-5 rounded-2xl border border-white/70 bg-white/88 p-4 shadow-sm backdrop-blur sm:inline-block sm:min-w-[360px]">
               <p className="mb-1 text-xs font-bold tracking-[0.16em] text-[var(--mint)]">CLYN OPEN PRICE</p>
-              <OneRoomOfferPrice showLabel={false} />
+              <OneRoomOfferPrice showLabel={false} initialOffer={offer} />
             </div>
             <p className="mt-3 max-w-xl text-[11px] leading-relaxed text-[var(--ink-soft)] sm:text-xs">
               일반 단층 원룸 기본 청소범위 기준 · 1.5룸 · 원룸 복층 · 투룸 이상 제외 · 특수오염·폐기물·별도 요청 작업은 작업 전 안내 후 진행
