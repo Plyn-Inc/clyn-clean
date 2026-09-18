@@ -25,6 +25,8 @@ export default function CleaningPortfolio() {
                   src={item.image.src}
                   alt={item.image.alt}
                   fill
+
+                  quality={65}
                   sizes="(max-width: 1024px) 50vw, 25vw"
                   className="object-cover"
                 />
