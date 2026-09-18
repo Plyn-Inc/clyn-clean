@@ -14,6 +14,22 @@ import type { OneRoomOffer } from "@/lib/offers";
  */
 export default function HeroBanner({ kakaoUrl, phone, offer }: { kakaoUrl: string; phone: string; offer: OneRoomOffer | null }) {
   const [index, setIndex] = useState(0);
+  const [slidesReady, setSlidesReady] = useState(false);
+
+  useEffect(() => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let idleId: number | null = null;
+    const ready = () => setSlidesReady(true);
+    if ("requestIdleCallback" in window) {
+      idleId = window.requestIdleCallback(ready, { timeout: 1800 });
+    } else {
+      timeoutId = setTimeout(ready, 1200);
+    }
+    return () => {
+      if (idleId !== null && "cancelIdleCallback" in window) window.cancelIdleCallback(idleId);
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    };
+  }, []);
 
   useEffect(() => {
     const reduce =
@@ -26,7 +42,7 @@ export default function HeroBanner({ kakaoUrl, phone, offer }: { kakaoUrl: strin
 
   return (
     <section className="relative overflow-hidden bg-white">
-      {HERO_SLIDES.map((slide, i) => (
+      {HERO_SLIDES.map((slide, i) => (i === 0 || slidesReady) && (
         <Image
           key={slide.src}
           src={slide.src}
