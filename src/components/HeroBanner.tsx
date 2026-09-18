@@ -31,7 +31,8 @@ export default function HeroBanner({ kakaoUrl, phone }: { kakaoUrl: string; phon
           src={slide.src}
           alt={slide.alt}
           fill
-          priority={i === 0}
+          fetchPriority={i === 0 ? "high" : "low"}
+          loading={i === 0 ? "eager" : "lazy"}
           sizes="100vw"
           className={`object-cover object-center transition-opacity duration-1000 ${i === index ? "opacity-100" : "opacity-0"}`}
         />
