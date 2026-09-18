@@ -33,14 +33,16 @@ export default function NoticePopup() {
 
   useEffect(() => {
     let cancelled = false;
-    void Promise.resolve().then(async () => {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let idleId: number | null = null;
+
+    const startLoad = async () => {
       try {
         const res = await fetch("/api/notices/popup", { cache: "no-store" });
         if (!res.ok) return;
         const data = (await res.json()) as { notice?: PopupNotice | null };
         if (cancelled || !data.notice) return;
 
-        // 오늘 하루 보지 않기 확인 (localStorage 사용 불가 시 그냥 표시)
         try {
           if (window.localStorage.getItem(hideKey(data.notice.id)) === todayKST()) return;
         } catch {
@@ -50,8 +52,19 @@ export default function NoticePopup() {
       } catch {
         /* 팝업 조회 실패가 홈페이지를 막지 않는다 */
       }
-    });
-    return () => { cancelled = true; };
+    };
+
+    if ("requestIdleCallback" in window) {
+      idleId = window.requestIdleCallback(() => void startLoad(), { timeout: 1500 });
+    } else {
+      timeoutId = setTimeout(startLoad, 800);
+    }
+
+    return () => {
+      cancelled = true;
+      if (idleId !== null && "cancelIdleCallback" in window) window.cancelIdleCallback(idleId);
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    };
   }, []);
 
   if (!notice || closed) return null;
