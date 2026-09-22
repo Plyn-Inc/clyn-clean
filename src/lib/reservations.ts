@@ -418,6 +418,8 @@ export interface CreateReservationAndDepositResult {
   totalAmount: number;
   depositAmount: number;
   balanceAmount: number;
+  /** true일 때만 신규 예약이 실제로 생성됐다. idempotent 재요청은 false. */
+  isNew: boolean;
 }
 
 /**
@@ -584,6 +586,7 @@ function toCreateResult(
     depositAmount: deposit,
     balanceAmount: Number(row.estimated_balance_snapshot ?? Math.max(total - deposit, 0)),
     depositDeadline: row.payment_due_date ?? "",
+    isNew: false,
   };
 }
 
@@ -812,6 +815,7 @@ export async function createReservationAndDeposit(
     totalAmount,
     depositAmount,
     balanceAmount,
+    isNew: true,
   };
 }
 
