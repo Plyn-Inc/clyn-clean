@@ -22,6 +22,69 @@ interface PublicDay {
   afternoon: PublicSlot;
 }
 
+type MonthCursor = { year: number; month: number };
+type MonthDays = Record<string, PublicDay>;
+
+interface MonthCacheEntry {
+  days: MonthDays;
+  cachedAt: number;
+}
+
+const MONTH_CACHE_MAX_AGE_MS = 60000;
+const monthCache = new Map<string, MonthCacheEntry>();
+const monthRequests = new Map<string, Promise<MonthDays>>();
+
+function monthKey(cursor: MonthCursor): string {
+  return `${cursor.year}-${String(cursor.month + 1).padStart(2, "0")}`;
+}
+
+function shiftMonth(cursor: MonthCursor, delta: number): MonthCursor {
+  const date = new Date(cursor.year, cursor.month + delta, 1);
+  return { year: date.getFullYear(), month: date.getMonth() };
+}
+
+function readCachedMonth(cursor: MonthCursor): MonthDays | null {
+  const key = monthKey(cursor);
+  const cached = monthCache.get(key);
+  if (!cached) return null;
+  if (Date.now() - cached.cachedAt > MONTH_CACHE_MAX_AGE_MS) {
+    monthCache.delete(key);
+    return null;
+  }
+  return cached.days;
+}
+
+function requestMonth(cursor: MonthCursor): Promise<MonthDays> {
+  const key = monthKey(cursor);
+  const inFlight = monthRequests.get(key);
+  if (inFlight) return inFlight;
+
+  const { start, end } = getMonthRangeKST(cursor.year, cursor.month);
+  const baseRequest = (async () => {
+    const response = await fetch(`/api/calendar?start=${start}&end=${end}`);
+    if (!response.ok) throw new Error(`calendar ${response.status}`);
+    const data = (await response.json()) as { days?: PublicDay[] };
+    if (!Array.isArray(data.days)) throw new Error("calendar days missing");
+
+    const next: MonthDays = {};
+    for (const day of data.days) next[day.date] = day;
+    monthCache.set(key, { days: next, cachedAt: Date.now() });
+    return next;
+  })();
+
+  const request = baseRequest.finally(() => {
+    monthRequests.delete(key);
+  });
+  monthRequests.set(key, request);
+  return request;
+}
+
+function prefetchMonth(cursor: MonthCursor) {
+  const key = monthKey(cursor);
+  if (readCachedMonth(cursor) || monthRequests.has(key)) return;
+  void requestMonth(cursor).catch(() => undefined);
+}
+
 const MAX_AUTO_RETRIES = 2;
 const RETRY_DELAY_MS = 1200;
 const RECOVERY_RETRY_DELAY_MS = 10000;
@@ -64,42 +127,66 @@ export default function StableReservationCalendar({
   useEffect(() => {
     let cancelled = false;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
-    const { start, end } = getMonthRangeKST(cursor.year, cursor.month);
+    const target = cursor;
+    const cached = readCachedMonth(target);
+    const minIndex = minMonth.year * 12 + minMonth.month;
+    const maxIndex = maxMonth.year * 12 + maxMonth.month;
+
+    function prefetchNeighbors() {
+      for (const delta of [-1, 1] as const) {
+        const neighbor = shiftMonth(target, delta);
+        const index = neighbor.year * 12 + neighbor.month;
+        if (index >= minIndex && index <= maxIndex) prefetchMonth(neighbor);
+      }
+    }
+
+    if (cached) {
+      setDays(cached);
+      setLoading(false);
+      setStatusError(false);
+    } else {
+      setLoading(true);
+      setStatusError(false);
+    }
+
+    // 다음/이전 달은 사용자가 누르기 전에 백그라운드에서 준비한다.
+    prefetchNeighbors();
 
     async function load(attempt: number) {
-      if (!cancelled) {
+      if (!cancelled && !readCachedMonth(target)) {
         setLoading(true);
         if (attempt === 0) setStatusError(false);
       }
       try {
-        const response = await fetch(`/api/calendar?start=${start}&end=${end}`);
-        if (!response.ok) throw new Error(`calendar ${response.status}`);
-        const data = (await response.json()) as { days?: PublicDay[] };
-        if (!Array.isArray(data.days)) throw new Error("calendar days missing");
+        const next = await requestMonth(target);
         if (cancelled) return;
-        const next: Record<string, PublicDay> = {};
-        for (const day of data.days) next[day.date] = day;
         setDays(next);
         setStatusError(false);
         setLoading(false);
+        prefetchNeighbors();
       } catch {
         if (cancelled) return;
         if (attempt < MAX_AUTO_RETRIES) {
           retryTimer = setTimeout(() => void load(attempt + 1), RETRY_DELAY_MS * (attempt + 1));
           return;
         }
-        setStatusError(true);
-        setLoading(false);
+
+        // 이미 받은 월 데이터가 있으면 화면은 즉시 유지하고 뒤에서만 복구한다.
+        if (!readCachedMonth(target)) {
+          setStatusError(true);
+          setLoading(false);
+        }
         retryTimer = setTimeout(() => void load(0), RECOVERY_RETRY_DELAY_MS);
       }
     }
 
+    // 캐시가 있으면 즉시 보여주고, 같은 요청으로 최신 상태만 백그라운드 갱신한다.
     void load(0);
     return () => {
       cancelled = true;
       if (retryTimer) clearTimeout(retryTimer);
     };
-  }, [cursor]);
+  }, [cursor, minMonth, maxMonth]);
 
   const monthLabel = `${cursor.year}년 ${cursor.month + 1}월`;
   const firstDay = new Date(cursor.year, cursor.month, 1).getDay();
@@ -111,8 +198,17 @@ export default function StableReservationCalendar({
   function moveMonth(delta: number) {
     const nextIndex = cursorIndex + delta;
     if (nextIndex < minIndex || nextIndex > maxIndex) return;
-    const date = new Date(cursor.year, cursor.month + delta, 1);
-    setCursor({ year: date.getFullYear(), month: date.getMonth() });
+
+    const target = shiftMonth(cursor, delta);
+    const cached = readCachedMonth(target);
+    if (cached) {
+      setDays(cached);
+      setLoading(false);
+      setStatusError(false);
+    } else {
+      setLoading(true);
+    }
+    setCursor(target);
   }
 
   function selectSlot(date: string, timeSlot: "morning" | "afternoon", slot?: PublicSlot) {
