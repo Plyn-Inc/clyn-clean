@@ -100,7 +100,7 @@ export default function HeroBanner({ kakaoUrl, phone, offer }: { kakaoUrl: strin
           </div>
 
           <div className="rounded-3xl border border-white/80 bg-white/94 p-2.5 shadow-xl sm:p-3 lg:p-4">
-            <BookingSection mode="one-room" layout="hero" />
+            <BookingSection layout="hero" />
           </div>
         </div>
       </div>
