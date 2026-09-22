@@ -10,6 +10,7 @@ import { getBankSettings } from "@/lib/settings";
 import { bookingMaxDate, BOOKING_WINDOW_DAYS } from "@/lib/booking-window";
 import { formatWorkArea, isValidKoreanPhone, todayKST } from "@/lib/utils";
 import { insertMarketingEvent, saveReservationAttribution } from "@/database/repositories/marketing-repository";
+import { sendAdminReservationAlerts } from "@/lib/notifications/admin-reservation-alert";
 import {
   SERVICE_TYPES,
   HOUSE_TYPES_FIXED,
@@ -213,6 +214,37 @@ export async function POST(req: NextRequest) {
       } catch (marketingError) {
         // 측정 실패가 고객 예약 성공을 되돌리면 안 된다.
         console.error("[marketing] booking_completed 기록 실패", marketingError);
+      }
+    }
+
+    // 신규 홈페이지 예약이 실제로 생성된 경우에만 관리자 3명에게 문자 알림.
+    // 같은 quoteId의 네트워크 재시도(idempotent 응답)에는 중복 발송하지 않는다.
+    if (saved.isNew) {
+      try {
+        await sendAdminReservationAlerts({
+          reservationCode: saved.reservationCode,
+          customerName: data.customerName,
+          customerPhone: data.customerPhone,
+          serviceType: data.serviceType,
+          productLabel: data.serviceType === "집정리"
+            ? data.jipjeongriPackage ?? ""
+            : data.houseTypeKey ?? "",
+          desiredDate: data.desiredDate,
+          timeLabel:
+            data.timeSlot === "morning" ? "오전"
+            : data.timeSlot === "afternoon" ? "오후"
+            : data.timeSlot === "all_day" ? "종일"
+            : "",
+          areaLabel: [data.areaSido, data.areaSigungu, data.areaDong].filter(Boolean).join(" "),
+          totalAmount: saved.totalAmount,
+          depositAmount: saved.depositAmount,
+        });
+      } catch (adminNotifyError) {
+        // 관리자 알림 실패가 고객 예약 성공을 되돌리면 안 된다.
+        console.error(
+          "[admin-notify] 신규 예약 알림 실패",
+          (adminNotifyError as { code?: string })?.code ?? "UNKNOWN"
+        );
       }
     }
 
