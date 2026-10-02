@@ -208,6 +208,8 @@ export interface DiscountBreakdown {
   couponDiscountAmount: number;
   promotionId: number | null;
   promotionName: string | null;
+  promotionIds: number[];
+  promotionNames: string[];
   couponId: number | null;
   couponCode: string | null;
   finalAmount: number;
@@ -226,6 +228,77 @@ export async function calculateDiscounts(input: {
   couponCode?: string | null;
   customerPhone?: string | null;
   now?: Date;
+}): Promise<DiscountBreakdown> {
+  const original = Math.max(0, Math.round(input.originalAmount));
+  let current = original;
+  const now = input.now ?? new Date();
+
+  // 가격설정에서 해당 상품에 체크한 자동 할인들을 순서대로 모두 적용한다.
+  // 새 할인 UI는 정액 할인을 만들지만, 기존 정률 데이터도 안전하게 지원한다.
+  const linkedPromotions = input.productKey
+    ? await queryRows<PromotionRow & { sort_order: number }>(
+        `SELECT dp.*, prd.sort_order
+           FROM price_rule_discounts prd
+           JOIN discount_promotions dp ON dp.id = prd.promotion_id
+          WHERE prd.price_rule_id = (
+            SELECT id
+              FROM price_rules
+             WHERE service_type = ? AND product_key = ?
+             ORDER BY id DESC
+             LIMIT 1
+          )
+            AND dp.is_active = 1
+          ORDER BY prd.sort_order ASC, dp.id ASC`,
+        [input.serviceType, input.productKey]
+      )
+    : [];
+
+  const appliedPromotions: { id: number; name: string; amount: number }[] = [];
+  for (const promotion of linkedPromotions) {
+    if (!matchesConditions(promotion, {
+      serviceType: input.serviceType,
+      productKey: input.productKey,
+      amount: current,
+      now,
+    })) continue;
+
+    const amount = computeDiscountAmount(promotion, current);
+    if (amount <= 0) continue;
+    current -= amount;
+    appliedPromotions.push({ id: promotion.id, name: promotion.name, amount });
+  }
+
+  const automatic = appliedPromotions.reduce((sum, item) => sum + item.amount, 0);
+
+  // 쿠폰은 자동 할인들이 모두 적용된 후의 금액을 기준으로 계산한다.
+  let coupon: AppliedCoupon | null = null;
+  if (input.couponCode?.trim()) {
+    coupon = await validateCoupon({
+      code: input.couponCode,
+      serviceType: input.serviceType,
+      productKey: input.productKey,
+      amount: current,
+      customerPhone: input.customerPhone,
+      now,
+    });
+    current -= coupon.amount;
+  }
+
+  const promotionIds = appliedPromotions.map((item) => item.id);
+  const promotionNames = appliedPromotions.map((item) => item.name);
+
+  return {
+    originalAmount: original,
+    automaticDiscountAmount: automatic,
+    couponDiscountAmount: coupon?.amount ?? 0,
+    promotionId: promotionIds.length === 1 ? promotionIds[0] : null,
+    promotionName: promotionNames.length > 0 ? promotionNames.join(" + ") : null,
+    promotionIds,
+    promotionNames,
+    couponId: coupon?.couponId ?? null,
+    couponCode: coupon?.couponCode ?? null,
+    finalAmount: Math.max(0, current),
+  };
 }): Promise<DiscountBreakdown> {
   const original = Math.max(0, Math.round(input.originalAmount));
   let current = original;

@@ -37,20 +37,45 @@ const couponSchema = z.object({
   perPhoneLimit: z.number().int().min(1).nullish(),
 });
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   const guard = await requireAdminApiSession();
   if ("response" in guard) return guard.response;
 
-  const [promotions, coupons] = await Promise.all([
-    queryRows("SELECT * FROM discount_promotions ORDER BY priority DESC, id DESC"),
-    // 사용수를 함께 집계한다 (N+1 없이 한 번에)
-    queryRows(`
-      SELECT c.*, COALESCE(r.used, 0) AS used_count
+  const kind = req.nextUrl.searchParams.get("kind");
+
+  if (kind === "promotion") {
+    const promotions = await queryRows(
+      "SELECT * FROM discount_promotions ORDER BY id ASC"
+    );
+    return NextResponse.json({ promotions });
+  }
+
+  if (kind === "coupon") {
+    const coupons = await queryRows(`
+      SELECT c.*, COALESCE(r.used, 0)::int AS used_count
         FROM coupons c
         LEFT JOIN (
-          SELECT coupon_id, COUNT(*) AS used FROM coupon_redemptions GROUP BY coupon_id
+          SELECT coupon_id, COUNT(*)::int AS used
+            FROM coupon_redemptions
+           GROUP BY coupon_id
         ) r ON r.coupon_id = c.id
-       ORDER BY c.id DESC`),
+       ORDER BY c.id DESC`
+    );
+    return NextResponse.json({ coupons });
+  }
+
+  const [promotions, coupons] = await Promise.all([
+    queryRows("SELECT * FROM discount_promotions ORDER BY id ASC"),
+    queryRows(`
+      SELECT c.*, COALESCE(r.used, 0)::int AS used_count
+        FROM coupons c
+        LEFT JOIN (
+          SELECT coupon_id, COUNT(*)::int AS used
+            FROM coupon_redemptions
+           GROUP BY coupon_id
+        ) r ON r.coupon_id = c.id
+       ORDER BY c.id DESC`
+    ),
   ]);
   return NextResponse.json({ promotions, coupons });
 }
