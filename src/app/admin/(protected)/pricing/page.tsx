@@ -35,6 +35,16 @@ interface DiscountLink {
 
 type Msg = { type: "ok" | "err"; text: string } | null;
 
+interface PricingOverview {
+  rules: PriceRule[];
+  promotions: SimpleDiscount[];
+  links: DiscountLink[];
+  holidaySurcharge: number;
+}
+
+let pricingOverviewCache: { data: PricingOverview; at: number } | null = null;
+const PRICING_OVERVIEW_CACHE_MS = 30_000;
+
 const HOUSE_PRODUCT_ORDER = [
   ...HOUSE_TYPES_FIXED,
   ...HOUSE_SIZES_APARTMENT.map((size) => `${size}평`),
@@ -110,31 +120,42 @@ export default function AdminPricingPage() {
   const [pickerIds, setPickerIds] = useState<number[]>([]);
   const [pickerSaving, setPickerSaving] = useState(false);
 
-  async function load() {
+  async function load(force = false) {
+    if (
+      !force &&
+      pricingOverviewCache &&
+      Date.now() - pricingOverviewCache.at < PRICING_OVERVIEW_CACHE_MS
+    ) {
+      const cached = pricingOverviewCache.data;
+      setRules(cached.rules);
+      setSurcharge(String(cached.holidaySurcharge));
+      setDiscounts(cached.promotions);
+      setLinks(cached.links);
+      setLoading(false);
+      return;
+    }
+
     setLoading(true);
     setMsg(null);
     try {
-      const [priceRes, settingsRes, discountsRes, linksRes] = await Promise.all([
-        fetch("/api/admin/price-rules", { cache: "no-store" }),
-        fetch("/api/admin/settings", { cache: "no-store" }),
-        fetch("/api/admin/discounts?kind=promotion", { cache: "no-store" }),
-        fetch("/api/admin/price-discount-links", { cache: "no-store" }),
-      ]);
-      const [priceData, settingsData, discountsData, linksData] = await Promise.all([
-        priceRes.json().catch(() => ({})),
-        settingsRes.json().catch(() => ({})),
-        discountsRes.json().catch(() => ({})),
-        linksRes.json().catch(() => ({})),
-      ]);
-      if (!priceRes.ok) throw new Error(priceData.error || "가격 정보를 불러오지 못했습니다.");
-      if (!settingsRes.ok) throw new Error(settingsData.error || "휴일 가산금 설정을 불러오지 못했습니다.");
-      if (!discountsRes.ok) throw new Error(discountsData.error || "할인 목록을 불러오지 못했습니다.");
-      if (!linksRes.ok) throw new Error(linksData.error || "할인 연결 정보를 불러오지 못했습니다.");
+      const response = await fetch("/api/admin/pricing-overview", { cache: "no-store" });
+      const data = (await response.json().catch(() => ({}))) as Partial<PricingOverview> & {
+        error?: string;
+      };
+      if (!response.ok) throw new Error(data.error || "가격 정보를 불러오지 못했습니다.");
 
-      setRules(priceData.rules ?? []);
-      setSurcharge(String(settingsData.settings?.holiday_surcharge ?? "30000"));
-      setDiscounts(discountsData.promotions ?? []);
-      setLinks(linksData.links ?? []);
+      const overview: PricingOverview = {
+        rules: data.rules ?? [],
+        promotions: data.promotions ?? [],
+        links: data.links ?? [],
+        holidaySurcharge: Number(data.holidaySurcharge ?? 30000),
+      };
+      pricingOverviewCache = { data: overview, at: Date.now() };
+
+      setRules(overview.rules);
+      setSurcharge(String(overview.holidaySurcharge));
+      setDiscounts(overview.promotions);
+      setLinks(overview.links);
     } catch (error) {
       setMsg({
         type: "err",
@@ -189,13 +210,17 @@ export default function AdminPricingPage() {
       setMsg({ type: "err", text: data.error || "할인 적용 저장에 실패했습니다." });
       return;
     }
-    setLinks((current) => [
-      ...current.filter((link) => link.price_rule_id !== pickerRule.id),
-      ...pickerIds.map((promotionId) => ({
-        price_rule_id: pickerRule.id,
-        promotion_id: promotionId,
-      })),
-    ]);
+    setLinks((current) => {
+      const next = [
+        ...current.filter((link) => link.price_rule_id !== pickerRule.id),
+        ...pickerIds.map((promotionId) => ({
+          price_rule_id: pickerRule.id,
+          promotion_id: promotionId,
+        })),
+      ];
+      pricingOverviewCache = null;
+      return next;
+    });
     setPickerRule(null);
     setMsg({ type: "ok", text: "할인 적용 항목을 저장했습니다." });
   }
@@ -223,7 +248,7 @@ export default function AdminPricingPage() {
     setSaving(null);
     if (res.ok) {
       setMsg({ type: "ok", text: "가격 설정을 저장했습니다." });
-      await load();
+      await load(true);
     } else {
       setMsg({ type: "err", text: data.error || "저장 실패" });
     }
@@ -238,7 +263,10 @@ export default function AdminPricingPage() {
       body: JSON.stringify({ holiday_surcharge: surcharge }),
     });
     setSaving(null);
-    if (res.ok) setMsg({ type: "ok", text: "휴일 가산금을 저장했습니다." });
+    if (res.ok) {
+      pricingOverviewCache = null;
+      setMsg({ type: "ok", text: "휴일 가산금을 저장했습니다." });
+    }
     else setMsg({ type: "err", text: "휴일 가산금 저장에 실패했습니다." });
   }
 

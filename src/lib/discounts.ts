@@ -6,7 +6,7 @@
  *
  * 원칙:
  *   - 자동 프로모션과 쿠폰은 중복 적용된다
- *   - 자동 프로모션이 여러 개 조건을 만족하면 **가장 큰 할인 1개**만 적용한다
+ *   - 가격 항목에 연결된 자동 할인은 관리자가 선택한 순서대로 중복 적용한다
  *   - 정률 할인은 "그 단계 진입 시점의 현재 금액"을 기준으로 계산한다
  *   - finalAmount >= 0을 보장한다
  *   - quote 발급은 쿠폰 사용횟수를 소진하지 않는다 (예약 저장 transaction에서 처리)
@@ -216,7 +216,7 @@ export interface DiscountBreakdown {
 }
 
 /**
- * 견적 단계 할인 계산 (자동 프로모션 + 쿠폰).
+ * 견적 단계 할인 계산 (가격 항목에 연결된 중복 자동 할인 + 쿠폰).
  *
  * 관리자 수동 할인은 예약 생성 이후 adjustment이므로 여기 포함하지 않는다.
  * 쿠폰 오류는 호출부가 고객에게 알릴 수 있도록 그대로 던진다.
@@ -299,3 +299,4 @@ export async function calculateDiscounts(input: {
     couponCode: coupon?.couponCode ?? null,
     finalAmount: Math.max(0, current),
   };
+}

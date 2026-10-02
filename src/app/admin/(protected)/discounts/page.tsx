@@ -21,11 +21,16 @@ interface Coupon {
   used_count?: number;
 }
 
+let promotionCache: { data: Promotion[]; at: number } | null = null;
+let couponCache: { data: Coupon[]; at: number } | null = null;
+const DISCOUNT_LIST_CACHE_MS = 30_000;
+
 export default function AdminDiscountsPage() {
   const [tab, setTab] = useState<"promotion" | "coupon">("promotion");
   const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [loading, setLoading] = useState(true);
+  const [couponsLoaded, setCouponsLoaded] = useState(false);
   const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
 
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -39,25 +44,43 @@ export default function AdminDiscountsPage() {
   const [couponActive, setCouponActive] = useState(true);
   const [couponEditingId, setCouponEditingId] = useState<number | null>(null);
 
-  async function loadPromotions() {
+  async function loadPromotions(force = false) {
+    if (
+      !force &&
+      promotionCache &&
+      Date.now() - promotionCache.at < DISCOUNT_LIST_CACHE_MS
+    ) {
+      setPromotions(promotionCache.data);
+      return;
+    }
     const res = await fetch("/api/admin/discounts?kind=promotion", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "할인 목록을 불러오지 못했습니다.");
-    setPromotions(data.promotions ?? []);
+    const next = data.promotions ?? [];
+    promotionCache = { data: next, at: Date.now() };
+    setPromotions(next);
   }
 
-  async function loadCoupons() {
+  async function loadCoupons(force = false) {
+    if (!force && couponCache && Date.now() - couponCache.at < DISCOUNT_LIST_CACHE_MS) {
+      setCoupons(couponCache.data);
+      setCouponsLoaded(true);
+      return;
+    }
     const res = await fetch("/api/admin/discounts?kind=coupon", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.error || "쿠폰 목록을 불러오지 못했습니다.");
-    setCoupons(data.coupons ?? []);
+    const next = data.coupons ?? [];
+    couponCache = { data: next, at: Date.now() };
+    setCoupons(next);
+    setCouponsLoaded(true);
   }
 
-  async function load() {
+  async function loadInitial() {
     setLoading(true);
     setMsg(null);
     try {
-      await Promise.all([loadPromotions(), loadCoupons()]);
+      await loadPromotions(true);
     } catch (error) {
       setMsg({
         type: "err",
@@ -68,8 +91,25 @@ export default function AdminDiscountsPage() {
     }
   }
 
+  async function selectTab(next: "promotion" | "coupon") {
+    setTab(next);
+    if (next !== "coupon" || couponsLoaded) return;
+    setLoading(true);
+    setMsg(null);
+    try {
+      await loadCoupons(true);
+    } catch (error) {
+      setMsg({
+        type: "err",
+        text: error instanceof Error ? error.message : "쿠폰 정보를 불러오지 못했습니다.",
+      });
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
-    void load();
+    void loadInitial();
   }, []);
 
   function resetPromotion() {
@@ -173,7 +213,7 @@ export default function AdminDiscountsPage() {
 
     setMsg({ type: "ok", text: couponEditingId ? "쿠폰을 수정했습니다." : "쿠폰을 등록했습니다." });
     resetCoupon();
-    await loadCoupons();
+    await loadCoupons(true);
   }
 
   async function removeCoupon(id: number) {
@@ -183,7 +223,7 @@ export default function AdminDiscountsPage() {
     if (!res.ok) return setMsg({ type: "err", text: data.error || "쿠폰 삭제에 실패했습니다." });
     setMsg({ type: "ok", text: "쿠폰을 삭제했습니다." });
     if (couponEditingId === id) resetCoupon();
-    await loadCoupons();
+    await loadCoupons(true);
   }
 
   return (
@@ -199,7 +239,7 @@ export default function AdminDiscountsPage() {
 
       <div className="flex gap-2">
         <button
-          onClick={() => setTab("promotion")}
+          onClick={() => void selectTab("promotion")}
           className={`rounded-full border px-4 py-2 text-xs font-medium ${
             tab === "promotion"
               ? "border-[var(--navy)] bg-[var(--navy)] text-white"
@@ -209,7 +249,7 @@ export default function AdminDiscountsPage() {
           할인 목록
         </button>
         <button
-          onClick={() => setTab("coupon")}
+          onClick={() => void selectTab("coupon")}
           className={`rounded-full border px-4 py-2 text-xs font-medium ${
             tab === "coupon"
               ? "border-[var(--navy)] bg-[var(--navy)] text-white"
