@@ -3,6 +3,7 @@ import localFont from "next/font/local";
 import "./globals.css";
 import SiteHeader from "@/components/SiteHeader";
 import SiteFooter from "@/components/SiteFooter";
+import FloatingKakaoChat from "@/components/FloatingKakaoChat";
 import { fallbackCompanySettings, SITE_SEO_FALLBACK } from "@/lib/settings";
 import { getSiteUrl } from "@/lib/site-url";
 
@@ -63,6 +64,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <SiteHeader companyName={company.brandName} kakaoUrl={company.kakaoUrl} />
         <main className="flex-1">{children}</main>
         <SiteFooter company={company} />
+        <FloatingKakaoChat href={company.kakaoUrl} />
       </body>
     </html>
   );

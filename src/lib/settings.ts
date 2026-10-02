@@ -107,6 +107,8 @@ export interface CompanySettings {
 }
 
 /** 브랜드/법인 fallback — settings에 값이 없을 때 사용 */
+export const KAKAO_CHAT_URL = "https://pf.kakao.com/_xmxgxcrX/chat";
+
 export const BRAND_FALLBACK = {
   brandName: "CLYN CLEAN CARE",
   legalCompanyName: "주식회사 플린",
@@ -149,7 +151,7 @@ export function fallbackCompanySettings(): CompanySettings {
   return {
     name: BRAND_FALLBACK.brandName,
     phone: BRAND_FALLBACK.phone,
-    kakaoUrl: "",
+    kakaoUrl: KAKAO_CHAT_URL,
     address: BRAND_FALLBACK.address,
     bizNumber: BRAND_FALLBACK.bizNumber,
     brandName: BRAND_FALLBACK.brandName,
@@ -190,7 +192,7 @@ export async function getCompanySettings(): Promise<CompanySettings> {
   return {
     name: s.company_name || BRAND_FALLBACK.brandName,
     phone: s.company_phone || BRAND_FALLBACK.phone,
-    kakaoUrl: s.company_kakao_url || "",
+    kakaoUrl: s.company_kakao_url || KAKAO_CHAT_URL,
     address: s.company_address || BRAND_FALLBACK.address,
     bizNumber: s.company_biz_number || BRAND_FALLBACK.bizNumber,
     brandName: s.brand_name || BRAND_FALLBACK.brandName,
