@@ -263,7 +263,10 @@ export async function POST(req: NextRequest) {
     }
 
     const finalTotal = discount ? discount.finalAmount : total;
-    const finalBalance = Math.max(finalTotal - deposit, 0);
+    // 이벤트/쿠폰 할인으로 총결제금액이 기존 예약 선금보다 낮아질 수 있다.
+    // 고객에게 총액을 초과하는 선금을 안내하지 않도록 실제 결제 선금은 최종금액으로 상한 처리한다.
+    const finalDeposit = Math.min(deposit, finalTotal);
+    const finalBalance = Math.max(finalTotal - finalDeposit, 0);
 
     // 6) 상품 활성 여부 — productAvailable이 false면 토큰을 발급하지 않는다
     if (quote.priceConfirmed && !quote.consultRequired && quote.productAvailable && amountsValid && quote.estimatedTotal > 0) {
@@ -289,7 +292,7 @@ export async function POST(req: NextRequest) {
           couponId: discount?.couponId ?? null,
           couponCode: discount?.couponCode ?? null,
           estimatedTotal: finalTotal,
-          depositAmount: deposit,
+          depositAmount: finalDeposit,
           estimatedBalance: finalBalance,
         }).token;
       } catch (e) {
@@ -309,7 +312,7 @@ export async function POST(req: NextRequest) {
       ? {
           ...publicQuote,
           estimatedTotal: discount.finalAmount,
-          depositAmount: deposit,
+          depositAmount: finalDeposit,
           estimatedBalance: finalBalance,
           // 표시 문자열도 같은 금액을 가리켜야 한다
           displayPriceLabel: publicQuote.isStartingPrice
@@ -330,7 +333,7 @@ export async function POST(req: NextRequest) {
             couponDiscountAmount: discount.couponDiscountAmount,
             couponCode: discount.couponCode,
             finalAmount: discount.finalAmount,
-            depositAmount: deposit,
+            depositAmount: finalDeposit,
             balanceAmount: finalBalance,
           }
         : null,
