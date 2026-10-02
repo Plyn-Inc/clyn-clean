@@ -127,9 +127,9 @@ export const BRAND_FALLBACK = {
  * (관리자 SEO 설정의 실시간 반영보다 홈페이지 가용성·응답속도를 우선)
  */
 export const SITE_SEO_FALLBACK = {
-  title: "CLYN CLEAN CARE | 입주청소 예약",
+  title: "클린클린케어 | CLYN CLEAN CARE 입주청소",
   description:
-    "예약 가능 날짜를 바로 확인하고, 캘린더 또는 바로 예약하기로 간편하게 예약하세요.",
+    "클린클린케어(CLYN CLEAN CARE) 입주·이사청소. 예약 가능 날짜 확인부터 간편 예약까지.",
 } as const;
 
 /**
