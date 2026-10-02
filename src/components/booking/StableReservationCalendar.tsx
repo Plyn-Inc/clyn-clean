@@ -30,7 +30,7 @@ interface MonthCacheEntry {
   cachedAt: number;
 }
 
-const MONTH_CACHE_MAX_AGE_MS = 60000;
+const MONTH_CACHE_MAX_AGE_MS = 120000;
 const monthCache = new Map<string, MonthCacheEntry>();
 const monthRequests = new Map<string, Promise<MonthDays>>();
 
@@ -149,8 +149,9 @@ export default function StableReservationCalendar({
       setStatusError(false);
     }
 
-    // 다음/이전 달은 사용자가 누르기 전에 백그라운드에서 준비한다.
-    prefetchNeighbors();
+    // 현재 달 데이터가 캐시에 있을 때만 이웃 달을 즉시 준비한다.
+    // 첫 진입에서 현재/이전/다음 달 DB 요청 3개가 동시에 경쟁하지 않게 한다.
+    if (cached) prefetchNeighbors();
 
     async function load(attempt: number) {
       if (!cancelled && !readCachedMonth(target)) {

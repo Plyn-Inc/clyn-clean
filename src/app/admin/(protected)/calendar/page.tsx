@@ -15,6 +15,8 @@ interface SlotView {
   bookedCount: number;
   remaining: number;
   memo: string | null;
+  blockedByAllDay?: boolean;
+  reopened?: boolean;
 }
 interface DaySlotView {
   date: string;
@@ -39,6 +41,7 @@ export default function AdminCalendarPage() {
   });
   const [days, setDays] = useState<Record<string, DaySlotView>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loadKey, setLoadKey] = useState(0);
 
   // 선택된 날짜+슬롯
@@ -67,9 +70,14 @@ export default function AdminCalendarPage() {
     }
 
     const day = days[selectedDate];
+    const sameCombinedSettings =
+      day &&
+      day.morning.status === day.afternoon.status &&
+      day.morning.capacity === day.afternoon.capacity &&
+      (day.morning.memo ?? "") === (day.afternoon.memo ?? "");
     const selectedSlot =
       targetSlot === "all_day"
-        ? day?.allDay ?? null
+        ? day?.allDay ?? (sameCombinedSettings ? day?.morning ?? null : null)
         : targetSlot === "morning"
           ? day?.morning ?? null
           : day?.afternoon ?? null;
@@ -88,18 +96,40 @@ export default function AdminCalendarPage() {
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
     const { start, end } = getMonthRangeKST(year, month);
-    fetch(`/api/admin/calendar?start=${start}&end=${end}`)
-      .then((r) => r.json())
-      .then((data: { days: DaySlotView[] }) => {
+
+    setLoading(true);
+    setLoadError(null);
+
+    fetch(`/api/admin/calendar?start=${start}&end=${end}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`admin calendar API ${r.status}`);
+        const data = (await r.json()) as { days?: DaySlotView[] };
+        if (!Array.isArray(data.days)) throw new Error("admin calendar days missing");
+        return data.days;
+      })
+      .then((list) => {
         if (cancelled) return;
         const map: Record<string, DaySlotView> = {};
-        for (const d of data.days ?? []) map[d.date] = d;
+        for (const d of list) map[d.date] = d;
         setDays(map);
+        setLoadError(null);
         setLoading(false);
       })
-      .catch(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
+      .catch((error) => {
+        if (cancelled || error instanceof DOMException && error.name === "AbortError") return;
+        setLoadError("캘린더 설정을 불러오지 못했습니다. 저장된 설정을 임의로 '예약 가능'으로 표시하지 않습니다.");
+        setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, [year, month, loadKey]);
 
   // 캘린더 셀 계산
@@ -111,10 +141,88 @@ export default function AdminCalendarPage() {
     cells.push(`${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`);
   }
 
-  function getSlot(dateStr: string, slot: "morning" | "afternoon"): SlotView {
+  function getSlot(dateStr: string, slot: "morning" | "afternoon"): SlotView | null {
     const day = days[dateStr];
-    if (!day) return { date: dateStr, timeSlot: slot, status: "available", effectiveStatus: "available", capacity: 1, bookedCount: 0, remaining: 1, memo: null };
+    if (!day) return null;
     return slot === "morning" ? day.morning : day.afternoon;
+  }
+
+  function patchSlot(
+    current: SlotView | null,
+    date: string,
+    timeSlot: "morning" | "afternoon",
+    status: CalendarStatus,
+    capacity: number,
+    nextMemo: string
+  ): SlotView {
+    const bookedCount = current?.bookedCount ?? 0;
+    const remaining = Math.max(capacity - bookedCount, 0);
+    let effectiveStatus: CalendarStatus =
+      status === "available" && remaining <= 0 ? "closed" : status;
+    if (current?.blockedByAllDay && !current?.reopened) effectiveStatus = "closed";
+
+    return {
+      date,
+      timeSlot,
+      status,
+      effectiveStatus,
+      capacity,
+      bookedCount,
+      remaining,
+      memo: nextMemo || null,
+      blockedByAllDay: current?.blockedByAllDay,
+      reopened: current?.reopened,
+    };
+  }
+
+  function patchDayAfterApply(
+    current: DaySlotView | undefined,
+    date: string,
+    slot: SlotTarget,
+    status: CalendarStatus,
+    capacity: number,
+    nextMemo: string
+  ): DaySlotView {
+    const morning = current?.morning ?? {
+      date,
+      timeSlot: "morning",
+      status: "available" as CalendarStatus,
+      effectiveStatus: "available" as CalendarStatus,
+      capacity: 1,
+      bookedCount: 0,
+      remaining: 1,
+      memo: null,
+    };
+    const afternoon = current?.afternoon ?? {
+      date,
+      timeSlot: "afternoon",
+      status: "available" as CalendarStatus,
+      effectiveStatus: "available" as CalendarStatus,
+      capacity: 1,
+      bookedCount: 0,
+      remaining: 1,
+      memo: null,
+    };
+
+    if (slot === "all_day") {
+      return {
+        date,
+        allDay: null,
+        morning: patchSlot(morning, date, "morning", status, capacity, nextMemo),
+        afternoon: patchSlot(afternoon, date, "afternoon", status, capacity, nextMemo),
+      };
+    }
+
+    return {
+      date,
+      allDay: current?.allDay ?? null,
+      morning: slot === "morning"
+        ? patchSlot(morning, date, "morning", status, capacity, nextMemo)
+        : morning,
+      afternoon: slot === "afternoon"
+        ? patchSlot(afternoon, date, "afternoon", status, capacity, nextMemo)
+        : afternoon,
+    };
   }
 
   async function applySettings() {
@@ -137,9 +245,18 @@ export default function AdminCalendarPage() {
         }),
       });
       if (res.ok) {
+        setDays((current) => ({
+          ...current,
+          [selectedDate]: patchDayAfterApply(
+            current[selectedDate],
+            selectedDate,
+            targetSlot,
+            statusChoice,
+            capacity,
+            memo
+          ),
+        }));
         setMsg({ type: "ok", text: `${selectedDate} ${targetSlot === "all_day" ? "전체" : targetSlot === "morning" ? "오전" : "오후"} 설정이 적용되었습니다.` });
-        setLoading(true);
-        setLoadKey((k) => k + 1);
       } else {
         const data = await res.json();
         setMsg({ type: "err", text: data.error || "적용 중 오류가 발생했습니다." });
@@ -170,10 +287,10 @@ export default function AdminCalendarPage() {
         {/* 캘린더 */}
         <div className="rounded-2xl border border-[var(--line)] bg-white p-5 md:p-6">
           <div className="mb-5 flex items-center justify-between">
-            <button onClick={() => { setCursor((c) => c.month === 0 ? { year: c.year - 1, month: 11 } : { year: c.year, month: c.month - 1 }); setSelectedDate(null); }}
+            <button onClick={() => { setLoading(true); setLoadError(null); setCursor((c) => c.month === 0 ? { year: c.year - 1, month: 11 } : { year: c.year, month: c.month - 1 }); setSelectedDate(null); }}
               className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--line)] hover:bg-[var(--sand-deep)]">‹</button>
             <p className="font-display text-lg font-bold">{year}년 {month + 1}월</p>
-            <button onClick={() => { setCursor((c) => c.month === 11 ? { year: c.year + 1, month: 0 } : { year: c.year, month: c.month + 1 }); setSelectedDate(null); }}
+            <button onClick={() => { setLoading(true); setLoadError(null); setCursor((c) => c.month === 11 ? { year: c.year + 1, month: 0 } : { year: c.year, month: c.month + 1 }); setSelectedDate(null); }}
               className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--line)] hover:bg-[var(--sand-deep)]">›</button>
           </div>
 
@@ -181,7 +298,20 @@ export default function AdminCalendarPage() {
             {["일","월","화","수","목","금","토"].map((w) => <div key={w} className="py-1">{w}</div>)}
           </div>
 
-          <div className={`grid grid-cols-7 gap-1 ${loading ? "opacity-40" : ""}`}>
+          {loadError && (
+            <div className="mb-3 flex items-center justify-between gap-3 rounded-xl bg-[#FBEAE5] px-4 py-3 text-xs text-[var(--rose)]" role="alert">
+              <span>{loadError}</span>
+              <button
+                type="button"
+                onClick={() => setLoadKey((k) => k + 1)}
+                className="shrink-0 rounded-full border border-current px-3 py-1.5 font-semibold"
+              >
+                다시 불러오기
+              </button>
+            </div>
+          )}
+
+          <div className={`grid grid-cols-7 gap-1 ${loading ? "opacity-70" : ""}`}>
             {cells.map((dateStr, idx) => {
               if (!dateStr) return <div key={idx} />;
               const isPast = dateStr < todayKST;
@@ -195,12 +325,24 @@ export default function AdminCalendarPage() {
                 <button key={dateStr} onClick={() => setSelectedDate(isSelected ? null : dateStr)}
                   className={`rounded-xl p-1 text-center transition ${isSelected ? "ring-2 ring-[var(--navy)] ring-offset-1" : ""} ${isPast ? "opacity-40" : "hover:bg-[var(--sand-deep)]"}`}>
                   <p className="text-xs font-bold text-[var(--ink)]">{dayNum}</p>
-                  <div className={`mt-0.5 rounded text-[9px] font-medium py-0.5 ${STATUS_BG[morningSlot.effectiveStatus]}`}>
-                    오전 {morningSlot.remaining}/{morningSlot.capacity}
-                  </div>
-                  <div className={`mt-0.5 rounded text-[9px] font-medium py-0.5 ${STATUS_BG[afternoonSlot.effectiveStatus]}`}>
-                    오후 {afternoonSlot.remaining}/{afternoonSlot.capacity}
-                  </div>
+                  {morningSlot ? (
+                    <div className={`mt-0.5 rounded text-[9px] font-medium py-0.5 ${STATUS_BG[morningSlot.effectiveStatus]}`}>
+                      오전 {morningSlot.remaining}/{morningSlot.capacity}
+                    </div>
+                  ) : (
+                    <div className="mt-0.5 rounded border border-dashed border-[var(--line)] py-0.5 text-[9px] text-[var(--ink-soft)]">
+                      오전 확인중
+                    </div>
+                  )}
+                  {afternoonSlot ? (
+                    <div className={`mt-0.5 rounded text-[9px] font-medium py-0.5 ${STATUS_BG[afternoonSlot.effectiveStatus]}`}>
+                      오후 {afternoonSlot.remaining}/{afternoonSlot.capacity}
+                    </div>
+                  ) : (
+                    <div className="mt-0.5 rounded border border-dashed border-[var(--line)] py-0.5 text-[9px] text-[var(--ink-soft)]">
+                      오후 확인중
+                    </div>
+                  )}
                   {day?.allDay && (
                     <div className={`mt-0.5 rounded text-[9px] py-0.5 ${STATUS_BG[day.allDay.effectiveStatus]}`}>전체</div>
                   )}

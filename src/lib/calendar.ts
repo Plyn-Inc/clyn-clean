@@ -1,4 +1,5 @@
 import * as calendarRepo from "@/database/repositories/calendar-repository";
+import { withTransaction } from "@/database/connection";
 import { getSetting } from "./settings";
 import { toKSTDateString } from "./utils";
 import type { CalendarStatus, TimeSlot } from "./types";
@@ -72,8 +73,11 @@ async function toSlotView(
   slotRow: calendarRepo.CalendarDayRow | undefined,
   allDayRow: calendarRepo.CalendarDayRow | undefined
 ): Promise<CalendarDayView> {
-  const capacity = slotRow?.capacity ?? await defaultCapacity();
-  const adminStatus: CalendarStatus = allDayRow?.status ?? slotRow?.status ?? "available";
+  const capacity = slotRow?.capacity ?? allDayRow?.capacity ?? await defaultCapacity();
+  const adminStatus: CalendarStatus =
+    allDayRow && allDayRow.status !== "available"
+      ? allDayRow.status
+      : slotRow?.status ?? allDayRow?.status ?? "available";
 
   // all_day 예약은 날짜 보호용이다. 관리자가 슬롯을 재개방한 경우에는
   // 그 all_day 예약 자체가 오전/오후 capacity를 소진한 것으로 계산하지 않는다.
@@ -139,16 +143,14 @@ export async function getDaySlotView(date: string): Promise<DaySlotView> {
  *   1) calendar_days 범위 조회 1회
  *   2) 활성 예약 슬롯별 집계 1회
  *   3) 기본 capacity(settings) 1회
- * 이후 메모리에서 날짜별 결과를 조립한다.
+ *   4) 재개방 override 범위 조회 1회
+ * 사이청소(all_day) 점유 여부는 활성 예약 집계 결과에서 파생해 별도 쿼리를 없앤다.
  */
 export async function getSlotCalendarRange(startDate: string, endDate: string): Promise<DaySlotView[]> {
-  const [rows, activeCounts, defaultCap, allDayBlocked, reopenOverrides] = await Promise.all([
+  const [rows, activeCounts, defaultCap, reopenOverrides] = await Promise.all([
     calendarRepo.findRange(startDate, endDate),
     calendarRepo.aggregateActiveReservationsInRange(startDate, endDate),
     defaultCapacity(),
-    // 사이청소(all_day) 예약이 점유한 날짜 — 해당 날짜의 오전·오후를 보호한다
-    calendarRepo.findAllDayBlockedDates(startDate, endDate),
-    // 관리자가 수동 재개방한 슬롯 (실제 예약 점유가 override보다 우선)
     safeFindReopenOverridesInRange(startDate, endDate),
   ]);
 
@@ -177,8 +179,11 @@ export async function getSlotCalendarRange(startDate: string, endDate: string): 
     slotRow: calendarRepo.CalendarDayRow | undefined,
     allDayRow: calendarRepo.CalendarDayRow | undefined
   ): CalendarDayView {
-    const capacity = slotRow?.capacity ?? defaultCap;
-    const adminStatus: CalendarStatus = allDayRow?.status ?? slotRow?.status ?? "available";
+    const capacity = slotRow?.capacity ?? allDayRow?.capacity ?? defaultCap;
+    const adminStatus: CalendarStatus =
+      allDayRow && allDayRow.status !== "available"
+        ? allDayRow.status
+        : slotRow?.status ?? allDayRow?.status ?? "available";
     const directBookedCount = activeCounts.get(`${date}|${timeSlot}`) ?? 0;
     const bookedCount = bookedOn(date, timeSlot);
 
@@ -186,7 +191,7 @@ export async function getSlotCalendarRange(startDate: string, endDate: string): 
     // all_day는 실제 작업시간과 별개의 날짜 보호 플래그다.
     // 관리자가 재개방한 슬롯은 all_day 예약을 capacity에서 제외하되,
     // 해당 오전/오후에 들어온 실제 예약은 그대로 capacity를 소진한다.
-    const blockedByAllDay = allDayBlocked.has(date);
+    const blockedByAllDay = (activeCounts.get(`${date}|all_day`) ?? 0) > 0;
     const override = reopenOverrides.get(`${date}|${timeSlot}`);
     const reopened = override?.is_open === 1;
     const capacityBookedCount = blockedByAllDay && reopened ? directBookedCount : bookedCount;
@@ -271,7 +276,39 @@ export async function setCalendarDay(
   memo?: string,
   timeSlot: TimeSlot = "all_day"
 ): Promise<void> {
-  await calendarRepo.upsert(date, timeSlot, status, capacity ?? await defaultCapacity(), memo);
+  const resolvedCapacity = capacity ?? await defaultCapacity();
+
+  await withTransaction(async () => {
+    // 과거 all_day 관리자 행이 있으면 오전/오후에 실체화한 뒤 제거한다.
+    // 이렇게 해야 이후 "오전만/오후만" 수정이 all_day 행에 가려져 풀린 것처럼 보이지 않는다.
+    const legacyAllDay = await calendarRepo.findOne(date, "all_day");
+    if (legacyAllDay) {
+      const slots = ["morning", "afternoon"] as const;
+      for (const slot of slots) {
+        const existing = await calendarRepo.findOne(date, slot);
+        if (!existing) {
+          await calendarRepo.upsert(
+            date,
+            slot,
+            legacyAllDay.status,
+            legacyAllDay.capacity,
+            legacyAllDay.memo ?? undefined
+          );
+        }
+      }
+      await calendarRepo.remove(date, "all_day");
+    }
+
+    // 관리자 UI의 "날짜 전체"는 별도 override 행을 남기는 기능이 아니라
+    // 오전/오후 두 슬롯에 같은 설정을 동시에 적용하는 기능으로 처리한다.
+    if (timeSlot === "all_day") {
+      await calendarRepo.upsert(date, "morning", status, resolvedCapacity, memo);
+      await calendarRepo.upsert(date, "afternoon", status, resolvedCapacity, memo);
+      return;
+    }
+
+    await calendarRepo.upsert(date, timeSlot, status, resolvedCapacity, memo);
+  });
 }
 
 export async function setCalendarRange(

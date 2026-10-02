@@ -80,7 +80,10 @@ export async function GET(req: NextRequest) {
     const afternoonState = stateOn(date, "afternoon");
 
     function buildSlot(slotRow: CalendarDayRow | undefined, state: ReturnType<typeof stateOn>) {
-      const adminStatus = allDayRow?.status ?? slotRow?.status ?? "available";
+      const adminStatus =
+        allDayRow && allDayRow.status !== "available"
+          ? allDayRow.status
+          : slotRow?.status ?? allDayRow?.status ?? "available";
       const capacity = slotRow?.capacity ?? allDayRow?.capacity ?? 1;
       const remaining = Math.max(capacity - state.activeCount, 0);
       const publicStatus = toPublicSlotStatus({
