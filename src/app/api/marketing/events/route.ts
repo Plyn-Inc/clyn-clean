@@ -18,7 +18,7 @@ const attributionSchema = z.object({
 });
 
 const bodySchema = z.object({
-  eventName: z.enum(["landing_view", "booking_started", "quote_started", "kakao_clicked"]),
+  eventName: z.enum(["landing_view", "booking_started", "quote_started", "kakao_clicked", "phone_clicked"]),
   attribution: attributionSchema,
 });
 

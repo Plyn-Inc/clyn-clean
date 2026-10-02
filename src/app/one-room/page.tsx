@@ -58,7 +58,7 @@ export default async function OneRoomPage() {
       <Suspense fallback={<div className="py-16" aria-hidden />}>
         <ReviewsPreview />
       </Suspense>
-      <MobileStickyCta kakaoUrl={company.kakaoUrl} />
+      <MobileStickyCta kakaoUrl={company.kakaoUrl} phone={company.phone} />
     </>
   );
 }

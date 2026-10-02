@@ -6,6 +6,7 @@ import { HERO_SLIDES } from "@/lib/images";
 import OneRoomOfferPrice from "@/components/OneRoomOfferPrice";
 import BookingSection from "@/components/booking/BookingSection";
 import type { OneRoomOffer } from "@/lib/offers";
+import { sendMarketingEvent } from "@/lib/marketing-attribution";
 
 /**
  * 메인 Hero.
@@ -89,7 +90,7 @@ export default function HeroBanner({ kakaoUrl, phone, offer }: { kakaoUrl: strin
                   상담 접수
                 </a>
               )}
-              {phone && <a href={`tel:${phone.replace(/[^0-9+]/g, "")}`} className="flex min-h-[48px] items-center rounded-full bg-[var(--navy)] px-5 text-sm font-semibold text-white">전화 문의</a>}
+              {phone && <a href={`tel:${phone.replace(/[^0-9+]/g, "")}`} onClick={() => void sendMarketingEvent("phone_clicked")} className="flex min-h-[48px] items-center rounded-full bg-[var(--navy)] px-5 text-sm font-semibold text-white">전화 문의</a>}
             </div>
 
             <div className="mt-5 flex gap-2" role="tablist" aria-label="대표 이미지 선택">

@@ -3,7 +3,8 @@ export type MarketingEventName =
   | "booking_started"
   | "quote_started"
   | "booking_completed"
-  | "kakao_clicked";
+  | "kakao_clicked"
+  | "phone_clicked";
 
 export interface MarketingAttribution {
   visitorId: string;

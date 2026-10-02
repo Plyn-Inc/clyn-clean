@@ -69,7 +69,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <SiteHeader companyName={company.brandName} kakaoUrl={company.kakaoUrl} />
         <main className="flex-1">{children}</main>
         <SiteFooter company={company} />
-        <FloatingKakaoChat href={company.kakaoUrl} />
+        <FloatingKakaoChat href={company.kakaoUrl} phone={company.phone} />
       </body>
     </html>
   );
