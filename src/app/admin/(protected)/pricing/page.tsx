@@ -147,6 +147,9 @@ export default function AdminPricingPage() {
   const [surcharge, setSurcharge] = useState("");
   const [tab, setTab] = useState<string>(SERVICE_TYPES[0]);
   const [loading, setLoading] = useState(true);
+  const [priceLoadError, setPriceLoadError] = useState<string | null>(null);
+  const [discountLoadError, setDiscountLoadError] = useState<string | null>(null);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const [msg, setMsg] = useState<Msg>(null);
   const [saving, setSaving] = useState<string | null>(null);
 
@@ -156,30 +159,47 @@ export default function AdminPricingPage() {
 
   async function load() {
     setLoading(true);
-    try {
-      const [priceResponse, settingsResponse, discountResponse] = await Promise.all([
-        fetch("/api/admin/price-rules", { cache: "no-store" }),
-        fetch("/api/admin/settings", { cache: "no-store" }),
-        fetch("/api/admin/discounts", { cache: "no-store" }),
-      ]);
-      if (!priceResponse.ok || !settingsResponse.ok || !discountResponse.ok) {
-        throw new Error("관리자 가격 정보를 불러오지 못했습니다.");
-      }
+    setPriceLoadError(null);
+    setDiscountLoadError(null);
+    setSettingsLoadError(null);
 
-      const [priceData, settingsData, discountData] = await Promise.all([
-        priceResponse.json(),
-        settingsResponse.json(),
-        discountResponse.json(),
-      ]);
+    const [priceResult, settingsResult, discountResult] = await Promise.allSettled([
+      fetch("/api/admin/price-rules", { cache: "no-store" }).then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `가격 API ${response.status}`);
+        return data;
+      }),
+      fetch("/api/admin/settings", { cache: "no-store" }).then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `설정 API ${response.status}`);
+        return data;
+      }),
+      fetch("/api/admin/discounts", { cache: "no-store" }).then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || `할인 API ${response.status}`);
+        return data;
+      }),
+    ]);
 
-      setRules(priceData.rules ?? []);
-      setSurcharge(String(settingsData.settings?.holiday_surcharge ?? "30000"));
-      setPromotions(discountData.promotions ?? []);
-    } catch {
-      setMsg({ type: "err", text: "가격 또는 할인 정보를 불러오지 못했습니다. 다시 시도해주세요." });
-    } finally {
-      setLoading(false);
+    if (priceResult.status === "fulfilled") {
+      setRules(priceResult.value.rules ?? []);
+    } else {
+      setPriceLoadError("가격 정보를 불러오지 못했습니다.");
     }
+
+    if (settingsResult.status === "fulfilled") {
+      setSurcharge(String(settingsResult.value.settings?.holiday_surcharge ?? "30000"));
+    } else {
+      setSettingsLoadError("휴일 가산금 설정을 불러오지 못했습니다.");
+    }
+
+    if (discountResult.status === "fulfilled") {
+      setPromotions(discountResult.value.promotions ?? []);
+    } else {
+      setDiscountLoadError("이벤트 할인 정보를 불러오지 못했습니다.");
+    }
+
+    setLoading(false);
   }
 
   useEffect(() => {
@@ -364,6 +384,25 @@ export default function AdminPricingPage() {
         </div>
       )}
 
+      {(priceLoadError || discountLoadError || settingsLoadError) && (
+        <div className="rounded-xl bg-[#FBEAE5] px-4 py-3 text-sm text-[var(--rose)]">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-1">
+              {priceLoadError && <p>{priceLoadError}</p>}
+              {discountLoadError && <p>{discountLoadError} 가격표는 계속 사용할 수 있습니다.</p>}
+              {settingsLoadError && <p>{settingsLoadError} 가격표는 계속 사용할 수 있습니다.</p>}
+            </div>
+            <button
+              type="button"
+              onClick={() => void load()}
+              className="shrink-0 rounded-full border border-current px-4 py-2 text-xs font-semibold"
+            >
+              다시 불러오기
+            </button>
+          </div>
+        </div>
+      )}
+
       <section className="rounded-2xl border border-[var(--line)] bg-white p-5">
         <p className="text-sm font-semibold">휴일 가산금</p>
         <p className="mt-1 text-xs leading-relaxed text-[var(--ink-soft)]">
@@ -374,13 +413,14 @@ export default function AdminPricingPage() {
           <input
             type="number"
             min={0}
+            disabled={Boolean(settingsLoadError)}
             value={surcharge}
             onChange={(e) => setSurcharge(e.target.value)}
             className="w-40 rounded-lg border border-[var(--line)] px-3 py-2 text-sm"
           />
           <span className="self-center text-xs text-[var(--ink-soft)]">원</span>
           <button
-            disabled={saving === "surcharge"}
+            disabled={saving === "surcharge" || Boolean(settingsLoadError)}
             onClick={saveSurcharge}
             className="rounded-lg bg-[var(--navy)] px-4 py-2 text-xs font-semibold text-white disabled:opacity-50"
           >
@@ -406,7 +446,11 @@ export default function AdminPricingPage() {
           ))}
         </div>
 
-        {tabRules.length === 0 ? (
+        {priceLoadError ? (
+          <p className="mt-5 rounded-xl border border-dashed border-[var(--line)] bg-white p-5 text-sm text-[var(--ink-soft)]">
+            가격표를 불러오지 못했습니다. 위의 다시 불러오기를 눌러주세요.
+          </p>
+        ) : tabRules.length === 0 ? (
           <p className="mt-5 text-sm text-[var(--ink-soft)]">
             {serviceLabel(tab)} 가격 항목이 없습니다.
           </p>
@@ -428,7 +472,7 @@ export default function AdminPricingPage() {
                 <PriceRow
                   key={rule.id}
                   rule={rule}
-                  promotions={promotions}
+                  promotions={discountLoadError ? [] : promotions}
                   isSaving={saving === `${rule.service_type}:${rule.product_key}`}
                   onSave={(price, deposit, active) => saveRule(rule, price, deposit, active)}
                 />
@@ -576,7 +620,7 @@ export default function AdminPricingPage() {
           </label>
 
           <button
-            disabled={eventSaving}
+            disabled={eventSaving || Boolean(discountLoadError)}
             onClick={saveEventPromotion}
             className="rounded-lg bg-[var(--navy)] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
           >
@@ -599,7 +643,11 @@ export default function AdminPricingPage() {
 
         <div className="mt-6 border-t border-[var(--line)] pt-5">
           <p className="mb-3 text-sm font-semibold">현재 적용 가능한 이벤트</p>
-          {visiblePromotions.length === 0 ? (
+          {discountLoadError ? (
+            <p className="rounded-xl border border-dashed border-[var(--line)] p-4 text-sm text-[var(--ink-soft)]">
+              이벤트 할인 정보를 불러오지 못해 현재 할인 목록을 표시할 수 없습니다.
+            </p>
+          ) : visiblePromotions.length === 0 ? (
             <p className="text-sm text-[var(--ink-soft)]">등록된 이벤트 할인이 없습니다.</p>
           ) : (
             <div className="space-y-2">
