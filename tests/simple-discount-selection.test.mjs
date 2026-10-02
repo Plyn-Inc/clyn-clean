@@ -38,3 +38,10 @@ test("고객 견적은 가격 항목에 연결된 할인들을 중복 적용한�
   assert.match(lib, /automaticDiscountAmount: automatic/);
   assert.match(lib, /promotionNames\.join\(" \+ "\)/);
 });
+
+
+test("calculateDiscounts 구현은 중복 함수 조각 없이 하나만 존재한다", () => {
+  const lib = read("src/lib/discounts.ts");
+  const count = (lib.match(/\}\): Promise<DiscountBreakdown> \{/g) ?? []).length;
+  assert.equal(count, 1);
+});
