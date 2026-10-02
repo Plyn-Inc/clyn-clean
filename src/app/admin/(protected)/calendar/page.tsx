@@ -54,6 +54,38 @@ export default function AdminCalendarPage() {
 
   const { year, month } = cursor;
 
+  // 날짜 또는 슬롯을 변경하면 오른쪽 설정 패널을 해당 대상의 저장값으로 동기화한다.
+  // 이전 날짜에서 입력한 관리자 메모/상태/건수가 다른 날짜로 따라가는 것을 방지한다.
+  useEffect(() => {
+    setMsg(null);
+
+    if (!selectedDate) {
+      setStatusChoice("available");
+      setCapacityInput("1");
+      setMemo("");
+      return;
+    }
+
+    const day = days[selectedDate];
+    const selectedSlot =
+      targetSlot === "all_day"
+        ? day?.allDay ?? null
+        : targetSlot === "morning"
+          ? day?.morning ?? null
+          : day?.afternoon ?? null;
+
+    if (!selectedSlot) {
+      setStatusChoice("available");
+      setCapacityInput("1");
+      setMemo("");
+      return;
+    }
+
+    setStatusChoice(selectedSlot.status);
+    setCapacityInput(String(selectedSlot.capacity));
+    setMemo(selectedSlot.memo ?? "");
+  }, [selectedDate, targetSlot, days]);
+
   useEffect(() => {
     let cancelled = false;
     const { start, end } = getMonthRangeKST(year, month);
