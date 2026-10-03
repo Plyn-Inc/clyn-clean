@@ -139,3 +139,10 @@ test("홈페이지 팝업은 이미지가 있으면 이미지형으로 분기하
   assert.match(popup, /자세히 보기/);
   assert.match(popup, /requestIdleCallback|setTimeout\(startLoad/);
 });
+
+
+test("Supabase secret key는 URL 정규화처럼 값을 변경하지 않는다", () => {
+  const storage = read("src/lib/notice-image-storage.ts");
+  assert.match(storage, /function requiredSecretEnv|const secret = requiredSecretEnv/);
+  assert.doesNotMatch(storage, /SUPABASE_SECRET_KEY[\s\S]{0,200}replace\(\/\\\/\+\$\//);
+});
