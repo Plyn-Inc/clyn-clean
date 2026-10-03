@@ -12,6 +12,8 @@ export interface NoticeRow {
   is_popup: number;
   publish_start_at: string | null;
   publish_end_at: string | null;
+  popup_image_url: string | null;
+  popup_link_url: string | null;
   created_by: number | null;
   created_at: string;
   updated_at: string;
@@ -96,6 +98,8 @@ export interface NoticeInput {
   isPopup: boolean;
   publishStartAt: string | null;
   publishEndAt: string | null;
+  popupImageUrl: string | null;
+  popupLinkUrl: string | null;
   createdBy?: number | null;
 }
 
@@ -103,12 +107,13 @@ export function insertNotice(input: NoticeInput): Promise<number> {
   return insertReturningId(
     `INSERT INTO notices
        (title, content, notice_type, is_published, is_pinned, is_popup,
-        publish_start_at, publish_end_at, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        publish_start_at, publish_end_at, popup_image_url, popup_link_url, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       input.title, input.content, input.noticeType,
       input.isPublished ? 1 : 0, input.isPinned ? 1 : 0, input.isPopup ? 1 : 0,
-      input.publishStartAt, input.publishEndAt, input.createdBy ?? null,
+      input.publishStartAt, input.publishEndAt,
+      input.popupImageUrl, input.popupLinkUrl, input.createdBy ?? null,
     ]
   );
 }
@@ -119,12 +124,14 @@ export function updateNotice(id: number, input: NoticeInput): Promise<void> {
        title = ?, content = ?, notice_type = ?,
        is_published = ?, is_pinned = ?, is_popup = ?,
        publish_start_at = ?, publish_end_at = ?,
+       popup_image_url = ?, popup_link_url = ?,
        updated_at = datetime('now')
      WHERE id = ?`,
     [
       input.title, input.content, input.noticeType,
       input.isPublished ? 1 : 0, input.isPinned ? 1 : 0, input.isPopup ? 1 : 0,
-      input.publishStartAt, input.publishEndAt, id,
+      input.publishStartAt, input.publishEndAt,
+      input.popupImageUrl, input.popupLinkUrl, id,
     ]
   );
 }
