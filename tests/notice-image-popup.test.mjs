@@ -135,7 +135,7 @@ test("홈페이지 팝업은 이미지가 있으면 이미지형으로 분기하
   assert.match(popup, /max-h-\[85vh\]|max-h-\[80vh\]/);
   assert.match(popup, /max-w-\[(500|520|540|550)px\]|max-w-lg/);
   assert.match(popup, /notice\.popupLinkUrl/);
-  assert.match(popup, /오늘 하루 보지 않기/);
+  assert.match(popup, /24시간 보지 않기/);
   assert.match(popup, /닫기/);
   assert.match(popup, /자세히 보기/);
   assert.match(popup, /requestIdleCallback|setTimeout\(startLoad/);
@@ -156,4 +156,15 @@ test("팝업 닫기와 24시간 보지 않기 계약을 유지한다", () => {
   assert.match(popup, /24 \* 60 \* 60 \* 1000/);
   assert.match(popup, /Date\.now\(\) \+ HIDE_DURATION_MS/);
   assert.match(popup, /Number\(stored\) > Date\.now\(\)/);
+});
+
+
+test("모바일 이미지 팝업은 화면을 과도하게 차지하지 않는다", () => {
+  const popup = read("src/components/NoticePopup.tsx");
+  assert.match(popup, /w-\[82vw\]/);
+  assert.match(popup, /max-w-\[360px\]/);
+  assert.match(popup, /max-h-\[58vh\]/);
+  assert.match(popup, /sm:w-full/);
+  assert.match(popup, /sm:max-w-\[540px\]/);
+  assert.match(popup, /sm:max-h-\[70vh\]/);
 });
