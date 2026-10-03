@@ -27,3 +27,18 @@ CREATE INDEX IF NOT EXISTS idx_notices_published
 REVOKE ALL ON public.notices FROM anon, authenticated;
 REVOKE ALL ON SEQUENCE public.notices_id_seq FROM anon, authenticated;
 ALTER TABLE public.notices ENABLE ROW LEVEL SECURITY;
+
+
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES (
+  'notice-images',
+  'notice-images',
+  true,
+  5242880,
+  ARRAY['image/png','image/jpeg','image/webp']
+)
+ON CONFLICT (id) DO UPDATE
+SET public = EXCLUDED.public,
+    file_size_limit = EXCLUDED.file_size_limit,
+    allowed_mime_types = EXCLUDED.allowed_mime_types,
+    updated_at = CURRENT_TIMESTAMP;
