@@ -1,8 +1,5 @@
 import type { NextConfig } from "next";
 
-// production 빌드 시 SITE_URL 유효성을 미리 검증합니다.
-// 모든 페이지가 force-dynamic이라 빌드 타임에 getSiteUrl()이 호출되지 않으므로,
-// next.config.ts 모듈 로드 시점에 직접 검증합니다.
 if (process.env.NODE_ENV === "production") {
   const siteUrl = process.env.SITE_URL;
   if (!siteUrl || siteUrl.trim() === "") {
@@ -10,7 +7,7 @@ if (process.env.NODE_ENV === "production") {
       "\n[moving-clean] ⛔ 운영 빌드에 SITE_URL이 설정되지 않았습니다.\n" +
       "  canonical, sitemap, robots, Open Graph URL이 모두 이 값을 기준으로 생성됩니다.\n" +
       "  .env 또는 CI/CD 환경변수에 다음을 추가하세요:\n" +
-      "  SITE_URL=https://www.your-actual-domain.co.kr\n"
+      "  SITE_URL=https://clyncleancare.kr\n"
     );
   }
   try {
@@ -22,7 +19,7 @@ if (process.env.NODE_ENV === "production") {
     throw new Error(
       "\n[moving-clean] ⛔ SITE_URL이 유효한 URL이 아닙니다.\n" +
       `  입력값: "${siteUrl}"\n` +
-      "  올바른 형식: SITE_URL=https://www.your-actual-domain.co.kr\n" +
+      "  올바른 형식: SITE_URL=https://clyncleancare.kr\n" +
       `  원인: ${e instanceof Error ? e.message : e}`
     );
   }
@@ -38,6 +35,16 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   images: { qualities: [65, 75] },
+  async redirects() {
+    return [
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "www.clyncleancare.kr" }],
+        destination: "https://clyncleancare.kr/:path*",
+        permanent: true,
+      },
+    ];
+  },
   async headers() {
     return [
       {
