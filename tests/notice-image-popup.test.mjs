@@ -95,7 +95,8 @@ test("공지 이미지 Storage helper는 서버 전용 secret만 사용한다", 
   assert.match(storage, /process\.env\.SUPABASE_SECRET_KEY/);
   assert.doesNotMatch(storage, /NEXT_PUBLIC_.*SECRET|NEXT_PUBLIC_SUPABASE_SECRET/);
   assert.match(storage, /notice-images/);
-  assert.match(storage, /NOTICE_IMAGE_BUCKET = "notice-images"/);\n  assert.match(storage, /storage\\/v1\\/object\\/\$\{NOTICE_IMAGE_BUCKET\}/);
+  assert.match(storage, /NOTICE_IMAGE_BUCKET = "notice-images"/);
+  assert.match(storage, /storage\\/v1\\/object\\/\$\{NOTICE_IMAGE_BUCKET\}/);
   assert.doesNotMatch(storage, /upsert\s*:\s*true|x-upsert[^\n]*true/i);
 });
 
