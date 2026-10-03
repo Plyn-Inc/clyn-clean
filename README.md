@@ -57,6 +57,8 @@ Supabase Dashboard → **Connect**에서 **Transaction pooler** 연결 문자열
 | `ADMIN_DEFAULT_NAME` | 관리자 표시 이름 | 선택 |
 | `JWT_SECRET` | 관리자 세션 서명 키, 32자 이상 무작위 | ✅ |
 | `SITE_URL` | canonical/sitemap/robots/OG 기준 URL | ✅ |
+| `SUPABASE_URL` | 공지/팝업 이미지 Storage API 기준 URL | ✅ 이미지 팝업 사용 시 |
+| `SUPABASE_SECRET_KEY` | 공지 이미지 서버 업로드용 Supabase secret key. `NEXT_PUBLIC_` 금지 | ✅ 이미지 팝업 사용 시 |
 
 `JWT_SECRET` 생성 예:
 
@@ -139,6 +141,8 @@ SITE_URL=https://your-domain.com
    - `ADMIN_DEFAULT_PASSWORD`
    - `ADMIN_DEFAULT_NAME`
    - `SITE_URL`
+   - `SUPABASE_URL`
+   - `SUPABASE_SECRET_KEY`
 5. 첫 배포
 6. Vercel 임시 URL에서 관리자 로그인 및 설정 입력
 7. 실제 예약 E2E 테스트
