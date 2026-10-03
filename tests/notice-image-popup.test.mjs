@@ -107,3 +107,19 @@ test("공지 이미지 업로드 API는 관리자 세션 확인 후 multipart fi
   assert.match(route, /uploadNoticeImage/);
   assert.match(route, /status:\s*413/);
 });
+
+
+test("Admin 공지 화면은 이미지 업로드 미리보기 제거 링크 저장을 지원한다", () => {
+  const page = read("src/app/admin/(protected)/notices/page.tsx");
+  assert.match(page, /popup_image_url/);
+  assert.match(page, /popup_link_url/);
+  assert.match(page, /popupImageUrl/);
+  assert.match(page, /popupLinkUrl/);
+  assert.match(page, /type=["']file["']/);
+  assert.match(page, /accept=.*image\/png.*image\/jpeg.*image\/webp/s);
+  assert.match(page, /\/api\/admin\/notices\/upload-image/);
+  assert.match(page, /<img[^>]+src=\{form\.popupImageUrl\}/s);
+  assert.match(page, /이미지 제거/);
+  assert.match(page, /이미지 클릭 링크/);
+  assert.match(page, /이미지 팝업/);
+});
