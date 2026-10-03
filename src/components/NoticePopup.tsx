@@ -8,6 +8,8 @@ interface PopupNotice {
   title: string;
   content: string;
   noticeType: "normal" | "urgent";
+  popupImageUrl: string | null;
+  popupLinkUrl: string | null;
 }
 
 /** Asia/Seoul 기준 오늘 날짜 (YYYY-MM-DD) */
@@ -17,6 +19,25 @@ function todayKST(): string {
 
 function hideKey(id: number): string {
   return `clyn_notice_hide_${id}`;
+}
+
+function PopupImage({ notice }: { notice: PopupNotice }) {
+  const image = (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={notice.popupImageUrl ?? ""}
+      alt={notice.title}
+      className="max-h-[70vh] w-full object-contain"
+    />
+  );
+
+  if (!notice.popupLinkUrl) return image;
+
+  return (
+    <a href={notice.popupLinkUrl} className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--navy)]">
+      {image}
+    </a>
+  );
 }
 
 /**
@@ -77,6 +98,40 @@ export default function NoticePopup() {
       /* 저장 실패해도 닫기는 동작해야 한다 */
     }
     setClosed(true);
+  }
+
+  if (notice.popupImageUrl) {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="notice-popup-title"
+      >
+        <div className="max-h-[85vh] w-full max-w-[540px] overflow-y-auto rounded-2xl bg-white shadow-xl">
+          <h2 id="notice-popup-title" className="sr-only">{notice.title}</h2>
+          <div className="overflow-hidden rounded-t-2xl bg-white">
+            <PopupImage notice={notice} />
+          </div>
+          <div className="flex items-center gap-2 p-4">
+            <button
+              type="button"
+              onClick={hideToday}
+              className="min-h-[44px] flex-1 rounded-full border border-[var(--line)] px-4 text-xs font-semibold text-[var(--ink-soft)]"
+            >
+              오늘 하루 보지 않기
+            </button>
+            <button
+              type="button"
+              onClick={() => setClosed(true)}
+              className="min-h-[44px] rounded-full bg-[var(--navy)] px-6 text-sm font-semibold text-white"
+            >
+              닫기
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
