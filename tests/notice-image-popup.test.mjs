@@ -64,3 +64,46 @@ test("popup 링크 정규화는 위험하거나 모호한 URL을 거부한다", 
     assert.throws(() => mod.normalizePopupLinkUrl(value), /링크|URL|주소/);
   }
 });
+
+
+test("공지 이미지 업로드 검증은 MIME과 5MB 제한을 적용한다", async () => {
+  const mod = await import("../src/lib/notice-image-storage.ts");
+  for (const type of ["image/png", "image/jpeg", "image/webp"]) {
+    assert.doesNotThrow(() => mod.validateNoticeImageMeta({ type, size: 5 * 1024 * 1024 }));
+  }
+  for (const type of ["image/gif", "text/plain", "application/octet-stream"]) {
+    assert.throws(() => mod.validateNoticeImageMeta({ type, size: 1 }), /PNG|JPG|JPEG|WebP|이미지/);
+  }
+  assert.throws(
+    () => mod.validateNoticeImageMeta({ type: "image/png", size: 5 * 1024 * 1024 + 1 }),
+    /5MB|용량/
+  );
+});
+
+test("공지 이미지 업로드는 원본 파일명을 재사용하지 않고 popup 고유 경로를 만든다", async () => {
+  const mod = await import("../src/lib/notice-image-storage.ts");
+  const a = mod.createNoticeImageObjectPath("image/png");
+  const b = mod.createNoticeImageObjectPath("image/png");
+  assert.match(a, /^popup\/[0-9a-f-]+\.png$/);
+  assert.match(b, /^popup\/[0-9a-f-]+\.png$/);
+  assert.notEqual(a, b);
+});
+
+test("공지 이미지 Storage helper는 서버 전용 secret만 사용한다", () => {
+  const storage = read("src/lib/notice-image-storage.ts");
+  assert.match(storage, /process\.env\.SUPABASE_URL/);
+  assert.match(storage, /process\.env\.SUPABASE_SECRET_KEY/);
+  assert.doesNotMatch(storage, /NEXT_PUBLIC_.*SECRET|NEXT_PUBLIC_SUPABASE_SECRET/);
+  assert.match(storage, /notice-images/);
+  assert.match(storage, /storage\/v1\/object\/notice-images/);
+  assert.doesNotMatch(storage, /upsert\s*:\s*true|x-upsert[^\n]*true/i);
+});
+
+test("공지 이미지 업로드 API는 관리자 세션 확인 후 multipart file을 처리한다", () => {
+  const route = read("src/app/api/admin/notices/upload-image/route.ts");
+  assert.match(route, /requireAdminApiSession\(\)/);
+  assert.match(route, /formData\(\)/);
+  assert.match(route, /form\.get\(["']file["']\)/);
+  assert.match(route, /uploadNoticeImage/);
+  assert.match(route, /status:\s*413/);
+});
