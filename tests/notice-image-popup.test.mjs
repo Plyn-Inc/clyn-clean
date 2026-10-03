@@ -147,3 +147,13 @@ test("Supabase secret key는 URL 정규화처럼 값을 변경하지 않는다",
   assert.match(storage, /function requiredSecretEnv|const secret = requiredSecretEnv/);
   assert.doesNotMatch(storage, /SUPABASE_SECRET_KEY[\s\S]{0,200}replace\(\/\\\/\+\$\//);
 });
+
+
+test("팝업 닫기와 24시간 보지 않기 계약을 유지한다", () => {
+  const popup = read("src/components/NoticePopup.tsx");
+  assert.match(popup, /닫기/);
+  assert.match(popup, /24시간 보지 않기/);
+  assert.match(popup, /24 \* 60 \* 60 \* 1000/);
+  assert.match(popup, /Date\.now\(\) \+ HIDE_DURATION_MS/);
+  assert.match(popup, /Number\(stored\) > Date\.now\(\)/);
+});
