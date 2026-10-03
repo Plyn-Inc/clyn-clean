@@ -27,17 +27,23 @@ export function createNoticeImageObjectPath(type: string): string {
   return `popup/${crypto.randomUUID()}.${ext}`;
 }
 
-function requiredServerEnv(name: "SUPABASE_URL" | "SUPABASE_SECRET_KEY"): string {
-  const value = process.env[name]?.trim();
-  if (!value) throw new Error(`${name} 환경변수가 설정되지 않았습니다.`);
+function requiredServerUrl(): string {
+  const value = process.env.SUPABASE_URL?.trim();
+  if (!value) throw new Error("SUPABASE_URL 환경변수가 설정되지 않았습니다.");
   return value.replace(/\/+$/, "");
+}
+
+function requiredSecretEnv(): string {
+  const value = process.env.SUPABASE_SECRET_KEY?.trim();
+  if (!value) throw new Error("SUPABASE_SECRET_KEY 환경변수가 설정되지 않았습니다.");
+  return value;
 }
 
 export async function uploadNoticeImage(file: File): Promise<{ url: string; path: string }> {
   validateNoticeImageMeta({ type: file.type, size: file.size });
 
-  const baseUrl = requiredServerEnv("SUPABASE_URL");
-  const secret = requiredServerEnv("SUPABASE_SECRET_KEY");
+  const baseUrl = requiredServerUrl();
+  const secret = requiredSecretEnv();
   const path = createNoticeImageObjectPath(file.type);
   const encodedPath = path.split("/").map(encodeURIComponent).join("/");
   const uploadUrl = `${baseUrl}/storage/v1/object/${NOTICE_IMAGE_BUCKET}/${encodedPath}`;
