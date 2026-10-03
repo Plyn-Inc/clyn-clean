@@ -15,6 +15,8 @@ export interface PublicNotice {
   content: string;
   noticeType: repo.NoticeType;
   isPinned: boolean;
+  popupImageUrl: string | null;
+  popupLinkUrl: string | null;
   publishedAt: string;
 }
 
@@ -25,8 +27,34 @@ export function toPublicNotice(row: repo.NoticeRow): PublicNotice {
     content: row.content,
     noticeType: row.notice_type,
     isPinned: row.is_pinned === 1,
+    popupImageUrl: row.popup_image_url,
+    popupLinkUrl: row.popup_link_url,
     publishedAt: row.publish_start_at ?? row.created_at,
   };
+}
+
+export function normalizePopupLinkUrl(value: string | null | undefined): string | null {
+  const v = value?.trim();
+  if (!v) return null;
+
+  if (v.startsWith("/")) {
+    if (v.startsWith("//")) {
+      throw new Error("이미지 클릭 링크 주소를 확인해주세요.");
+    }
+    return v;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(v);
+  } catch {
+    throw new Error("이미지 클릭 링크 URL 형식을 확인해주세요.");
+  }
+
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("이미지 클릭 링크는 내부 경로 또는 http/https URL만 사용할 수 있습니다.");
+  }
+  return v;
 }
 
 function nowIso(): string {
