@@ -123,3 +123,19 @@ test("Admin 공지 화면은 이미지 업로드 미리보기 제거 링크 저�
   assert.match(page, /이미지 클릭 링크/);
   assert.match(page, /이미지 팝업/);
 });
+
+
+test("홈페이지 팝업은 이미지가 있으면 이미지형으로 분기하고 기존 제어를 유지한다", () => {
+  const popup = read("src/components/NoticePopup.tsx");
+  assert.match(popup, /popupImageUrl:\s*string\s*\|\s*null/);
+  assert.match(popup, /popupLinkUrl:\s*string\s*\|\s*null/);
+  assert.match(popup, /notice\.popupImageUrl/);
+  assert.match(popup, /alt=\{notice\.title\}/);
+  assert.match(popup, /max-h-\[85vh\]|max-h-\[80vh\]/);
+  assert.match(popup, /max-w-\[(500|520|540|550)px\]|max-w-lg/);
+  assert.match(popup, /notice\.popupLinkUrl/);
+  assert.match(popup, /오늘 하루 보지 않기/);
+  assert.match(popup, /닫기/);
+  assert.match(popup, /자세히 보기/);
+  assert.match(popup, /requestIdleCallback|setTimeout\(startLoad/);
+});
