@@ -843,6 +843,10 @@ export function listReservations(filter?: {
   return reservationRepo.listReservationsWithPayment(filter);
 }
 
+export function listRecentReservations(limit = 8) {
+  return reservationRepo.listRecentReservationsWithPayment(limit);
+}
+
 export function listOverdueUnpaidReservations() {
   return reservationRepo.listOverdueUnpaidReservations();
 }
