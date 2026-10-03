@@ -127,6 +127,8 @@ export function migrate() {
       is_popup INTEGER NOT NULL DEFAULT 0,
       publish_start_at TEXT,
       publish_end_at TEXT,
+      popup_image_url TEXT,
+      popup_link_url TEXT,
       created_by INTEGER,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -426,6 +428,9 @@ function runIncrementalMigrations() {
   tryExec("ALTER TABLE notification_outbox ADD COLUMN fallback_started_at TEXT");
   tryExec("ALTER TABLE notification_outbox ADD COLUMN reconcile_attempts INTEGER NOT NULL DEFAULT 0");
   tryExec("ALTER TABLE notification_outbox ADD COLUMN next_reconcile_at TEXT");
+  // 20261003 공지/팝업 이미지
+  tryExec("ALTER TABLE notices ADD COLUMN popup_image_url TEXT");
+  tryExec("ALTER TABLE notices ADD COLUMN popup_link_url TEXT");
 }
 
 function seedDefaultSettings() {

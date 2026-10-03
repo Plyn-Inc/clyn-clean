@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminApiSession } from "@/lib/session";
-import { findNoticeById, updateNotice, deleteNotice, kstInputToIso } from "@/lib/notices";
+import { findNoticeById, updateNotice, deleteNotice, kstInputToIso, normalizePopupLinkUrl } from "@/lib/notices";
 import { z } from "zod";
 
 const noticeSchema = z.object({
@@ -12,6 +12,8 @@ const noticeSchema = z.object({
   isPopup: z.boolean().default(false),
   publishStartAt: z.string().max(40).nullish(),
   publishEndAt: z.string().max(40).nullish(),
+  popupImageUrl: z.string().trim().max(2048).nullish(),
+  popupLinkUrl: z.string().trim().max(2048).nullish(),
 });
 
 export async function GET(_req: NextRequest, ctx: { params: Promise<{ id: string }> }) {
@@ -37,6 +39,15 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     );
   }
   const d = parsed.data;
+  let popupLinkUrl: string | null;
+  try {
+    popupLinkUrl = normalizePopupLinkUrl(d.popupLinkUrl);
+  } catch (e) {
+    return NextResponse.json(
+      { error: e instanceof Error ? e.message : "이미지 클릭 링크를 확인해주세요.", code: "VALIDATION_ERROR" },
+      { status: 400 }
+    );
+  }
   await updateNotice(Number(id), {
     title: d.title,
     content: d.content,
@@ -46,6 +57,8 @@ export async function PUT(req: NextRequest, ctx: { params: Promise<{ id: string 
     isPopup: d.isPopup,
     publishStartAt: kstInputToIso(d.publishStartAt),
     publishEndAt: kstInputToIso(d.publishEndAt),
+    popupImageUrl: d.popupImageUrl?.trim() || null,
+    popupLinkUrl,
   });
   return NextResponse.json({ ok: true });
 }

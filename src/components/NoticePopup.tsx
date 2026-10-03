@@ -8,15 +8,33 @@ interface PopupNotice {
   title: string;
   content: string;
   noticeType: "normal" | "urgent";
+  popupImageUrl: string | null;
+  popupLinkUrl: string | null;
 }
 
-/** Asia/Seoul 기준 오늘 날짜 (YYYY-MM-DD) */
-function todayKST(): string {
-  return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
-}
+const HIDE_DURATION_MS = 24 * 60 * 60 * 1000;
 
 function hideKey(id: number): string {
   return `clyn_notice_hide_${id}`;
+}
+
+function PopupImage({ notice }: { notice: PopupNotice }) {
+  const image = (
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src={notice.popupImageUrl ?? ""}
+      alt={notice.title}
+      className="max-h-[58vh] w-full object-contain sm:max-h-[70vh]"
+    />
+  );
+
+  if (!notice.popupLinkUrl) return image;
+
+  return (
+    <a href={notice.popupLinkUrl} className="block focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--navy)]">
+      {image}
+    </a>
+  );
 }
 
 /**
@@ -24,7 +42,7 @@ function hideKey(id: number): string {
  *
  * - 한 번에 최대 1개만 노출한다 (서버가 우선순위로 1건만 내려준다)
  * - "닫기"는 현재 세션에서만 닫는다
- * - "오늘 하루 보지 않기"는 KST 날짜를 localStorage에 저장해 자정 이후 다시 노출한다
+ * - "24시간 보지 않기"는 KST 날짜를 localStorage에 저장해 자정 이후 다시 노출한다
  * - localStorage를 쓸 수 없는 환경에서도 페이지 오류를 내지 않는다
  */
 export default function NoticePopup() {
@@ -44,7 +62,8 @@ export default function NoticePopup() {
         if (cancelled || !data.notice) return;
 
         try {
-          if (window.localStorage.getItem(hideKey(data.notice.id)) === todayKST()) return;
+          const stored = window.localStorage.getItem(hideKey(data.notice.id));
+          if (stored && Number(stored) > Date.now()) return;
         } catch {
           /* localStorage 차단 환경 — 팝업은 정상 표시한다 */
         }
@@ -72,11 +91,48 @@ export default function NoticePopup() {
   function hideToday() {
     if (!notice) return;
     try {
-      window.localStorage.setItem(hideKey(notice.id), todayKST());
+      window.localStorage.setItem(
+        hideKey(notice.id),
+        String(Date.now() + HIDE_DURATION_MS)
+      );
     } catch {
       /* 저장 실패해도 닫기는 동작해야 한다 */
     }
     setClosed(true);
+  }
+
+  if (notice.popupImageUrl) {
+    return (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="notice-popup-title"
+      >
+        <div className="max-h-[78vh] w-[82vw] max-w-[360px] overflow-y-auto rounded-2xl bg-white shadow-xl sm:max-h-[85vh] sm:w-full sm:max-w-[540px]">
+          <h2 id="notice-popup-title" className="sr-only">{notice.title}</h2>
+          <div className="overflow-hidden rounded-t-2xl bg-white">
+            <PopupImage notice={notice} />
+          </div>
+          <div className="flex items-center gap-2 p-4">
+            <button
+              type="button"
+              onClick={hideToday}
+              className="min-h-[44px] flex-1 rounded-full border border-[var(--line)] px-4 text-xs font-semibold text-[var(--ink-soft)]"
+            >
+              24시간 보지 않기
+            </button>
+            <button
+              type="button"
+              onClick={() => setClosed(true)}
+              className="min-h-[44px] rounded-full bg-[var(--navy)] px-6 text-sm font-semibold text-white"
+            >
+              닫기
+            </button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -119,7 +175,7 @@ export default function NoticePopup() {
           onClick={hideToday}
           className="mt-3 w-full text-center text-xs text-[var(--ink-soft)] underline"
         >
-          오늘 하루 보지 않기
+          24시간 보지 않기
         </button>
       </div>
     </div>
