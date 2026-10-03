@@ -12,13 +12,19 @@ interface Notice {
   is_popup: number;
   publish_start_at: string | null;
   publish_end_at: string | null;
+  popup_image_url: string | null;
+  popup_link_url: string | null;
   created_at: string;
 }
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
 
 const EMPTY = {
   title: "", content: "", noticeType: "normal" as "normal" | "urgent",
   isPublished: false, isPinned: false, isPopup: false,
   publishStartAt: "", publishEndAt: "",
+  popupImageUrl: "", popupLinkUrl: "",
 };
 
 /** ISO(UTC) → datetime-local 입력값 (Asia/Seoul) */
@@ -36,6 +42,7 @@ export default function AdminNoticesPage() {
   const [form, setForm] = useState<typeof EMPTY & { noticeType: "normal" | "urgent" }>({ ...EMPTY });
   const [msg, setMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
 
   async function load() {
     try {
@@ -66,7 +73,39 @@ export default function AdminNoticesPage() {
       isPopup: n.is_popup === 1,
       publishStartAt: isoToKstInput(n.publish_start_at),
       publishEndAt: isoToKstInput(n.publish_end_at),
+      popupImageUrl: n.popup_image_url ?? "",
+      popupLinkUrl: n.popup_link_url ?? "",
     });
+  }
+
+  async function uploadImage(file: File) {
+    setMsg(null);
+    if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
+      setMsg({ type: "err", text: "PNG, JPG(JPEG), WebP 이미지만 업로드할 수 있습니다." });
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      setMsg({ type: "err", text: "팝업 이미지는 5MB 이하만 업로드할 수 있습니다." });
+      return;
+    }
+
+    setUploadingImage(true);
+    try {
+      const body = new FormData();
+      body.set("file", file);
+      const res = await fetch("/api/admin/notices/upload-image", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || typeof data.url !== "string") {
+        setMsg({ type: "err", text: data.error ?? "이미지 업로드에 실패했습니다." });
+        return;
+      }
+      setForm((current) => ({ ...current, popupImageUrl: data.url }));
+      setMsg({ type: "ok", text: "이미지를 업로드했습니다. 공지를 저장하면 적용됩니다." });
+    } catch {
+      setMsg({ type: "err", text: "이미지 업로드에 실패했습니다." });
+    } finally {
+      setUploadingImage(false);
+    }
   }
 
   async function save() {
@@ -80,6 +119,8 @@ export default function AdminNoticesPage() {
         ...form,
         publishStartAt: form.publishStartAt || null,
         publishEndAt: form.publishEndAt || null,
+        popupImageUrl: form.popupImageUrl || null,
+        popupLinkUrl: form.popupLinkUrl || null,
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -136,6 +177,53 @@ export default function AdminNoticesPage() {
             className="w-full rounded-lg border border-[var(--line)] px-3 py-2.5 text-sm"
           />
 
+          <div className="rounded-xl border border-[var(--line)] bg-[var(--sand)] p-4">
+            <label className="block text-sm font-semibold">팝업 이미지</label>
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              disabled={uploadingImage}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) void uploadImage(file);
+                e.currentTarget.value = "";
+              }}
+              className="mt-2 block w-full text-sm text-[var(--ink-soft)] file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-2 file:text-sm file:font-semibold"
+            />
+            <p className="mt-1 text-xs text-[var(--ink-soft)]">
+              PNG · JPG · WebP / 최대 5MB{uploadingImage ? " · 업로드 중..." : ""}
+            </p>
+
+            {form.popupImageUrl && (
+              <div className="mt-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={form.popupImageUrl}
+                  alt="팝업 이미지 미리보기"
+                  className="max-h-80 w-auto max-w-full rounded-xl border border-[var(--line)] bg-white object-contain"
+                />
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, popupImageUrl: "" })}
+                  className="mt-2 rounded-lg border border-[var(--line)] bg-white px-3 py-2 text-xs font-semibold text-[var(--rose)]"
+                >
+                  이미지 제거
+                </button>
+              </div>
+            )}
+
+            <label className="mt-4 block text-xs text-[var(--ink-soft)]">
+              이미지 클릭 링크 (선택)
+              <input
+                value={form.popupLinkUrl}
+                onChange={(e) => setForm({ ...form, popupLinkUrl: e.target.value })}
+                placeholder="/reservation 또는 https://..."
+                className="mt-1 w-full rounded-lg border border-[var(--line)] bg-white px-3 py-2.5 text-sm text-[var(--ink)]"
+              />
+            </label>
+            <p className="mt-1 text-xs text-[var(--ink-soft)]">비워두면 이미지를 눌러도 이동하지 않습니다.</p>
+          </div>
+
           <div className="flex flex-wrap items-center gap-4 text-sm">
             <label className="flex items-center gap-1.5">
               <input
@@ -179,7 +267,7 @@ export default function AdminNoticesPage() {
         </div>
 
         <div className="mt-4 flex gap-2">
-          <button disabled={saving || !form.title.trim() || !form.content.trim()} onClick={save}
+          <button disabled={saving || uploadingImage || !form.title.trim() || !form.content.trim()} onClick={save}
             className="rounded-lg bg-[var(--navy)] px-5 py-2.5 text-sm font-semibold text-white disabled:opacity-50">
             {saving ? "저장 중..." : editingId ? "수정" : "등록"}
           </button>
@@ -205,6 +293,7 @@ export default function AdminNoticesPage() {
                     {n.notice_type === "urgent" && <Tag text="긴급" tone="rose" />}
                     {n.is_pinned === 1 && <Tag text="고정" />}
                     {n.is_popup === 1 && <Tag text="팝업" tone="mint" />}
+                    {n.popup_image_url && <Tag text="이미지 팝업" tone="mint" />}
                     <Tag text={n.is_published === 1 ? "공개" : "비공개"} tone={n.is_published === 1 ? "mint" : undefined} />
                   </div>
                   <p className="mt-1.5 truncate text-sm font-medium">{n.title}</p>
