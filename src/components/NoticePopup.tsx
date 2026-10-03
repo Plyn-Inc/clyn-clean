@@ -24,7 +24,7 @@ function PopupImage({ notice }: { notice: PopupNotice }) {
     <img
       src={notice.popupImageUrl ?? ""}
       alt={notice.title}
-      className="max-h-[70vh] w-full object-contain"
+      className="max-h-[58vh] w-full object-contain sm:max-h-[70vh]"
     />
   );
 
@@ -109,7 +109,7 @@ export default function NoticePopup() {
         aria-modal="true"
         aria-labelledby="notice-popup-title"
       >
-        <div className="max-h-[85vh] w-full max-w-[540px] overflow-y-auto rounded-2xl bg-white shadow-xl">
+        <div className="max-h-[78vh] w-[82vw] max-w-[360px] overflow-y-auto rounded-2xl bg-white shadow-xl sm:max-h-[85vh] sm:w-full sm:max-w-[540px]">
           <h2 id="notice-popup-title" className="sr-only">{notice.title}</h2>
           <div className="overflow-hidden rounded-t-2xl bg-white">
             <PopupImage notice={notice} />
