@@ -1,4 +1,4 @@
-import { execute, executeReturningCount, insertReturningId, queryRow, queryRows, getDatabaseBackend } from "../connection";
+import { execute, executeReturningCount, insertReturningId, queryRow, queryRows, queryRowsRetryableRead, getDatabaseBackend } from "../connection";
 import type { Reservation, Payment, ReservationStatus, PaymentStatus, ConfirmationLog } from "@/lib/types";
 
 export interface CreateReservationRow {
@@ -277,6 +277,21 @@ export function listReservationsWithPayment(filter?: {
   }
   query += " ORDER BY r.created_at DESC";
   return queryRows<Reservation & { payment_status: PaymentStatus; amount: number; depositor_name: string | null }>(query, params);
+}
+
+export function listRecentReservationsWithPayment(limit = 8): Promise<
+  (Reservation & { payment_status: PaymentStatus; amount: number; depositor_name: string | null })[]
+> {
+  const safeLimit = Number.isInteger(limit) && limit > 0 ? Math.min(limit, 100) : 8;
+  return queryRowsRetryableRead<
+    Reservation & { payment_status: PaymentStatus; amount: number; depositor_name: string | null }
+  >(
+    `SELECT r.*, p.payment_status as payment_status, p.amount as amount, p.depositor_name as depositor_name
+       FROM reservations r
+       LEFT JOIN payments p ON p.reservation_id = r.id
+      ORDER BY r.created_at DESC LIMIT ?`,
+    [safeLimit]
+  );
 }
 
 export function listOverdueUnpaidReservations(): Promise<(Reservation & { payment_due_date: string | null })[]> {

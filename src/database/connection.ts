@@ -428,6 +428,23 @@ export async function queryRows<T>(sql: string, params: unknown[] = []): Promise
   return rows.map((row) => normalizePostgresRow(row) as T);
 }
 
+/**
+ * 읽기 전용 조회에서 일시적인 pooler/socket 오류가 발생하면 연결을 폐기하고 1회 재시도한다.
+ *
+ * 쓰기 쿼리에는 사용하지 않는다. 첫 시도의 실행 여부가 불확실한 상태에서
+ * INSERT/UPDATE를 재시도하면 중복 변경이 생길 수 있기 때문이다.
+ */
+export async function queryRowsRetryableRead<T>(sql: string, params: unknown[] = []): Promise<T[]> {
+  try {
+    return await queryRows<T>(sql, params);
+  } catch (e) {
+    if (getDatabaseBackend() !== "postgres" || !isConnectionError(e)) throw e;
+
+    await destroyClient(global.__cleaningReservationPg as PostgresClient | undefined, "read-retry");
+    return queryRows<T>(sql, params);
+  }
+}
+
 export async function queryRow<T>(sql: string, params: unknown[] = []): Promise<T | undefined> {
   const rows = await queryRows<T>(sql, params);
   return rows[0];

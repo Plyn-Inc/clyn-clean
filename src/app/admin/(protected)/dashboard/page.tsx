@@ -1,6 +1,6 @@
 export const dynamic = "force-dynamic";
 import Link from "next/link";
-import { getDashboardStats, listReservations } from "@/lib/reservations";
+import { getDashboardStats, listRecentReservations } from "@/lib/reservations";
 import { newRequestId, safeStage } from "@/lib/observability";
 import { RESERVATION_STATUS_LABEL, PAYMENT_STATUS_LABEL } from "@/lib/types";
 import type { ReservationStatus, PaymentStatus } from "@/lib/types";
@@ -24,10 +24,10 @@ export default async function AdminDashboardPage() {
   );
   const recentResult = await safeStage(
     "admin-dashboard",
-    "listReservations",
+    "listRecentReservations",
     requestId,
-    async () => (await listReservations()).slice(0, 8),
-    [] as Awaited<ReturnType<typeof listReservations>>
+    () => listRecentReservations(8),
+    [] as Awaited<ReturnType<typeof listRecentReservations>>
   );
 
   const stats = statsResult.data;
