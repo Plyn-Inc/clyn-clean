@@ -10,13 +10,11 @@
  * 목적:
  *   이 파일 한 곳에서만 SITE_URL 정책을 관리합니다.
  *   layout.tsx, robots.ts, sitemap.ts 등 호출하는 쪽은 정책을 신경 쓸 필요 없습니다.
- *
- * 실제 도메인 입력 방법:
- *   .env 또는 호스팅 환경변수:
- *   SITE_URL=https://www.your-actual-domain.co.kr
  */
 
 const DEV_FALLBACK = "http://localhost:3000";
+const CLYN_CANONICAL_ORIGIN = "https://clyncleancare.kr";
+const CLYN_HOSTS = new Set(["clyncleancare.kr", "www.clyncleancare.kr"]);
 
 function normalize(url: string): string {
   return url.trim().replace(/\/+$/, "");
@@ -31,12 +29,17 @@ function isValidHttpUrl(url: string): boolean {
   }
 }
 
+function canonicalizeKnownHost(url: string): string {
+  const parsed = new URL(url);
+  if (CLYN_HOSTS.has(parsed.hostname.toLowerCase())) {
+    return CLYN_CANONICAL_ORIGIN;
+  }
+  return normalize(url);
+}
+
 /**
  * SITE_URL 환경변수를 읽어 정규화된 origin을 반환합니다.
- * 끝에 슬래시가 없는 형태입니다. (예: "https://example.com")
- *
- * - production (빌드/런타임 모두): SITE_URL 없거나 잘못된 URL이면 에러 throw
- * - development / test: SITE_URL 없으면 http://localhost:3000 fallback 허용
+ * CLYN 운영 도메인은 www/http 값이 들어와도 단일 canonical origin으로 고정합니다.
  */
 export function getSiteUrl(): string {
   const raw = process.env.SITE_URL;
@@ -46,11 +49,9 @@ export function getSiteUrl(): string {
     if (isProduction) {
       throw new Error(
         "[moving-clean] 운영 환경에서 SITE_URL이 설정되지 않았습니다.\n" +
-        "  .env 또는 호스팅 환경변수에 SITE_URL=https://your-domain.com 을 추가하세요.\n" +
-        "  예: SITE_URL=https://www.your-actual-domain.co.kr"
+        "  .env 또는 호스팅 환경변수에 SITE_URL=https://clyncleancare.kr 을 추가하세요."
       );
     }
-    // development / test: localhost fallback 허용
     return DEV_FALLBACK;
   }
 
@@ -61,36 +62,20 @@ export function getSiteUrl(): string {
       throw new Error(
         "[moving-clean] SITE_URL이 유효한 http/https URL이 아닙니다.\n" +
         `  입력값: "${normalized}"\n` +
-        "  올바른 형식: SITE_URL=https://your-domain.com"
+        "  올바른 형식: SITE_URL=https://clyncleancare.kr"
       );
     }
-    // development: 경고 후 localhost fallback
     console.warn(
       `[moving-clean] SITE_URL 값("${normalized}")이 유효하지 않아 ${DEV_FALLBACK}으로 fallback합니다.`
     );
     return DEV_FALLBACK;
   }
 
-  return normalized;
+  return canonicalizeKnownHost(normalized);
 }
 
-/**
- * getSiteUrl()과 동일합니다. 가독성을 위한 alias입니다.
- */
 export const getSiteOrigin = getSiteUrl;
 
-/**
- * 경로를 절대 URL로 변환합니다.
- *
- * - path가 이미 http/https로 시작하면 그대로 반환합니다.
- * - 그 외에는 getSiteUrl() + path를 결합합니다.
- * - 중복 슬래시를 방지합니다.
- *
- * @example
- *   buildAbsoluteUrl("/blog")   // "https://example.com/blog"
- *   buildAbsoluteUrl("/")       // "https://example.com/"
- *   buildAbsoluteUrl("https://cdn.example.com/img.jpg")  // 그대로 반환
- */
 export function buildAbsoluteUrl(path: string): string {
   const trimmed = path.trim();
   if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
@@ -101,10 +86,6 @@ export function buildAbsoluteUrl(path: string): string {
   return `${base}${normalized}`;
 }
 
-/**
- * 이미지 URL을 절대 URL로 변환합니다.
- * 값이 없으면 null을 반환합니다.
- */
 export function toAbsoluteImageUrl(url: string | null | undefined): string | null {
   if (!url || url.trim() === "") return null;
   return buildAbsoluteUrl(url);
